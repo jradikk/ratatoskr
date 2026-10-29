@@ -124,6 +124,49 @@ func TestMutatePodFailClosed(t *testing.T) {
 		t.Fatal("forged endpoint accepted when gateway has no healthy endpoint")
 	}
 }
+func TestGeneratedNameInitFailsClosedAgentWaitsForAssignedUID(t *testing.T) {
+	for _, encryption := range []string{"none", "wireguard"} {
+		t.Run(encryption, func(t *testing.T) {
+			namespace, object := fixture()
+			gateway := object.(*v1alpha1.EgressGateway)
+			gateway.Spec.Replicas = 3
+			gateway.Spec.Encryption = encryption
+			gateway.Status.Endpoints = []v1alpha1.GatewayEndpoint{{PodIP: "10.2.3.4", UpstreamHealthy: true}, {PodIP: "10.2.3.5", UpstreamHealthy: true}}
+			pod := optedPod()
+			pod.Name = ""
+			pod.GenerateName = "client-"
+			h := setup(t, namespace, gateway)
+			response := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
+			if response.Allowed || !strings.Contains(response.Result.Message, "init driver cannot stably select") {
+				t.Fatalf("generated-name init admitted with unstable affinity: %+v", response.Result)
+			}
+			h.Driver = "agent"
+			out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+			var cfg datapath.ClientConfig
+			if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Endpoint.IsValid() || cfg.GatewayPublicKey != "" || cfg.RegistrationCACert != "" || cfg.WireGuardPort != 0 || out.Annotations[ReadyAnnotation] != "pending" {
+				t.Fatalf("agent generated-name Pod published endpoint before UID assignment: %+v", cfg)
+			}
+			if response = h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !response.Allowed {
+				t.Fatalf("agent generated-name fail-closed Pod denied: %+v", response.Result)
+			}
+		})
+	}
+}
+
+func TestGatewayIPv6EndpointDeniedAtAdmission(t *testing.T) {
+	namespace, object := fixture()
+	gateway := object.(*v1alpha1.EgressGateway)
+	gateway.Status.Endpoints = []v1alpha1.GatewayEndpoint{{PodIP: "2001:db8::4", UpstreamHealthy: true}}
+	h := setup(t, namespace, gateway)
+	response := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
+	if response.Allowed || !strings.Contains(response.Result.Message, "invalid PodIP") {
+		t.Fatalf("IPv6-only healthy gateway endpoint admitted: %+v", response.Result)
+	}
+}
+
 func TestProgrammingInitDatapathCapabilitiesAndEnv(t *testing.T) {
 	for _, tc := range []struct {
 		name, mode string

@@ -262,13 +262,21 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		}
 		cfg.Exclusions = append(cfg.Exclusions, prefix)
 	}
-	// UID is normally not assigned when Pod CREATE admission runs. Prefer an
-	// existing UID where present; otherwise namespace/name is stable for this
-	// admission request and deliberately independent of endpoint list ordering.
-	// A future Pod reusing the same name may pick the same endpoint, safely.
+	// UID is normally not assigned when Pod CREATE admission runs. An explicit
+	// name is stable across both admission passes; a generateName prefix is not:
+	// the API server can assign a different suffix after admission. The init
+	// driver has no post-CNI opportunity to replace its fixed PodIP endpoint.
 	key := string(pod.UID)
 	if key == "" {
 		if pod.Name == "" {
+			if pod.GenerateName != "" && h.driver() == "agent" {
+				// The agent will recompile with the assigned UID after scheduling;
+				// do not publish an unauthenticated placeholder endpoint/CA.
+				return cfg, nil
+			}
+			if pod.GenerateName != "" {
+				return cfg, fmt.Errorf("generateName pod has no assigned name or UID at CREATE admission; init driver cannot stably select a gateway endpoint; use a named Pod or agent driver")
+			}
 			return cfg, fmt.Errorf("pod name or UID is required for stable gateway affinity")
 		}
 		key = ns + "/" + pod.Name
