@@ -37,6 +37,24 @@ const (
 type Handler struct {
 	Client                              client.Client
 	Namespace, InitImage, ClusterDomain string
+	Driver, Datapath                    string
+}
+
+func (h *Handler) driver() string {
+	if h.Driver == "" {
+		return "init"
+	}
+	return h.Driver
+}
+
+func (h *Handler) validateModes() error {
+	if h.driver() != "init" && h.driver() != "agent" {
+		return fmt.Errorf("unsupported DRIVER %q", h.Driver)
+	}
+	if h.Datapath != "" && h.Datapath != "iproute" {
+		return fmt.Errorf("unsupported DATAPATH %q; eBPF requires M6", h.Datapath)
+	}
+	return nil
 }
 
 func denied(err error) admission.Response { return admission.Denied(err.Error()) }
@@ -52,6 +70,9 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	if name == "" {
 		return admission.Allowed("not opted in")
 	}
+	if err := h.validateModes(); err != nil {
+		return denied(err)
+	}
 	if h.InitImage == "" {
 		return denied(fmt.Errorf("INIT_IMAGE is required for opted-in pods"))
 	}
@@ -66,7 +87,7 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 		}
 	}
 	for _, v := range pod.Spec.Volumes {
-		if v.Name == configVolume || v.Name == wgTokenVolume {
+		if v.Name == configVolume || v.Name == wgTokenVolume || v.Name == agentShadowVolume {
 			return denied(fmt.Errorf("reserved volume %s already exists", v.Name))
 		}
 	}
@@ -81,6 +102,22 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 		for _, mount := range c.VolumeMounts {
 			if mount.Name == wgTokenVolume || mount.MountPath == wgTokenMount {
 				return denied(fmt.Errorf("reserved WireGuard token mount already exists"))
+			}
+		}
+	}
+	if h.driver() == "agent" {
+		for _, c := range append(append([]corev1.Container{}, pod.Spec.Containers...), pod.Spec.InitContainers...) {
+			for _, mount := range c.VolumeMounts {
+				if mount.Name == agentShadowVolume {
+					return denied(fmt.Errorf("reserved agent API-token shadow mount already exists"))
+				}
+			}
+		}
+		for _, c := range pod.Spec.EphemeralContainers {
+			for _, mount := range c.VolumeMounts {
+				if mount.Name == agentShadowVolume {
+					return denied(fmt.Errorf("reserved agent API-token shadow mount already exists"))
+				}
 			}
 		}
 	}
@@ -100,15 +137,22 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	}
 	pod.Annotations[ConfigAnnotation] = string(raw)
 	pod.Annotations[ReadyAnnotation] = "pending"
-	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}}}}})
-	privileged := false
-	pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{Privileged: &privileged, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}}}, Env: []corev1.EnvVar{
-		{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
-		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
-		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
-	}, VolumeMounts: []corev1.VolumeMount{{Name: configVolume, MountPath: "/var/run/ratatoskr", ReadOnly: true}}}}, pod.Spec.InitContainers...)
-	if cfg.Encryption == "wireguard" {
-		injectWireGuardToken(&pod)
+	if h.driver() == "agent" {
+		// The node agent programs the pod netns and installs rtk-ready last. This
+		// init only waits; it needs no API token, NET_ADMIN or config mount.
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: agentShadowVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		pod.Spec.InitContainers = append([]corev1.Container{agentWaitInit(h.InitImage)}, pod.Spec.InitContainers...)
+	} else {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}}}}})
+		privileged := false
+		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{Privileged: &privileged, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}}}, Env: []corev1.EnvVar{
+			{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+			{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		}, VolumeMounts: []corev1.VolumeMount{{Name: configVolume, MountPath: "/var/run/ratatoskr", ReadOnly: true}}}}, pod.Spec.InitContainers...)
+		if cfg.Encryption == "wireguard" {
+			injectWireGuardToken(&pod)
+		}
 	}
 	mutated, err := json.Marshal(&pod)
 	if err != nil {
@@ -368,54 +412,71 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	if h.InitImage == "" || pod.Spec.HostNetwork || len(pod.Spec.InitContainers) == 0 {
 		return fmt.Errorf("expected Ratatoskr init container is missing or unsupported")
 	}
+	if err := h.validateModes(); err != nil {
+		return err
+	}
 	init := pod.Spec.InitContainers[0]
-	if init.Name != initName || init.Image != h.InitImage || len(init.Command) != 0 ||
+	if h.driver() == "agent" {
+		if err := validateAgentWaitInit(pod, h.InitImage); err != nil {
+			return err
+		}
+	} else if init.Name != initName || init.Image != h.InitImage || len(init.Command) != 0 ||
 		len(init.Args) != 1 || init.Args[0] != "-config=/var/run/ratatoskr/client.json" {
 		return fmt.Errorf("expected Ratatoskr init image, entrypoint and config argument")
 	}
-	if init.SecurityContext == nil || init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
-		init.SecurityContext.Capabilities == nil || len(init.SecurityContext.Capabilities.Add) != 1 ||
-		init.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" || len(init.SecurityContext.Capabilities.Drop) != 0 {
-		return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
-	}
-	if len(init.VolumeMounts) < 1 || len(init.VolumeMounts) > 2 || init.VolumeMounts[0].Name != configVolume ||
-		init.VolumeMounts[0].MountPath != "/var/run/ratatoskr" || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" {
-		return fmt.Errorf("expected read-only Ratatoskr config volume mount")
-	}
-	paths := map[string]string{"POD_IP": "status.podIP", "POD_UID": "metadata.uid", "POD_NAME": "metadata.name"}
-	if len(init.Env) != len(paths) {
-		return fmt.Errorf("expected Ratatoskr Downward API identity environment")
-	}
-	for _, env := range init.Env {
-		path, ok := paths[env.Name]
-		if !ok || env.Value != "" || env.ValueFrom == nil || env.ValueFrom.FieldRef == nil ||
-			env.ValueFrom.FieldRef.FieldPath != path ||
-			(env.ValueFrom.FieldRef.APIVersion != "" && env.ValueFrom.FieldRef.APIVersion != "v1") {
+	if h.driver() == "init" {
+		if init.SecurityContext == nil || init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
+			init.SecurityContext.Capabilities == nil || len(init.SecurityContext.Capabilities.Add) != 1 ||
+			init.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" || len(init.SecurityContext.Capabilities.Drop) != 0 {
+			return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
+		}
+		if len(init.VolumeMounts) < 1 || len(init.VolumeMounts) > 2 || init.VolumeMounts[0].Name != configVolume ||
+			init.VolumeMounts[0].MountPath != "/var/run/ratatoskr" || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" {
+			return fmt.Errorf("expected read-only Ratatoskr config volume mount")
+		}
+		paths := map[string]string{"POD_IP": "status.podIP", "POD_UID": "metadata.uid", "POD_NAME": "metadata.name"}
+		if len(init.Env) != len(paths) {
 			return fmt.Errorf("expected Ratatoskr Downward API identity environment")
 		}
-		delete(paths, env.Name)
-	}
-	if len(paths) != 0 {
-		return fmt.Errorf("duplicate Ratatoskr identity environment")
-	}
-	volumeFound := false
-	for _, volume := range pod.Spec.Volumes {
-		if volume.Name != configVolume {
-			continue
+		for _, env := range init.Env {
+			path, ok := paths[env.Name]
+			if !ok || env.Value != "" || env.ValueFrom == nil || env.ValueFrom.FieldRef == nil ||
+				env.ValueFrom.FieldRef.FieldPath != path ||
+				(env.ValueFrom.FieldRef.APIVersion != "" && env.ValueFrom.FieldRef.APIVersion != "v1") {
+				return fmt.Errorf("expected Ratatoskr Downward API identity environment")
+			}
+			delete(paths, env.Name)
 		}
-		if volumeFound || volume.DownwardAPI == nil || len(volume.DownwardAPI.Items) != 1 {
-			return fmt.Errorf("expected unique Ratatoskr Downward API config volume")
+		if len(paths) != 0 {
+			return fmt.Errorf("duplicate Ratatoskr identity environment")
 		}
-		item := volume.DownwardAPI.Items[0]
-		if item.Path != "client.json" || item.FieldRef == nil ||
-			item.FieldRef.FieldPath != "metadata.annotations['"+ConfigAnnotation+"']" ||
-			(item.FieldRef.APIVersion != "" && item.FieldRef.APIVersion != "v1") {
-			return fmt.Errorf("expected Ratatoskr annotation projection")
+		volumeFound := false
+		for _, volume := range pod.Spec.Volumes {
+			if volume.Name != configVolume {
+				continue
+			}
+			if volumeFound || volume.DownwardAPI == nil || len(volume.DownwardAPI.Items) != 1 {
+				return fmt.Errorf("expected unique Ratatoskr Downward API config volume")
+			}
+			item := volume.DownwardAPI.Items[0]
+			if item.Path != "client.json" || item.FieldRef == nil ||
+				item.FieldRef.FieldPath != "metadata.annotations['"+ConfigAnnotation+"']" ||
+				(item.FieldRef.APIVersion != "" && item.FieldRef.APIVersion != "v1") {
+				return fmt.Errorf("expected Ratatoskr annotation projection")
+			}
+			volumeFound = true
 		}
-		volumeFound = true
-	}
-	if !volumeFound {
-		return fmt.Errorf("ratatoskr config volume missing")
+		if !volumeFound {
+			return fmt.Errorf("ratatoskr config volume missing")
+		}
+	} else {
+		// The agent reads the annotation from the API. It must never receive a
+		// workload-mounted config file, privileged hostPath or gateway token.
+		for _, volume := range pod.Spec.Volumes {
+			if volume.Name == configVolume || volume.Name == wgTokenVolume {
+				return fmt.Errorf("agent driver must not project Ratatoskr config or gateway token")
+			}
+		}
 	}
 	if pod.Annotations[ReadyAnnotation] != "pending" {
 		return fmt.Errorf("datapath readiness must remain pending until init succeeds")
@@ -446,17 +507,17 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	if !bytes.Equal(actualJSON, expectedJSON) {
 		return fmt.Errorf("client config differs from authorized gateway status")
 	}
-	if expected.Encryption == "wireguard" {
+	if h.driver() == "init" && expected.Encryption == "wireguard" {
 		if err := validateWireGuardToken(pod); err != nil {
 			return err
 		}
 	} else {
-		if len(init.VolumeMounts) != 1 {
+		if h.driver() == "init" && len(init.VolumeMounts) != 1 {
 			return fmt.Errorf("unencrypted init must not mount WireGuard token")
 		}
 		for _, volume := range pod.Spec.Volumes {
 			if volume.Name == wgTokenVolume {
-				return fmt.Errorf("unencrypted pod must not project WireGuard token")
+				return fmt.Errorf("agent or unencrypted pod must not project WireGuard token")
 			}
 		}
 	}
