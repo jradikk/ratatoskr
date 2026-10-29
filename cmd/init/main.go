@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 
@@ -104,14 +106,32 @@ func run(configPath string, remove bool) error {
 	}
 	return backend.ApplyClient(context.Background(), cfg)
 }
+func waitAgentExitCode(remove bool, configPath string) int {
+	if remove || configPath != "" {
+		fmt.Fprintln(os.Stderr, "wait-agent cannot program or remove datapath")
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runWaitAgent(ctx); err != nil {
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("agent datapath not ready", "error", err)
+		return 1
+	}
+	return 0
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", "", "non-secret client datapath JSON config")
 	remove := flag.Bool("remove", false, "explicitly remove steering for this pod")
+	waitAgent := flag.Bool("wait-agent", false, "block unprivileged until node agent programs this Pod")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("ratatoskr-init", version.String())
 		return
+	}
+	if *waitAgent {
+		os.Exit(waitAgentExitCode(*remove, *configPath))
 	}
 	if err := run(*configPath, *remove); err != nil {
 		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("client datapath programming failed", "error", err)
