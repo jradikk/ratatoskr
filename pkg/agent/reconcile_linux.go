@@ -16,7 +16,6 @@ import (
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
-	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
@@ -63,7 +62,10 @@ func markerReady(marker netlink.Link) bool {
 // Program constructs its backend only after entering the selected sandbox netns.
 // The dummy marker is created LAST. Failure removes the marker and preserves the
 // backend's unreachable fallback; callers must never publish ready on failure.
-func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, gatewayMTU int, previous string, remove bool) error {
+func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, gatewayMTU int, previous string, remove bool, factory BackendFactory, mode string) error {
+	if cfg == nil || factory == nil {
+		return errors.New("client config and backend factory are required")
+	}
 	return InNamespace(target, func() error {
 		if !remove {
 			// Re-read the carrier immediately before ApplyClient; changing it
@@ -77,7 +79,7 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 				return errors.New("workload eth0 MTU changed during programming; retry")
 			}
 		}
-		backend, err := iproute.New()
+		backend, err := factory()
 		if err != nil {
 			return err
 		}
@@ -100,7 +102,7 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 			}
 			return netlink.LinkDel(marker)
 		}
-		if marker != nil && previous == Hash(*cfg) {
+		if marker != nil && previous == HashForMode(*cfg, mode) {
 			if _, ok := marker.(*netlink.Dummy); !ok {
 				return errors.New("readiness marker is not a dummy link")
 			}
@@ -147,6 +149,8 @@ type Reconciler struct {
 	CRI                     cri.RuntimeServiceClient
 	Tokens                  TokenIssuer
 	Node, OperatorNamespace string
+	Datapath                string
+	EBPFBackend             BackendFactory
 	Log                     *slog.Logger
 	Ready                   *atomic.Bool
 }
@@ -160,9 +164,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	if !selected && existing == "" {
 		return nil
 	}
+	mode := backendMode(r.Datapath)
+	factory, err := resolveBackend(mode, r.EBPFBackend)
+	if err != nil {
+		return err
+	}
 	var cfg datapath.ClientConfig
-	var err error
 	removing := !selected
+	if !removing && existing != "" && pod.Annotations[BackendAnnotation] != "" && backendMode(pod.Annotations[BackendAnnotation]) != mode {
+		return errors.New("datapath backend transition requires explicit cleanup")
+	}
+	if removing {
+		mode = backendMode(pod.Annotations[BackendAnnotation])
+		factory, err = resolveBackend(mode, r.EBPFBackend)
+		if err != nil {
+			return err
+		}
+	}
 	if selected {
 		var ns corev1.Namespace
 		if err = r.Client.Get(ctx, types.NamespacedName{Name: pod.Namespace}, &ns); err != nil {
@@ -197,13 +215,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	} else {
 		// A previously persisted non-secret config permits removing ONLY owned
 		// rules in the same still-live sandbox, never guessed resources.
-		if err = json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &cfg); err != nil || Hash(cfg) != existing || cfg.Identity.UID != string(pod.UID) || cfg.Identity.Namespace != pod.Namespace || cfg.Identity.Pod != pod.Name || cfg.PodIP.String() != pod.Status.PodIP {
+		if err = json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &cfg); err != nil || HashForMode(cfg, mode) != existing || cfg.Identity.UID != string(pod.UID) || cfg.Identity.Namespace != pod.Namespace || cfg.Identity.Pod != pod.Name || cfg.PodIP.String() != pod.Status.PodIP {
 			return errors.New("safe cleanup requires intact owned config and sandbox identity")
 		}
 	}
 	if !removing && existing != "" {
 		var old datapath.ClientConfig
-		if json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &old) != nil || Hash(old) != existing || old.Identity.UID != string(pod.UID) || old.Encryption != cfg.Encryption {
+		if json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &old) != nil || HashForMode(old, backendMode(pod.Annotations[BackendAnnotation])) != existing || backendMode(pod.Annotations[BackendAnnotation]) != mode || old.Identity.UID != string(pod.UID) || old.Encryption != cfg.Encryption {
 			return errors.New("unsafe existing agent config or encryption transition")
 		}
 	}
@@ -218,7 +236,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return err
 		}
 	}
-	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && existing != Hash(cfg) {
+	if !removing && cfg.Encryption == "wireguard" && mode == "ebpf" {
+		// Explicitly refuse eBPF WireGuard before issuing a token or opening
+		// any registration socket unless backend advertises WG management.
+		if err = InNamespace(target, func() error { return checkWireGuardSupport(factory) }); err != nil {
+			return err
+		}
+	}
+	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && existing != HashForMode(cfg, mode) {
 		if r.Tokens == nil {
 			return errors.New("TokenRequest client unavailable")
 		}
@@ -230,7 +255,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		}
 		var publicKey string
 		if err = InNamespace(target, func() error {
-			backend, e := iproute.New()
+			backend, e := factory()
 			if e != nil {
 				return e
 			}
@@ -246,7 +271,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			if e = backend.ApplyClient(ctx, closed); e != nil {
 				return e
 			}
-			publicKey, e = backend.PrepareClientWireGuard(ctx, cfg)
+			wg, ok := backend.(datapath.WireGuardManager)
+			if !ok {
+				return errors.New("backend lacks WireGuardManager; refusing registration")
+			}
+			publicKey, e = wg.PrepareClientWireGuard(ctx, cfg)
 			return e
 		}); err != nil {
 			return err
@@ -257,24 +286,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return fmt.Errorf("authenticate gateway peer: %w", err)
 		}
 	}
-	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing); err != nil {
+	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
 		return err
 	}
 	if removing {
 		original := pod.DeepCopy()
 		pod.Annotations = copyAnnotations(pod.Annotations)
 		delete(pod.Annotations, HashAnnotation)
+		delete(pod.Annotations, BackendAnnotation)
 		delete(pod.Annotations, ConfigAnnotation)
 		delete(pod.Annotations, ReadyAnnotation)
 		return r.Client.Patch(ctx, pod, client.MergeFrom(original))
 	}
-	hash := Hash(cfg)
+	hash := HashForMode(cfg, mode)
 	if existing == hash && pod.Annotations[ReadyAnnotation] == "true" {
 		return nil
 	}
 	original := pod.DeepCopy()
 	pod.Annotations = copyAnnotations(pod.Annotations)
 	pod.Annotations[HashAnnotation] = hash
+	pod.Annotations[BackendAnnotation] = mode
 	raw, _ := json.Marshal(cfg)
 	pod.Annotations[ConfigAnnotation] = string(raw)
 	pod.Annotations[ReadyAnnotation] = "true"

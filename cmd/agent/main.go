@@ -68,7 +68,7 @@ func run(ctx context.Context) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ready := &atomic.Bool{}
-	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Log: logger}
+	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), Log: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

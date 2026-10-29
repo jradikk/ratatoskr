@@ -22,6 +22,7 @@ const Prefix = "ratatoskr.skaldhall.io/"
 const GatewayLabel = Prefix + "gateway"
 const GatewayNamespace = Prefix + "gateway-namespace"
 const HashAnnotation = Prefix + "agent-hash"
+const BackendAnnotation = Prefix + "agent-backend"
 const ConfigAnnotation = Prefix + "agent-config"
 const ReadyAnnotation = Prefix + "datapath-ready"
 const Marker = "rtk-ready"
@@ -114,5 +115,15 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 func Hash(c datapath.ClientConfig) string {
 	raw, _ := json.Marshal(c)
 	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// HashForMode binds the authorized config to the selected backend. iproute
+// keeps the M5 digest so existing healthy routes remain adoptable.
+func HashForMode(c datapath.ClientConfig, mode string) string {
+	if backendMode(mode) == "iproute" {
+		return Hash(c)
+	}
+	sum := sha256.Sum256([]byte(backendMode(mode) + ":" + Hash(c)))
 	return hex.EncodeToString(sum[:])
 }
