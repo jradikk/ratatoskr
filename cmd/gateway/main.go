@@ -27,11 +27,16 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	gatewaydns "github.com/skaldhall/ratatoskr/pkg/dns"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 
 	mdns "github.com/miekg/dns"
 )
+
+// gatewayMetricsAddr is private to the gateway pod's network namespace.
+// A future Service/scraper must explicitly review authentication and policy.
+const gatewayMetricsAddr = "127.0.0.1:9902"
 
 // A private loopback endpoint in the shared pod network namespace is the only
 // source of truth for VPN health and exit IP. The gateway publishes only cached
@@ -307,14 +312,38 @@ func run(ctx context.Context, configPath string) error {
 		}{s.exitIP, s.ready, s.podMTU, s.geneveMTU, s.wireguardMTU, s.upstreamMTU, s.effectiveMTU, s.mss})
 	})
 	server.Handler = mux
+	// The health API remains on the pod network for probes/controller. Metrics
+	// are deliberately bound to loopback only; do not add a public Service or
+	// NetworkPolicy ingress without an explicit scrape-authentication design.
+	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: observability.GatewayHandler(func() bool { return current.Load().(state).ready }), ReadHeaderTimeout: 3 * time.Second}
+	metricsListener, err := net.Listen("tcp4", metrics.Addr)
+	if err != nil {
+		return fmt.Errorf("listen private gateway metrics: %w", err)
+	}
+	serverErrors := make(chan error, 2)
+	go func() {
+		if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			select {
+			case serverErrors <- fmt.Errorf("private gateway metrics: %w", err):
+			default:
+			}
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = metrics.Shutdown(shutdownCtx)
+	}()
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen gateway health API: %w", err)
 	}
-	serverErrors := make(chan error, 1)
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- err
+			select {
+			case serverErrors <- fmt.Errorf("gateway health API: %w", err):
+			default:
+			}
 		}
 	}()
 	defer func() {
