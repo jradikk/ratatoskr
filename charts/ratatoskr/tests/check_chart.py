@@ -65,8 +65,9 @@ def check(docs):
         assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
         assert container["ports"][-1]["containerPort"] == 8081
     webhook = docs["Deployment", "ratatoskr-webhook"]["spec"]["template"]["spec"]
-    assert webhook["initContainers"][0]["args"] == ["--bootstrap-tls"]
-    assert webhook["containers"][0]["args"] == ["--tls-dir=/tls"]
+    assert webhook["initContainers"][0]["args"] == ["--bootstrap-tls", "--tls-dir=/tls/identity"]
+    assert webhook["containers"][0]["args"] == ["--tls-dir=/tls/identity"]
+    assert webhook["securityContext"]["fsGroup"] == 65532
     assert webhook["initContainers"][0]["image"] == webhook["containers"][0]["image"]
     assert webhook["volumes"] == [{"name": "tls", "emptyDir": {"medium": "Memory"}}]
     env = {x["name"]: x for x in webhook["initContainers"][0]["env"]}
@@ -93,10 +94,12 @@ def check(docs):
     assert ctrl_env["DATAPATH"]["value"] == "iproute"
     for spec in (webhook["containers"][0], webhook["initContainers"][0]):
         env = {e["name"]: e for e in spec["env"]}
-        assert env["OPERATOR_NAMESPACE"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
+        assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
     mutating = docs["MutatingWebhookConfiguration", "ratatoskr-pods"]["webhooks"]
     validating = docs["ValidatingWebhookConfiguration", "ratatoskr-validation"]["webhooks"]
     assert len(mutating) == 1 and len(validating) == 3
+    assert mutating[0]["clientConfig"]["service"]["path"] == "/mutate-v1alpha1-pod"
+    assert all(h["clientConfig"]["service"]["path"] == "/validate-v1alpha1" for h in validating)
     for hook in mutating + validating:
         assert hook["failurePolicy"] == "Fail"
         assert hook["clientConfig"]["service"]["name"] == "ratatoskr-webhook"
@@ -131,7 +134,7 @@ def check(docs):
         ("validatingwebhookconfigurations", "ratatoskr-validation"),
     ):
         r = rule(webhook_role, resource)
-        assert r["resourceNames"] == [name] and r["verbs"] == ["get", "patch"]
+        assert r["resourceNames"] == [name] and r["verbs"] == ["get", "update", "patch"]
     tls_role = docs["Role", "ratatoskr-webhook-tls"]
     assert tls_role["metadata"]["namespace"] == NAMESPACE
     tls_rules = [r for r in tls_role["rules"] if "secrets" in r["resources"]]

@@ -9,12 +9,46 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
+
+	"github.com/vishvananda/netlink"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
+	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 )
+
+// completeConfig resolves values unavailable until CNI setup. The admission
+// annotation intentionally omits the pod IP and MTU; the Downward API and eth0
+// are authoritative after the init container enters the pod netns.
+func completeConfig(cfg *datapath.ClientConfig, podIP string, podMTU int) error {
+	if !cfg.PodIP.IsValid() {
+		addr, err := netip.ParseAddr(podIP)
+		if err != nil {
+			return errors.New("POD_IP is required for injected datapath config")
+		}
+		cfg.PodIP = addr
+	}
+	if cfg.MTU == 0 {
+		result, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: mtu.EncryptionNone})
+		if err != nil {
+			return fmt.Errorf("compute client MTU: %w", err)
+		}
+		cfg.MTU = result.GeneveMTU
+	}
+	if cfg.Identity.UID == "" {
+		cfg.Identity.UID = os.Getenv("POD_UID")
+	}
+	if cfg.Identity.Pod == "" {
+		cfg.Identity.Pod = os.Getenv("POD_NAME")
+	}
+	if cfg.Identity.Namespace == "" {
+		cfg.Identity.Namespace = os.Getenv("POD_NAMESPACE")
+	}
+	return cfg.Validate()
+}
 
 func run(configPath string, remove bool) error {
 	if configPath == "" {
@@ -31,7 +65,15 @@ func run(configPath string, remove bool) error {
 	if err := d.Decode(&cfg); err != nil {
 		return fmt.Errorf("decode datapath config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
+	podMTU := 0
+	if cfg.MTU == 0 {
+		link, linkErr := netlink.LinkByName("eth0")
+		if linkErr != nil {
+			return fmt.Errorf("look up pod eth0 MTU: %w", linkErr)
+		}
+		podMTU = link.Attrs().MTU
+	}
+	if err := completeConfig(&cfg, os.Getenv("POD_IP"), podMTU); err != nil {
 		return err
 	}
 	backend, err := iproute.New()

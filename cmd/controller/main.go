@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -35,7 +36,7 @@ func main() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(api.AddToScheme(scheme))
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: server.Options{BindAddress: "0"}, LeaderElection: *leader, LeaderElectionID: "ratatoskr-controller.skaldhall.io"})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: server.Options{BindAddress: "0"}, LeaderElection: *leader, LeaderElectionID: "ratatoskr-controller.skaldhall.io", Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Secret{}}}}})
 	if err == nil {
 		r := &controller.GatewayReconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: mgr.GetEventRecorder("egressgateway-controller"), Options: controller.OptionsFromEnv()}
 		err = r.SetupWithManager(mgr)

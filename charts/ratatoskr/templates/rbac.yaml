@@ -26,8 +26,10 @@ rules:
   - apiGroups: [""]
     resources: [services, configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
-  # This grants get (not list/watch) to all Secret names: RBAC cannot limit a
-  # metadata-only GET. Controller must use PartialObjectMetadata, not .data.
+  # Dynamic upstream Secret names cannot be restricted with resourceNames here.
+  # The controller uses uncached, direct GET only to check required keys; it
+  # never lists/watches Secrets or logs their bytes. Upstream bytes are mounted
+  # only into the upstream container, not into the controller Pod.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
@@ -68,11 +70,11 @@ rules:
   - apiGroups: [admissionregistration.k8s.io]
     resources: [mutatingwebhookconfigurations]
     resourceNames: [ratatoskr-pods]
-    verbs: [get, patch]
+    verbs: [get, update, patch]
   - apiGroups: [admissionregistration.k8s.io]
     resources: [validatingwebhookconfigurations]
     resourceNames: [ratatoskr-validation]
-    verbs: [get, patch]
+    verbs: [get, update, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -41,9 +41,7 @@ spec:
               containerPort: 8081
           env:
             - name: OPERATOR_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+              value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
             - name: DRIVER
               value: {{ .Values.driver | quote }}
             - name: DATAPATH
@@ -112,11 +110,16 @@ spec:
         {{- include "ratatoskr.selectorLabels" (list . "webhook") | nindent 8 }}
     spec:
       serviceAccountName: ratatoskr-webhook
+      securityContext:
+        # Both bootstrap and serving images run as distroless nonroot (UID 65532).
+        # Kubelet makes the emptyDir group-writable; bootstrap creates a
+        # private 0700 child directory owned by UID 65532 for TLS material.
+        fsGroup: 65532
       initContainers:
         - name: bootstrap-tls
           image: {{ include "ratatoskr.image" (list . "webhook") | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--bootstrap-tls"]
+          args: ["--bootstrap-tls", "--tls-dir=/tls/identity"]
           env:
             - name: SERVICE_NAME
               value: ratatoskr-webhook
@@ -125,9 +128,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: OPERATOR_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+              value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
             - name: CLUSTER_DOMAIN
               value: {{ .Values.clusterDomain | quote }}
             - name: TLS_SECRET_NAME
@@ -147,7 +148,7 @@ spec:
         - name: webhook
           image: {{ include "ratatoskr.image" (list . "webhook") | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--tls-dir=/tls"]
+          args: ["--tls-dir=/tls/identity"]
           ports:
             - name: https
               containerPort: 9443
@@ -161,9 +162,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: OPERATOR_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+              value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
             - name: CLUSTER_DOMAIN
               value: {{ .Values.clusterDomain | quote }}
             - name: TLS_SECRET_NAME

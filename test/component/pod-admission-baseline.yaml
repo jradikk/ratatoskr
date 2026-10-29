@@ -1,0 +1,19 @@
+# Server-side dry-run only. An unlabeled pod remains unaffected by admission.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ratatoskr-admission-baseline-check
+  namespace: ratatoskr-system
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: placeholder
+      image: example.invalid/ratatoskr-noop:v1
+      imagePullPolicy: Never
+      command:
+        - /bin/true
+      resources:
+        requests:
+          cpu: 1m
+          memory: 4Mi

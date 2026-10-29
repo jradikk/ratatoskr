@@ -32,7 +32,7 @@ func fixture(t *testing.T) (*GatewayReconciler, *api.EgressGateway) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps", Labels: map[string]string{"team": "red"}}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "vpn", Namespace: "operator"}, Data: map[string][]byte{"client.ovpn": []byte("client\n")}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(gw, &corev1.Pod{}).WithObjects(gw, ns, secret).Build()
-	return &GatewayReconciler{Client: c, Scheme: scheme, Options: Options{OperatorNamespace: "operator", GatewayImage: "gateway:local", OpenVPNImage: "openvpn:local", Datapath: "iproute"}}, gw
+	return &GatewayReconciler{Client: c, Scheme: scheme, Options: Options{OperatorNamespace: "operator", GatewayImage: "gateway:local", OpenVPNImage: "openvpn:local", Datapath: "iproute", ServiceCIDRs: "10.43.0.0/16", PodCIDRs: "10.42.0.0/16"}}, gw
 }
 func TestRenderSecurityAndPodIPContract(t *testing.T) {
 	r, gw := fixture(t)
@@ -72,6 +72,21 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatal("capability or secret isolation incorrect")
 	}
 }
+func TestNoNamespaceSelectorDeniesEveryPod(t *testing.T) {
+	r, gw := fixture(t)
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "selected", Namespace: "apps", Labels: map[string]string{GatewayLabel: "edge"}}, Status: corev1.PodStatus{Phase: corev1.PodPending, PodIP: "10.3.2.4"}}
+	if err := r.Create(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	ips, err := r.selected(context.Background(), gw)
+	if err != nil || len(ips) != 0 {
+		t.Fatalf("nil allowedNamespaces selector must deny all: %v %v", ips, err)
+	}
+}
+
 func TestSelectionPendingNamespaceAndLabels(t *testing.T) {
 	r, gw := fixture(t)
 	gw.Spec.AllowedNamespaces.NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "red"}}
@@ -144,6 +159,32 @@ func TestReconcileAllocationAndUnsupported(t *testing.T) {
 		t.Fatal("deployment left running in unsupported mode")
 	}
 }
+func TestMissingClusterCIDRsFailsClosed(t *testing.T) {
+	r, gw := fixture(t)
+	r.Options.ServiceCIDRs = ""
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "operator", Name: "edge"}}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	} // allocate VNI
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, req.NamespacedName, gw); err != nil {
+		t.Fatal(err)
+	}
+	if meta.IsStatusConditionTrue(gw.Status.Conditions, "Ready") || gw.Status.Phase != "Pending" {
+		t.Fatalf("gateway incorrectly ready with unknown ServiceCIDR: %+v", gw.Status)
+	}
+	if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MissingClusterCIDR") {
+		t.Fatalf("missing failure condition: %+v", gw.Status.Conditions)
+	}
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, req.NamespacedName, &dep); err == nil {
+		t.Fatal("forwarding deployment created with unknown cluster CIDRs")
+	}
+}
+
 func TestGatewayIDCollision(t *testing.T) {
 	r, gw := fixture(t)
 	other := gw.DeepCopy()
@@ -164,6 +205,10 @@ func TestGatewayPodIPChangeRequiresClientRestart(t *testing.T) {
 	r, gw := fixture(t)
 	ctx := context.Background()
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "operator", Name: "edge"}}
+	gw.Spec.AllowedNamespaces.NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "red"}}
+	if err := r.Update(ctx, gw); err != nil {
+		t.Fatal(err)
+	}
 	gw.Status.GatewayID = 77
 	gw.Status.Endpoints = []api.GatewayEndpoint{{PodName: "old", PodIP: "10.2.0.3"}}
 	if err := r.Status().Update(ctx, gw); err != nil {

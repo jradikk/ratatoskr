@@ -20,7 +20,7 @@ webhooks:
       service:
         name: ratatoskr-webhook
         namespace: {{ .Release.Namespace }}
-        path: /mutate-v1-pod
+        path: /mutate-v1alpha1-pod
         port: 443
     rules:
       - operations: [CREATE]
@@ -50,7 +50,7 @@ webhooks:
       service:
         name: ratatoskr-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-v1-pod
+        path: /validate-v1alpha1
         port: 443
     rules:
       - operations: [CREATE, UPDATE]
@@ -68,7 +68,7 @@ webhooks:
       service:
         name: ratatoskr-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-v1alpha1-egressgateway
+        path: /validate-v1alpha1
         port: 443
     rules:
       - operations: [CREATE, UPDATE]
@@ -86,7 +86,7 @@ webhooks:
       service:
         name: ratatoskr-webhook
         namespace: {{ .Release.Namespace }}
-        path: /validate-v1alpha1-egresspolicy
+        path: /validate-v1alpha1
         port: 443
     rules:
       - operations: [CREATE, UPDATE]

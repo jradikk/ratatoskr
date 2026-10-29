@@ -100,17 +100,19 @@ func (r *GatewayReconciler) allocateID(ctx context.Context, gw *api.EgressGatewa
 }
 
 func (r *GatewayReconciler) selected(ctx context.Context, gw *api.EgressGateway) ([]netip.Addr, error) {
+	// Admission denies every namespace when no selector is configured. The
+	// forwarding allowlist must use the same default-deny decision; selecting
+	// everything here would bypass the gateway's anti-spoof identity boundary.
+	if gw.Spec.AllowedNamespaces.NamespaceSelector == nil {
+		return nil, nil
+	}
 	var namespaces corev1.NamespaceList
 	if err := r.List(ctx, &namespaces); err != nil {
 		return nil, err
 	}
-	selector := labels.Everything()
-	if gw.Spec.AllowedNamespaces.NamespaceSelector != nil {
-		var err error
-		selector, err = metav1.LabelSelectorAsSelector(gw.Spec.AllowedNamespaces.NamespaceSelector)
-		if err != nil {
-			return nil, err
-		}
+	selector, err := metav1.LabelSelectorAsSelector(gw.Spec.AllowedNamespaces.NamespaceSelector)
+	if err != nil {
+		return nil, err
 	}
 	seen := map[netip.Addr]bool{}
 	var ips []netip.Addr
@@ -292,6 +294,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	if len(secret.Data["client.ovpn"]) == 0 {
 		return r.block(ctx, &gw, "SecretInvalid", fmt.Errorf("upstream Secret missing client.ovpn"))
+	}
+	// Until M3 implements ServiceCIDR/PodCIDR API discovery, never render a
+	// client config whose cluster exclusions are unknown. An omitted cluster
+	// CIDR could steer Kubernetes API/Service traffic into the upstream.
+	if strings.TrimSpace(r.Options.ServiceCIDRs) == "" || strings.TrimSpace(r.Options.PodCIDRs) == "" {
+		return r.block(ctx, &gw, "MissingClusterCIDR", fmt.Errorf("configure exclusions.serviceCIDRs and exclusions.podCIDRs until automatic discovery is available"))
 	}
 	ips, err := r.selected(ctx, &gw)
 	if err != nil {

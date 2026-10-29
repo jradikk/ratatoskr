@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"reflect"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -79,28 +80,51 @@ func probe(client *http.Client) (state, error) {
 	s.upstreamMTU = link.Attrs().MTU
 	return s, nil
 }
-func run(ctx context.Context, configPath string) error {
-	if configPath == "" {
-		return errors.New("-config is required")
-	}
-	f, err := os.Open(configPath) // #nosec G304 -- explicit administrator-supplied datapath configuration, not a request path.
+
+// readGatewayConfig loads non-secret ConfigMap data afresh so selected pod
+// changes take effect without restarting the gateway pod. ConfigMap projection
+// is atomic; a malformed replacement must make the gateway fail closed.
+func readGatewayConfig(configPath string) (datapath.GatewayConfig, error) {
+	var cfg datapath.GatewayConfig
+	f, err := os.Open(configPath) // #nosec G304 -- explicit operator-owned ConfigMap mount, not an HTTP request path.
 	if err != nil {
-		return fmt.Errorf("open gateway config: %w", err)
+		return cfg, fmt.Errorf("open gateway config: %w", err)
 	}
 	defer f.Close()
-	var cfg datapath.GatewayConfig
+	stat, err := f.Stat()
+	if err != nil {
+		return cfg, err
+	}
+	if stat.Size() > 1<<20 {
+		return cfg, errors.New("gateway config exceeds 1 MiB")
+	}
 	dec := json.NewDecoder(io.LimitReader(f, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return fmt.Errorf("decode gateway config: %w", err)
+		return cfg, errors.New("invalid gateway datapath config")
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return cfg, errors.New("multiple gateway config documents are forbidden")
 	}
 	if !cfg.PodIP.IsValid() {
 		cfg.PodIP, err = netip.ParseAddr(os.Getenv("POD_IP"))
 		if err != nil {
-			return errors.New("podIP config or POD_IP environment is required")
+			return cfg, errors.New("podIP config or POD_IP environment is required")
 		}
 	}
 	if err := cfg.Validate(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+func run(ctx context.Context, configPath string) error {
+	if configPath == "" {
+		return errors.New("-config is required")
+	}
+	cfg, err := readGatewayConfig(configPath)
+	if err != nil {
 		return err
 	}
 	backend, err := iproute.New()
@@ -155,13 +179,35 @@ func run(ctx context.Context, configPath string) error {
 	defer tick.Stop()
 	prev := state{}
 	for {
+		next, readErr := readGatewayConfig(configPath)
+		if readErr != nil {
+			// A missing/invalid replacement must never keep using stale selected
+			// pod permissions or an old upstream-ready accept rule.
+			cfg.UpstreamHealthy = false
+			cfg.Clients = nil
+			current.Store(state{})
+			prev = state{}
+			if err := backend.ApplyGateway(ctx, cfg); err != nil {
+				logger.Error("gateway fail-closed update failed", "error", err)
+			}
+			logger.Error("gateway config unavailable", "error", readErr)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-tick.C:
+				continue
+			}
+		}
+		next.UpstreamHealthy = cfg.UpstreamHealthy
+		changed := !reflect.DeepEqual(cfg, next)
+		cfg = next
 		s, err := probe(client)
 		if err != nil {
 			s = state{}
 		}
 		// Even with no upstream, keep refreshing table 100 so it is installed as
 		// soon as the plugin creates upstream0; marked recovery probes need it.
-		if s != prev || !s.ready {
+		if changed || s != prev || !s.ready {
 			cfg.UpstreamHealthy = s.ready
 			if err := backend.ApplyGateway(ctx, cfg); err != nil {
 				s = state{}

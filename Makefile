@@ -105,6 +105,9 @@ dev-images: ## Build images with the dev tag and import them into the k3d cluste
 
 .PHONY: dev-deploy
 dev-deploy: dev-images ## Build, import and helm-install the chart into the k3d cluster
+	# Helm does not install newly added chart CRDs on upgrade from an M0 release.
+	# Apply the complete CRDs first, even on an existing dev cluster.
+	kubectl --context k3d-$(DEV_CLUSTER) apply --server-side -f charts/ratatoskr/crds/
 	helm upgrade --install ratatoskr charts/ratatoskr -n ratatoskr-system --create-namespace \
 	  --kube-context k3d-$(DEV_CLUSTER) -f hack/dev-values.yaml --wait --timeout 5m
 
