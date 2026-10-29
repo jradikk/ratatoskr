@@ -87,7 +87,7 @@ def check(docs):
                 ["spec"]["template"]["spec"]["containers"][0]["env"]}
     for name in ("OPERATOR_NAMESPACE", "GATEWAY_IMAGE", "OPENVPN_IMAGE",
                  "IMAGE_PULL_POLICY", "DRIVER", "DATAPATH", "CLUSTER_DOMAIN",
-                 "SERVICE_CIDRS", "POD_CIDRS"):
+                 "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
     assert ctrl_env["DRIVER"]["value"] == "init"
@@ -121,6 +121,9 @@ def check(docs):
     controller = docs["ClusterRole", "ratatoskr-controller"]
     assert rule(controller, "secrets")["verbs"] == ["get"]
     assert rule(controller, "nodes")["verbs"] == ["get", "list", "watch"]
+    assert rule(controller, "endpointslices")["verbs"] == ["get", "list", "watch"]
+    assert rule(controller, "servicecidrs")["verbs"] == ["get", "list", "watch"]
+    assert set(rule(controller, "networkpolicies")["verbs"]) == {"get", "list", "watch", "create", "update", "patch", "delete"}
     assert [r for r in controller["rules"] if r["resources"] == ["pods"]] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["patch"]}
     ]
@@ -129,6 +132,7 @@ def check(docs):
         "get", "list", "watch", "create", "update", "patch", "delete"
     }
     webhook_role = docs["ClusterRole", "ratatoskr-webhook"]
+    assert rule(webhook_role, "services")["verbs"] == ["get"]
     for resource, name in (
         ("mutatingwebhookconfigurations", "ratatoskr-pods"),
         ("validatingwebhookconfigurations", "ratatoskr-validation"),

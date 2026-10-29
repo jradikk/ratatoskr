@@ -13,6 +13,10 @@ datapath: iproute
 # bootstrap Secret and both webhook configurations are named by the chart.
 operatorNamespace: ""
 clusterDomain: cluster.local
+dns:
+  # External DNS questions from dns.mode=gateway go through upstream0 only.
+  # Replace when a VPN provider requires a different accessible resolver.
+  upstreamIP: "1.1.1.1"
 fwmarkMask: "0x00f00000"
 
 # CIDR overrides passed to the Go processes; podCIDRs may be left empty if
