@@ -244,6 +244,18 @@ func readGatewayConfig(configPath string) (datapath.GatewayConfig, error) {
 	return cfg, nil
 }
 
+// gatewayBackend rejects unknown and unavailable modes without falling back.
+func gatewayBackend(mode string) (datapath.Backend, error) {
+	switch mode {
+	case "", "iproute":
+		return iproute.New()
+	case "ebpf":
+		return nil, errors.New("eBPF backend unavailable")
+	default:
+		return nil, fmt.Errorf("unsupported DATAPATH %q", mode)
+	}
+}
+
 func run(ctx context.Context, configPath string) error {
 	if err := platform.CheckKernel(); err != nil {
 		return err
@@ -258,7 +270,7 @@ func run(ctx context.Context, configPath string) error {
 	if err := clampGatewayMTU(&cfg); err != nil {
 		return err
 	}
-	backend, err := iproute.New()
+	backend, err := gatewayBackend(os.Getenv("DATAPATH"))
 	if err != nil {
 		return err
 	}
@@ -310,7 +322,13 @@ func run(ctx context.Context, configPath string) error {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 	if cfg.Encryption == "wireguard" {
-		stopRegistration, e := startEncryptedGateway(ctx, os.Getenv("GATEWAY_NAME"), cfg.PodIP, backend, serverErrors)
+		// Registration requires the existing iproute WireGuard manager; never
+		// allow an unsupported backend to publish plaintext readiness.
+		wgBackend, ok := backend.(*iproute.Backend)
+		if !ok {
+			return errors.New("selected datapath does not support WireGuard registration")
+		}
+		stopRegistration, e := startEncryptedGateway(ctx, os.Getenv("GATEWAY_NAME"), cfg.PodIP, wgBackend, serverErrors)
 		if e != nil {
 			return e
 		}
