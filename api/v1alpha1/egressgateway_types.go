@@ -84,7 +84,8 @@ type ExclusionsSpec struct {
 	// +kubebuilder:default=true
 	AutoDetect *bool `json:"autoDetect,omitempty"`
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(c, c.isCIDR())",message="each exclusion must be a valid CIDR"
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self.all(c, isCIDR(c))",message="each exclusion must be a valid CIDR"
 	ExtraCIDRs []string `json:"extraCIDRs,omitempty"`
 	// False blocks the metadata IP, true allows direct access. It is never sent via VPN.
 	// +kubebuilder:default=false
@@ -93,6 +94,10 @@ type ExclusionsSpec struct {
 
 // GatewayResources uses Kubernetes resource quantities without storing Kubernetes internal resource types.
 type GatewayResources struct {
+	Gateway ContainerResources `json:"gateway,omitempty"`
+}
+
+type ContainerResources struct {
 	// +kubebuilder:validation:MaxProperties=32
 	Limits map[string]resource.Quantity `json:"limits,omitempty"`
 	// +kubebuilder:validation:MaxProperties=32
@@ -111,7 +116,9 @@ type GatewayToleration struct {
 }
 
 type EgressGatewayStatus struct {
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Phase              string `json:"phase,omitempty"`
+	ReadyReplicas      int32  `json:"readyReplicas,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	// GatewayID is the controller-allocated stable GENEVE VNI, never user-settable.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=16777215
@@ -129,13 +136,14 @@ type EgressGatewayStatus struct {
 type GatewayEndpoint struct {
 	PodName            string `json:"podName,omitempty"`
 	PodIP              string `json:"podIP"`
-	ExitIP             string `json:"exitIP,omitempty"`
-	Healthy            bool   `json:"healthy"`
+	UpstreamExitIP     string `json:"upstreamExitIP,omitempty"`
+	UpstreamHealthy    bool   `json:"upstreamHealthy"`
 	WireguardPublicKey string `json:"wireguardPublicKey,omitempty"`
 }
 
 type EffectiveExclusion struct {
-	// +kubebuilder:validation:XValidation:rule="self.isCIDR()",message="must be a valid CIDR"
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="isCIDR(self)",message="must be a valid CIDR"
 	CIDR string `json:"cidr"`
 	// +kubebuilder:validation:Enum=podCIDR;serviceCIDR;node;apiserver;dns;linkLocal;extra
 	Source string `json:"source"`

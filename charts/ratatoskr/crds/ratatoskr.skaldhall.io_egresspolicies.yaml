@@ -42,12 +42,13 @@ spec:
             properties:
               excludeCIDRs:
                 items:
+                  maxLength: 64
                   type: string
                 maxItems: 64
                 type: array
                 x-kubernetes-validations:
                 - message: each exclusion must be a valid CIDR
-                  rule: self.all(c, c.isCIDR())
+                  rule: self.all(c, isCIDR(c))
               gatewayRef:
                 properties:
                   name:
@@ -77,12 +78,13 @@ spec:
                       description: Empty CIDRs matches any destination (subject to
                         ports and exclusions).
                       items:
+                        maxLength: 64
                         type: string
                       maxItems: 64
                       type: array
                       x-kubernetes-validations:
                       - message: each destination must be a valid CIDR
-                        rule: self.all(c, c.isCIDR())
+                        rule: self.all(c, isCIDR(c))
                     ports:
                       items:
                         properties:

@@ -128,12 +128,13 @@ spec:
                     type: boolean
                   extraCIDRs:
                     items:
+                      maxLength: 64
                       type: string
                     maxItems: 64
                     type: array
                     x-kubernetes-validations:
                     - message: each exclusion must be a valid CIDR
-                      rule: self.all(c, c.isCIDR())
+                      rule: self.all(c, isCIDR(c))
                 type: object
               failMode:
                 default: closed
@@ -156,23 +157,26 @@ spec:
                 description: GatewayResources uses Kubernetes resource quantities
                   without storing Kubernetes internal resource types.
                 properties:
-                  limits:
-                    additionalProperties:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    maxProperties: 32
-                    type: object
-                  requests:
-                    additionalProperties:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    maxProperties: 32
+                  gateway:
+                    properties:
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        maxProperties: 32
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        maxProperties: 32
+                        type: object
                     type: object
                 type: object
               tolerations:
@@ -305,10 +309,11 @@ spec:
                 items:
                   properties:
                     cidr:
+                      maxLength: 64
                       type: string
                       x-kubernetes-validations:
                       - message: must be a valid CIDR
-                        rule: self.isCIDR()
+                        rule: isCIDR(self)
                     source:
                       enum:
                       - podCIDR
@@ -328,19 +333,19 @@ spec:
               endpoints:
                 items:
                   properties:
-                    exitIP:
-                      type: string
-                    healthy:
-                      type: boolean
                     podIP:
                       type: string
                     podName:
                       type: string
+                    upstreamExitIP:
+                      type: string
+                    upstreamHealthy:
+                      type: boolean
                     wireguardPublicKey:
                       type: string
                   required:
-                  - healthy
                   - podIP
+                  - upstreamHealthy
                   type: object
                 maxItems: 32
                 type: array
@@ -375,6 +380,11 @@ spec:
                 type: object
               observedGeneration:
                 format: int64
+                type: integer
+              phase:
+                type: string
+              readyReplicas:
+                format: int32
                 type: integer
             type: object
         required:

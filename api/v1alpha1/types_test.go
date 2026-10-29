@@ -19,7 +19,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			AllowedNamespaces: AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"egress": "allowed"}}},
 			Exclusions:        ExclusionsSpec{ExtraCIDRs: []string{"10.0.0.0/8"}},
 		},
-		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", ExitIP: "203.0.113.4", Healthy: true, WireguardPublicKey: "public-key"}}},
+		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamExitIP: "203.0.113.4", UpstreamHealthy: true, WireguardPublicKey: "public-key"}}},
 	}
 	policy := &EgressPolicy{
 		TypeMeta:   metav1.TypeMeta{APIVersion: SchemeGroupVersion.String(), Kind: "EgressPolicy"},

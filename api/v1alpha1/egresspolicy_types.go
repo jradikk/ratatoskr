@@ -29,7 +29,8 @@ type EgressPolicySpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	Rules []EgressRule `json:"rules,omitempty"`
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(c, c.isCIDR())",message="each exclusion must be a valid CIDR"
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self.all(c, isCIDR(c))",message="each exclusion must be a valid CIDR"
 	ExcludeCIDRs []string `json:"excludeCIDRs,omitempty"`
 }
 
@@ -46,7 +47,8 @@ type GatewayReference struct {
 type EgressRule struct {
 	// Empty CIDRs matches any destination (subject to ports and exclusions).
 	// +kubebuilder:validation:MaxItems=64
-	// +kubebuilder:validation:XValidation:rule="self.all(c, c.isCIDR())",message="each destination must be a valid CIDR"
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self.all(c, isCIDR(c))",message="each destination must be a valid CIDR"
 	CIDRs []string `json:"cidrs,omitempty"`
 	// +kubebuilder:validation:MaxItems=64
 	Ports []EgressPort `json:"ports,omitempty"`
