@@ -14,12 +14,21 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- printf "%s/ratatoskr-%s:%s" $root.Values.image.registry $component (default $root.Chart.AppVersion $root.Values.image.tag) -}}
 {{- end -}}
 
-{{/* Validate enumerated values early with clear messages. */}}
+{{/* M2 has no agent/eBPF workloads; fail closed rather than install a broken driver. */}}
 {{- define "ratatoskr.validate" -}}
-{{- if not (has .Values.driver (list "init" "agent")) -}}
-{{- fail (printf "driver must be \"init\" or \"agent\", got %q" .Values.driver) -}}
+{{- if ne .Values.driver "init" -}}
+{{- fail (printf "M2 only implements driver=init (agent is not available); got %q" .Values.driver) -}}
 {{- end -}}
-{{- if not (has .Values.datapath (list "iproute" "ebpf")) -}}
-{{- fail (printf "datapath must be \"iproute\" or \"ebpf\", got %q" .Values.datapath) -}}
+{{- if ne .Values.datapath "iproute" -}}
+{{- fail (printf "M2 only implements datapath=iproute (ebpf is not available); got %q" .Values.datapath) -}}
 {{- end -}}
+{{- if and .Values.operatorNamespace (ne .Values.operatorNamespace .Release.Namespace) -}}
+{{- fail "operatorNamespace must match the Helm release namespace (webhook Service and TLS bootstrap use .Release.Namespace)" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "ratatoskr.selectorLabels" -}}
+app.kubernetes.io/name: ratatoskr
+app.kubernetes.io/instance: {{ (index . 0).Release.Name }}
+app.kubernetes.io/component: {{ index . 1 }}
 {{- end -}}

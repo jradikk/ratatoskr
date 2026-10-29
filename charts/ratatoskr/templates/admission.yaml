@@ -1,0 +1,96 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: ratatoskr-pods
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+webhooks:
+  - name: pods.ratatoskr.skaldhall.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    timeoutSeconds: 10
+    failurePolicy: Fail
+    reinvocationPolicy: Never
+    matchPolicy: Equivalent
+    objectSelector:
+      matchExpressions:
+        - key: ratatoskr.skaldhall.io/gateway
+          operator: Exists
+    clientConfig:
+      service:
+        name: ratatoskr-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-v1-pod
+        port: 443
+    rules:
+      - operations: [CREATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: ratatoskr-validation
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+webhooks:
+  - name: pods.ratatoskr.skaldhall.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    timeoutSeconds: 10
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    objectSelector:
+      matchExpressions:
+        - key: ratatoskr.skaldhall.io/gateway
+          operator: Exists
+    clientConfig:
+      service:
+        name: ratatoskr-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-v1-pod
+        port: 443
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        scope: Namespaced
+  - name: egressgateways.ratatoskr.skaldhall.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    timeoutSeconds: 10
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: ratatoskr-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-v1alpha1-egressgateway
+        port: 443
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [ratatoskr.skaldhall.io]
+        apiVersions: [v1alpha1]
+        resources: [egressgateways]
+        scope: Namespaced
+  - name: egresspolicies.ratatoskr.skaldhall.io
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    timeoutSeconds: 10
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: ratatoskr-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-v1alpha1-egresspolicy
+        port: 443
+    rules:
+      - operations: [CREATE, UPDATE]
+        apiGroups: [ratatoskr.skaldhall.io]
+        apiVersions: [v1alpha1]
+        resources: [egresspolicies]
+        scope: Namespaced

@@ -1,27 +1,33 @@
-# Default values for the Ratatoskr chart. Components are added milestone by
-# milestone; see docs/design.md for the full picture.
-
+# M2 supports only the init driver and iproute datapath. Agent/eBPF are
+# intentionally rejected at template time until their implementations ship.
 image:
   registry: ghcr.io/skaldhall
   # Defaults to the chart appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent
 
-# How pod network namespaces are programmed: "init" (MVP, NET_ADMIN init
-# container) or "agent" (DaemonSet; workloads need no capabilities).
-driver: agent
-
-# Datapath implementation: "iproute" or "ebpf". CRDs are identical for both.
+driver: init
 datapath: iproute
 
-# Kubernetes cluster DNS domain, used to rebuild search paths in dns.mode=gateway.
+# Install into this namespace (defaults to Helm's release namespace). The
+# bootstrap Secret and both webhook configurations are named by the chart.
+operatorNamespace: ""
 clusterDomain: cluster.local
-
-# Firewall-mark bits reserved for Ratatoskr in pod and gateway netns. Must not
-# overlap Istio (0x539 / 0xfff) or Cilium (0x0f00, 0xf000 ranges).
 fwmarkMask: "0x00f00000"
 
-# Extra CIDRs never steered in any pod (in addition to auto-detected ones).
+# Extra CIDRs excluded from client steering (also passed to the Go processes).
 exclusions:
   serviceCIDRs: []
   extraCIDRs: []
+
+controller:
+  replicas: 1
+  resources: {}
+webhook:
+  replicas: 1
+  resources: {}
+
+# These policies constrain incoming traffic; API-server/kubelet IPs cannot be
+# reliably determined by a portable chart, so 9443 and health probes are open.
+networkPolicy:
+  enabled: true

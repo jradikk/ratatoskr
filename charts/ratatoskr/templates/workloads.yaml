@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratatoskr-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratatoskr-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratatoskr-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ratatoskr.selectorLabels" (list . "controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ratatoskr.selectorLabels" (list . "controller") | nindent 8 }}
+    spec:
+      serviceAccountName: ratatoskr-controller
+      containers:
+        - name: controller
+          image: {{ include "ratatoskr.image" (list . "controller") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: 8081
+          env:
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DRIVER
+              value: {{ .Values.driver | quote }}
+            - name: DATAPATH
+              value: {{ .Values.datapath | quote }}
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: FWMARK_MASK
+              value: {{ .Values.fwmarkMask | quote }}
+            - name: SERVICE_CIDRS
+              value: {{ join "," .Values.exclusions.serviceCIDRs | quote }}
+            - name: EXTRA_CIDRS
+              value: {{ join "," .Values.exclusions.extraCIDRs | quote }}
+            - name: GATEWAY_IMAGE
+              value: {{ include "ratatoskr.image" (list . "gateway") | quote }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratatoskr-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ratatoskr.selectorLabels" (list . "controller") | nindent 4 }}
+  ports:
+    - name: health
+      port: 8081
+      targetPort: health
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratatoskr-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      {{- include "ratatoskr.selectorLabels" (list . "webhook") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ratatoskr.selectorLabels" (list . "webhook") | nindent 8 }}
+    spec:
+      serviceAccountName: ratatoskr-webhook
+      initContainers:
+        - name: bootstrap-tls
+          image: {{ include "ratatoskr.image" (list . "webhook") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--bootstrap-tls"]
+          env:
+            - name: SERVICE_NAME
+              value: ratatoskr-webhook
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: TLS_SECRET_NAME
+              value: ratatoskr-webhook-tls
+            - name: MUTATING_WEBHOOK_NAME
+              value: ratatoskr-pods
+            - name: VALIDATING_WEBHOOK_NAME
+              value: ratatoskr-validation
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      containers:
+        - name: webhook
+          image: {{ include "ratatoskr.image" (list . "webhook") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--tls-dir=/tls"]
+          ports:
+            - name: https
+              containerPort: 9443
+            - name: health
+              containerPort: 8081
+          env:
+            - name: SERVICE_NAME
+              value: ratatoskr-webhook
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: TLS_SECRET_NAME
+              value: ratatoskr-webhook-tls
+            - name: MUTATING_WEBHOOK_NAME
+              value: ratatoskr-pods
+            - name: VALIDATING_WEBHOOK_NAME
+              value: ratatoskr-validation
+            - name: DRIVER
+              value: {{ .Values.driver | quote }}
+            - name: DATAPATH
+              value: {{ .Values.datapath | quote }}
+            - name: FWMARK_MASK
+              value: {{ .Values.fwmarkMask | quote }}
+            - name: SERVICE_CIDRS
+              value: {{ join "," .Values.exclusions.serviceCIDRs | quote }}
+            - name: EXTRA_CIDRS
+              value: {{ join "," .Values.exclusions.extraCIDRs | quote }}
+            - name: INIT_IMAGE
+              value: {{ include "ratatoskr.image" (list . "init") | quote }}
+            - name: INIT_IMAGE_PULL_POLICY
+              value: {{ .Values.image.pullPolicy | quote }}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          resources:
+            {{- toYaml .Values.webhook.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tls
+          emptyDir:
+            medium: Memory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratatoskr-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ratatoskr.selectorLabels" (list . "webhook") | nindent 4 }}
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
