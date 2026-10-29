@@ -48,9 +48,17 @@ func TestWireGuardEndpointPublicMaterial(t *testing.T) {
 func TestProjectedTokenInitOnly(t *testing.T) {
 	pod := optedPod()
 	pod.Spec.InitContainers = []corev1.Container{{Name: initName, Image: "ratatoskr:init"}, {Name: "other", Image: "other"}}
+	fsGroup := int64(1234)
+	pod.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: &fsGroup}
 	injectWireGuardToken(pod)
 	if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].Projected == nil {
 		t.Fatal("projected token missing")
+	}
+	if pod.Spec.Volumes[0].Projected.DefaultMode == nil || *pod.Spec.Volumes[0].Projected.DefaultMode != 0444 {
+		t.Fatal("non-root init cannot read projected token with expected 0444 mode")
+	}
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil || *pod.Spec.SecurityContext.FSGroup != fsGroup {
+		t.Fatal("token projection changed workload fsGroup")
 	}
 	token := pod.Spec.Volumes[0].Projected.Sources[0].ServiceAccountToken
 	if token == nil || token.Audience != wgTokenAudience || token.ExpirationSeconds == nil || *token.ExpirationSeconds != 600 || token.Path != "token" {
@@ -104,6 +112,15 @@ func TestWireGuardAdmissionFailClosedBeforeDatapathFields(t *testing.T) {
 	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
 	if len(out.Spec.InitContainers[0].VolumeMounts) != 2 || len(out.Spec.Containers[0].VolumeMounts) != 0 || !strings.Contains(out.Annotations[ConfigAnnotation], `"encryption":"wireguard"`) {
 		t.Fatalf("failclosed WG config or token mount missing: %+v", out.Spec.InitContainers[0].VolumeMounts)
+	}
+	var projected *corev1.ProjectedVolumeSource
+	for _, volume := range out.Spec.Volumes {
+		if volume.Name == wgTokenVolume {
+			projected = volume.Projected
+		}
+	}
+	if projected == nil || projected.DefaultMode == nil || *projected.DefaultMode != 0444 || len(projected.Sources) != 1 || projected.Sources[0].ServiceAccountToken == nil {
+		t.Fatal("rendered Pod lacks readable init-only projected gateway token")
 	}
 	if strings.Contains(out.Annotations[ConfigAnnotation], wgTokenAudience) || strings.Contains(out.Annotations[ConfigAnnotation], wgTokenVolume) {
 		t.Fatal("token metadata was embedded into client annotation")

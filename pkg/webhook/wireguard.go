@@ -37,7 +37,10 @@ func validateWireGuardEndpoint(endpoint *v1alpha1.GatewayEndpoint) error {
 }
 func injectWireGuardToken(pod *corev1.Pod) {
 	lifetime := int64(600)
-	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: wgTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: wgTokenAudience, ExpirationSeconds: &lifetime, Path: "token"}}}}}})
+	// Distroless init runs as a non-root UID. 0444 grants read access without
+	// changing the workload's fsGroup; only the dedicated init mounts this volume.
+	mode := int32(0444)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: wgTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{DefaultMode: &mode, Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: wgTokenAudience, ExpirationSeconds: &lifetime, Path: "token"}}}}}})
 	pod.Spec.InitContainers[0].VolumeMounts = append(pod.Spec.InitContainers[0].VolumeMounts, corev1.VolumeMount{Name: wgTokenVolume, MountPath: wgTokenMount, ReadOnly: true})
 }
 func validateWireGuardToken(pod *corev1.Pod) error {
@@ -53,8 +56,8 @@ func validateWireGuardToken(pod *corev1.Pod) error {
 		if volume.Name != wgTokenVolume {
 			continue
 		}
-		if found || volume.Projected == nil || len(volume.Projected.Sources) != 1 {
-			return fmt.Errorf("duplicate or invalid WireGuard token projection")
+		if found || volume.Projected == nil || volume.Projected.DefaultMode == nil || *volume.Projected.DefaultMode != 0444 || len(volume.Projected.Sources) != 1 {
+			return fmt.Errorf("duplicate or invalid WireGuard token projection or file mode")
 		}
 		projection := volume.Projected.Sources[0].ServiceAccountToken
 		if projection == nil || projection.Audience != wgTokenAudience || projection.ExpirationSeconds == nil || *projection.ExpirationSeconds != 600 || projection.Path != "token" {
