@@ -138,13 +138,13 @@ func TestProbeURLValidation(t *testing.T) {
 	}
 }
 func TestDefaultHostnameProbeWithoutNetwork(t *testing.T) {
-	if DefaultProbeURL != "https://ipinfo.io/ip" {
+	if DefaultProbeURL != "https://api.ipify.org" {
 		t.Fatal("default endpoint changed")
 	}
 	calls := 0
 	probe, err := newHTTPProbe(DefaultProbeURL, upInterface, roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
-		if r.URL.Hostname() != "ipinfo.io" || r.URL.Path != "/ip" || r.URL.Scheme != "https" {
+		if r.URL.Hostname() != "api.ipify.org" || r.URL.Path != "" || r.URL.Scheme != "https" {
 			t.Fatal("unexpected default hostname request")
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("203.0.113.42\n")), Header: make(http.Header)}, nil

@@ -21,7 +21,7 @@ import (
 const (
 	Interface = "upstream0"
 	// DefaultProbeURL reports the tunnel exit IPv4 without operator provisioning.
-	DefaultProbeURL = "https://ipinfo.io/ip"
+	DefaultProbeURL = "https://api.ipify.org"
 	// Gateway contract: this mark/mask selects table 100 even when the main
 	// default stays on eth0. The gateway keeps the route during unhealthy periods
 	// and gates FORWARD only, permitting this locally originated recovery probe.

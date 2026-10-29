@@ -62,14 +62,17 @@ Entrypoint flags (directory paths must be absolute):
 ```text
 --secret-dir /etc/ratatoskr/upstream
 --runtime-dir /run/ratatoskr
---probe-url https://ipinfo.io/ip
+--probe-url https://api.ipify.org
 ```
 
-`--probe-url` is **optional**, defaulting to `https://ipinfo.io/ip` for the
+`--probe-url` is **optional**, defaulting to `https://api.ipify.org` for the
 plain-text exit IPv4 address (at most 64 bytes) with HTTP 200. No custom operator
 endpoint is required. Override it for a fake upstream test endpoint or another
 IP-reporting service. The default service is an external availability dependency;
 its errors/rate limits make health fail closed like any other probe failure.
+Periodic plugin probes intentionally avoid ipinfo.io: reserve its calls for
+final live assertions, where HTTP 429 is inconclusive rather than evidence of
+a VPN failure. Explicit probe overrides remain available.
 
 DNS hostnames and literal IPv4 addresses are accepted. **Hostname lookup alone**
 uses the normal pod/cluster resolver, consistent with cluster DNS mode; the
