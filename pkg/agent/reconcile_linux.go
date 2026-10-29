@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"sync/atomic"
 	"time"
@@ -136,6 +137,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return errors.New("safe cleanup requires intact owned config and sandbox identity")
 		}
 	}
+	if !removing && existing != "" {
+		var old datapath.ClientConfig
+		if json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &old) != nil || Hash(old) != existing || old.Identity.UID != string(pod.UID) || old.Encryption != cfg.Encryption {
+			return errors.New("unsafe existing agent config or encryption transition")
+		}
+	}
 	target, err := Sandbox(ctx, r.CRI, pod.Namespace, pod.Name, string(pod.UID), pod.Status.PodIP)
 	if err != nil {
 		return err
@@ -158,6 +165,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 				return e
 			}
 			defer backend.Close()
+			// Block client traffic BEFORE requesting a token or contacting the
+			// gateway. An unavailable registration must never leave plaintext
+			// steering or a stale healthy endpoint in place.
+			closed := cfg
+			closed.Endpoint = netip.Addr{}
+			closed.GatewayPublicKey = ""
+			closed.RegistrationCACert = ""
+			closed.WireGuardPort = 0
+			if e = backend.ApplyClient(ctx, closed); e != nil {
+				return e
+			}
 			publicKey, e = backend.PrepareClientWireGuard(ctx, cfg)
 			return e
 		}); err != nil {
