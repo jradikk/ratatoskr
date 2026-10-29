@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +18,14 @@ import (
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kt "k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
@@ -54,7 +58,7 @@ func fixture(t *testing.T) (*Server, *peers, *corev1.Pod, *corev1.Namespace, *ap
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "work", Name: "client", UID: types.UID("client-uid"), Labels: map[string]string{gatewayLabel: "vpn"}}, Spec: corev1.PodSpec{ServiceAccountName: "workload"}, Status: corev1.PodStatus{PodIP: "10.1.2.3"}}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "work", Labels: map[string]string{"approved": "yes"}}}
 	gw := &api.EgressGateway{ObjectMeta: metav1.ObjectMeta{Namespace: "operator", Name: "vpn", UID: types.UID("gateway-uid")}, Spec: api.EgressGatewaySpec{Encryption: "wireguard", AllowedNamespaces: api.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"approved": "yes"}}}}}
-	own := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "operator", Name: "gateway-pod", UID: types.UID("own-uid"), Labels: map[string]string{identityLabel: "vpn", gatewayUIDLabel: "gateway-uid"}}, Status: corev1.PodStatus{PodIP: "10.1.2.4"}}
+	own := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "operator", Name: "gateway-pod", UID: types.UID("own-uid"), ResourceVersion: "1", Labels: map[string]string{identityLabel: "vpn", gatewayUIDLabel: "gateway-uid"}}, Status: corev1.PodStatus{PodIP: "10.1.2.4"}}
 	kube := kt.NewClientset(own.DeepCopy())
 	kube.PrependReactor("create", "tokenreviews", func(action ktesting.Action) (bool, runtime.Object, error) {
 		return true, &authv1.TokenReview{Status: authv1.TokenReviewStatus{Authenticated: true, Audiences: []string{Audience}, User: authv1.UserInfo{Username: "system:serviceaccount:work:workload", Extra: map[string]authv1.ExtraValue{"authentication.kubernetes.io/pod-name": {"client"}, "authentication.kubernetes.io/pod-uid": {"client-uid"}}}}}, nil
@@ -126,25 +130,99 @@ func TestRegistrationAuthorization(t *testing.T) {
 	}
 }
 func TestReconcileExpirationAndDeletion(t *testing.T) {
-	s, p, _, _, _, _ := fixture(t)
+	s, p, pod, ns, gw, own := fixture(t)
 	now := time.Now()
 	s.now = func() time.Time { return now }
-	s.TTL = time.Minute
 	if code := send(s); code != 201 {
 		t.Fatal(code)
 	}
-	now = now.Add(2 * time.Minute)
-	if err := s.ReconcilePeers(context.Background()); err != nil || p.removed != 1 {
-		t.Fatalf("expiry: %v %+v", err, p)
+	if s.bindings["work/client"].expires.Sub(now) != 24*time.Hour {
+		t.Fatal("wrong default TTL")
 	}
+	// A selected pod survives multiple TTL windows with periodic verification.
+	for i := 0; i < 27; i++ {
+		now = now.Add(time.Hour)
+		if err := s.ReconcilePeers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.removed != 0 || s.bindings["work/client"].expires.Before(now.Add(23*time.Hour)) {
+		t.Fatal("live pod expired despite revalidation")
+	}
+	// API outages retain a binding until its last successful verification expires.
+	s.Reader = transientReader{err: errors.New("synthetic API outage")}
+	now = now.Add(23 * time.Hour)
+	if err := s.ReconcilePeers(context.Background()); err != nil || p.removed != 0 {
+		t.Fatalf("unexpected early expiry: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	if err := s.ReconcilePeers(context.Background()); err != nil || p.removed != 1 {
+		t.Fatalf("stale binding not expired: %v %+v", err, p)
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = api.AddToScheme(scheme)
+	s.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, ns, gw, own).Build()
 	if code := send(s); code != 201 {
 		t.Fatal(code)
 	}
 	if err := s.RemoveDeletedPod(context.Background(), "work", "client", "stale"); err != nil || p.removed != 1 {
-		t.Fatalf("stale event: %v %+v", err, p)
+		t.Fatalf("stale event removed peer: %v", err)
 	}
 	if err := s.RemoveDeletedPod(context.Background(), "work", "client", "client-uid"); err != nil || p.removed != 2 {
-		t.Fatalf("deletion: %v %+v", err, p)
+		t.Fatalf("deletion not removed: %v", err)
+	}
+}
+
+type transientReader struct{ err error }
+
+func (t transientReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return t.err
+}
+func (t transientReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return t.err
+}
+
+func TestConfirmedDeletedPodFailsClosed(t *testing.T) {
+	s, p, _, _, _, _ := fixture(t)
+	if code := send(s); code != 201 {
+		t.Fatal(code)
+	}
+	// A Kubernetes NotFound is evidence of deletion, not a transient API outage.
+	s.Reader = transientReader{err: apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "client")}
+	if err := s.ReconcilePeers(context.Background()); err != nil || p.removed != 1 {
+		t.Fatalf("deleted pod retained: %v", err)
+	}
+}
+func TestReconcileRevokesChangedIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*corev1.Pod, *corev1.Namespace, *api.EgressGateway, *corev1.Pod)
+	}{
+		{"pod uid", func(p *corev1.Pod, _ *corev1.Namespace, _ *api.EgressGateway, _ *corev1.Pod) { p.UID = "replacement" }},
+		{"opt out", func(p *corev1.Pod, _ *corev1.Namespace, _ *api.EgressGateway, _ *corev1.Pod) {
+			delete(p.Labels, gatewayLabel)
+		}},
+		{"namespace denied", func(_ *corev1.Pod, n *corev1.Namespace, _ *api.EgressGateway, _ *corev1.Pod) {
+			n.Labels["approved"] = "no"
+		}},
+		{"gateway changed", func(_ *corev1.Pod, _ *corev1.Namespace, g *api.EgressGateway, _ *corev1.Pod) { g.UID = "replacement" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, p, pod, ns, gw, own := fixture(t)
+			if code := send(s); code != 201 {
+				t.Fatal(code)
+			}
+			tc.change(pod, ns, gw, own)
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+			_ = api.AddToScheme(scheme)
+			s.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, ns, gw, own).Build()
+			if err := s.ReconcilePeers(context.Background()); err != nil || p.removed != 1 {
+				t.Fatalf("failed to revoke: %v %+v", err, p)
+			}
+		})
 	}
 }
 func TestTLSAndPublication(t *testing.T) {
@@ -183,6 +261,23 @@ func TestTLSAndPublication(t *testing.T) {
 	if err := s.PublishCA(context.Background(), pemBytes); err != nil {
 		t.Fatal(err)
 	}
+	var patched bool
+	for _, action := range s.Kubernetes.(*kt.Clientset).Actions() {
+		if action.Matches("update", "pods") {
+			t.Fatal("publication used forbidden pods/update")
+		}
+		if action.Matches("patch", "pods") {
+			patched = true
+			patch := action.(ktesting.PatchAction)
+			if patch.GetPatchType() != types.JSONPatchType || !bytes.Contains(patch.GetPatch(), []byte("/metadata/uid")) || !bytes.Contains(patch.GetPatch(), []byte("/metadata/resourceVersion")) {
+				t.Fatal("patch missing identity preconditions")
+			}
+		}
+	}
+	if !patched {
+		t.Fatal("publication did not patch Pod")
+	}
+
 	pod, err := s.Kubernetes.CoreV1().Pods("operator").Get(context.Background(), "gateway-pod", metav1.GetOptions{})
 	if err != nil || pod.Annotations[CAAnnotation] != string(pemBytes) {
 		t.Fatalf("CA publication failed: %v", err)

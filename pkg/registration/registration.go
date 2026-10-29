@@ -25,8 +25,10 @@ import (
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,7 +42,7 @@ const (
 	gatewayNamespace = "ratatoskr.skaldhall.io/gateway-namespace"
 	identityLabel    = "ratatoskr.skaldhall.io/gateway-name"
 	gatewayUIDLabel  = "ratatoskr.skaldhall.io/gateway-uid"
-	defaultTTL       = 5 * time.Minute
+	defaultTTL       = 24 * time.Hour
 )
 
 // PeerManager operates on the gateway's iproute backend. UnregisterPeer must remove
@@ -220,13 +222,24 @@ func (s *Server) authenticate(ctx context.Context, token string) (*corev1.Pod, e
 	return pod, nil
 }
 
+// errTransient marks API availability failures, never confirmed authorization
+// failures. A failed read has at most one TTL of grace after last validation.
+var errTransient = errors.New("authorization API unavailable")
+
+func readError(err error) error {
+	if apierrors.IsNotFound(err) {
+		return errors.New("authorization object missing")
+	}
+	return errTransient
+}
+
 func (s *Server) allowed(ctx context.Context, namespace, name, uid string) (*corev1.Pod, error) {
 	if !s.ready() || namespace == "" || name == "" || uid == "" {
 		return nil, errors.New("invalid identity")
 	}
 	var pod corev1.Pod
 	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &pod); err != nil {
-		return nil, err
+		return nil, readError(err)
 	}
 	if string(pod.UID) != uid || pod.DeletionTimestamp != nil || pod.Spec.ServiceAccountName == "" || pod.Labels[gatewayLabel] != s.Identity.GatewayName || pod.Labels[identityLabel] != "" {
 		return nil, errors.New("pod not selected")
@@ -246,11 +259,17 @@ func (s *Server) allowed(ctx context.Context, namespace, name, uid string) (*cor
 		return nil, errors.New("wrong gateway namespace")
 	}
 	var ns corev1.Namespace
-	if err := s.Reader.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil || ns.DeletionTimestamp != nil {
-		return nil, errors.New("namespace unavailable")
+	if err := s.Reader.Get(ctx, client.ObjectKey{Name: namespace}, &ns); err != nil {
+		return nil, readError(err)
+	}
+	if ns.DeletionTimestamp != nil {
+		return nil, errors.New("namespace terminating")
 	}
 	var gw api.EgressGateway
-	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.GatewayName}, &gw); err != nil || gw.DeletionTimestamp != nil || gw.Spec.Encryption != "wireguard" {
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.GatewayName}, &gw); err != nil {
+		return nil, readError(err)
+	}
+	if gw.DeletionTimestamp != nil || gw.Spec.Encryption != "wireguard" {
 		return nil, errors.New("gateway unavailable")
 	}
 	if gw.Spec.AllowedNamespaces.NamespaceSelector == nil {
@@ -262,7 +281,10 @@ func (s *Server) allowed(ctx context.Context, namespace, name, uid string) (*cor
 	}
 	// Own gateway pod identity is checked against current API state, not caller labels.
 	var own corev1.Pod
-	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.PodName}, &own); err != nil || own.DeletionTimestamp != nil || string(own.UID) != s.Identity.PodUID || own.Status.PodIP != s.Identity.PodIP || own.Labels[identityLabel] != gw.Name || own.Labels[gatewayUIDLabel] != string(gw.UID) {
+	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.PodName}, &own); err != nil {
+		return nil, readError(err)
+	}
+	if own.DeletionTimestamp != nil || string(own.UID) != s.Identity.PodUID || own.Status.PodIP != s.Identity.PodIP || own.Labels[identityLabel] != gw.Name || own.Labels[gatewayUIDLabel] != string(gw.UID) {
 		return nil, errors.New("gateway identity mismatch")
 	}
 	return &pod, nil
@@ -270,7 +292,9 @@ func (s *Server) allowed(ctx context.Context, namespace, name, uid string) (*cor
 
 // ReconcilePeers expires bindings and rechecks current Pod, Namespace, and
 // gateway authorization. Call periodically (e.g. once a minute) and on pod
-// deletion events. Errors fail closed: bindings are removed if reads fail.
+// deletion events. A confirmed allowed Pod refreshes its TTL, including after
+// a long gap. Temporary API failures retain peers only until the last verified
+// authorization expires (at most 24h); known deletion/opt-out fails closed.
 func (s *Server) ReconcilePeers(ctx context.Context) error {
 	if !s.ready() {
 		return errors.New("registration unavailable")
@@ -284,7 +308,12 @@ func (s *Server) ReconcilePeers(ctx context.Context) error {
 		if err == nil {
 			ip, ok = validIP(pod.Status.PodIP)
 		}
-		if err == nil && ok && ip == b.ip && s.clock().Before(b.expires) {
+		if err == nil && ok && ip == b.ip {
+			b.expires = s.clock().Add(s.ttl())
+			s.bindings[id] = b
+			continue
+		}
+		if errors.Is(err, errTransient) && s.clock().Before(b.expires) {
 			continue
 		}
 		if err := s.Peers.UnregisterPeer(ctx, b.ip); err != nil {
@@ -324,24 +353,41 @@ func (s *Server) PublishCA(ctx context.Context, caPEM []byte) error {
 	if !s.ready() || !publicCA(caPEM) {
 		return errors.New("registration unavailable")
 	}
-	pod, err := s.Kubernetes.CoreV1().Pods(s.Identity.Namespace).Get(ctx, s.Identity.PodName, metav1.GetOptions{})
-	if err != nil || pod.DeletionTimestamp != nil || string(pod.UID) != s.Identity.PodUID || pod.Status.PodIP != s.Identity.PodIP || pod.Labels[identityLabel] != s.Identity.GatewayName {
-		return errors.New("gateway pod unavailable")
+	pods := s.Kubernetes.CoreV1().Pods(s.Identity.Namespace)
+	for attempt := 0; attempt < 3; attempt++ {
+		pod, err := pods.Get(ctx, s.Identity.PodName, metav1.GetOptions{})
+		if err != nil || pod.DeletionTimestamp != nil || string(pod.UID) != s.Identity.PodUID || pod.Status.PodIP != s.Identity.PodIP || pod.Labels[identityLabel] != s.Identity.GatewayName {
+			return errors.New("gateway pod unavailable")
+		}
+		var gateway api.EgressGateway
+		if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.GatewayName}, &gateway); err != nil || gateway.DeletionTimestamp != nil || gateway.Spec.Encryption != "wireguard" || pod.Labels[gatewayUIDLabel] != string(gateway.UID) {
+			return errors.New("gateway identity mismatch")
+		}
+		// JSON Patch preconditions prevent updating a replacement Pod or applying
+		// the CA against stale metadata; only our own annotation is modified.
+		operations := []map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": string(pod.UID)},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": pod.ResourceVersion},
+		}
+		if pod.Annotations == nil {
+			operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations", "value": map[string]string{CAAnnotation: string(caPEM)}})
+		} else {
+			operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations/ratatoskr.skaldhall.io~1registration-ca", "value": string(caPEM)})
+		}
+		patch, err := json.Marshal(operations)
+		if err != nil {
+			return errors.New("CA publication failed")
+		}
+		if _, err = pods.Patch(ctx, s.Identity.PodName, types.JSONPatchType, patch, metav1.PatchOptions{}); err == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(err) && !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
+			return errors.New("CA publication failed")
+		}
+		// Conflict/precondition rejection may be a Pod replacement: GET and
+		// revalidate identity before retrying, never blindly retrying the patch.
 	}
-	var gateway api.EgressGateway
-	if err := s.Reader.Get(ctx, client.ObjectKey{Namespace: s.Identity.Namespace, Name: s.Identity.GatewayName}, &gateway); err != nil || gateway.DeletionTimestamp != nil || gateway.Spec.Encryption != "wireguard" || pod.Labels[gatewayUIDLabel] != string(gateway.UID) {
-		return errors.New("gateway identity mismatch")
-	}
-	copy := pod.DeepCopy()
-	if copy.Annotations == nil {
-		copy.Annotations = map[string]string{}
-	}
-	copy.Annotations[CAAnnotation] = string(caPEM)
-	_, err = s.Kubernetes.CoreV1().Pods(s.Identity.Namespace).Update(ctx, copy, metav1.UpdateOptions{})
-	if err != nil {
-		return errors.New("CA publication failed")
-	}
-	return nil
+	return errors.New("CA publication failed")
 }
 func publicCA(data []byte) bool {
 	block, rest := pem.Decode(data)
