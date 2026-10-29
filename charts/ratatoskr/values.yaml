@@ -1,13 +1,18 @@
-# M2 supports only the init driver and iproute datapath. Agent/eBPF are
-# intentionally rejected at template time until their implementations ship.
+# M5 defaults to the node agent; init is available for the local dev loop.
+# eBPF is rejected at template time until M6.
 image:
   registry: ghcr.io/skaldhall
   # Defaults to the chart appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent
 
-driver: init
+driver: agent
 datapath: iproute
+
+agent:
+  # Node-local CRI socket exposed to the DaemonSet, not to workloads/gateways.
+  criSocket: /run/containerd/containerd.sock
+  resources: {}
 
 # Install into this namespace (defaults to Helm's release namespace). The
 # bootstrap Secret and both webhook configurations are named by the chart.

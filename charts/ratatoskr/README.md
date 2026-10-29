@@ -1,4 +1,4 @@
-# Ratatoskr M2 Helm chart
+# Ratatoskr Helm chart (M5 agent / init modes)
 
 Install into one namespace (for example `helm upgrade --install ratatoskr
 charts/ratatoskr --namespace ratatoskr-system --create-namespace`).
@@ -8,11 +8,14 @@ portable webhook ingress NetworkPolicy. The controller creates gateway
 Deployments, ConfigMaps, and Services in EgressGateway namespaces at runtime;
 **the chart does not create a gateway pod or gateway Service**.
 
-M2 only accepts `driver: init` and `datapath: iproute`. The injected workload
-init container needs `NET_ADMIN`; gateway containers need `NET_ADMIN`, while
-the OpenVPN upstream needs `NET_ADMIN`, `MKNOD`, `/dev/net/tun`, and a
-memory-backed `/run/ratatoskr`. The Go controller/webhook own that dynamic
-pod-spec construction, not the chart. `exclusions.serviceCIDRs` is for
+M5 defaults to `driver: agent` and supports `driver: init` (the local
+`hack/dev-values.yaml` default); only `datapath: iproute` is implemented.
+Agent mode installs a DaemonSet; init mode does not. Agent-mode labeled
+workloads receive a capability-free wait-init; init-mode client programming
+requires `NET_ADMIN`. Gateway containers need `NET_ADMIN`, while the OpenVPN
+upstream needs `NET_ADMIN`, `MKNOD`, `/dev/net/tun`, and a memory-backed
+`/run/ratatoskr`. The Go controller/webhook own that dynamic pod-spec
+construction, not the chart. `exclusions.serviceCIDRs` is for
 clusters whose service CIDR cannot be discovered reliably; `podCIDRs` optionally
 provides explicit cluster pod ranges and `extraCIDRs` adds direct-route
 exclusions. The chart passes CIDRs as comma-joined environment values. It sets
@@ -20,11 +23,29 @@ exclusions. The chart passes CIDRs as comma-joined environment values. It sets
 `IMAGE_PULL_POLICY` so dynamically managed gateway workloads can use the same
 local-image policy as the operator.
 
+**Agent security and host compatibility:** In agent mode, each node runs a
+root-UID, `hostPID: true`, `hostNetwork: true` DaemonSet container with only
+`NET_ADMIN` and `SYS_ADMIN` added (all other capabilities dropped),
+`allowPrivilegeEscalation: false`, `privileged: false`, and RuntimeDefault
+seccomp. It mounts the node CRI Unix socket at `agent.criSocket` (default
+`/run/containerd/containerd.sock`; `hack/dev-values.yaml` supplies the k3d/k3s
+`/run/k3s/containerd/containerd.sock`) and read-only `/var/run/netns`.
+The agent Pod mounts its own Kubernetes ServiceAccount token for API access;
+no chart-managed workload/gateway receives CRI or netns hostPath mounts.
+**Treat this DaemonSet as node-root-equivalent:** access to the CRI socket and
+host PID namespaces is highly privileged despite the bounded Linux capability
+list. Its cluster-wide ClusterRole permits Pod get/list/watch/patch, namespace
+get, gateway get/list/watch, policy list, and `serviceaccounts/token` create in
+any namespace for short-lived, Pod-bound registration tokens. This is a
+powerful cluster-wide binding; restrict who may deploy/modify it. It has no
+Secret read permission. To check rendering without a node:
+`python3 charts/ratatoskr/tests/check_chart.py` (requires Helm and PyYAML).
+
 **TLS:** No private key is rendered by Helm. The webhook Deployment init
 container executes its own image with `--bootstrap-tls`, using a memory-backed
-`/tls` emptyDir shared with the serving webhook (`--tls-dir=/tls`). Bootstrap
+`/tls` emptyDir shared with the serving webhook (`--tls-dir=/tls/identity`). Bootstrap
 creates or reads the namespaced `ratatoskr-webhook-tls` Secret, writes certificate
-and key into `/tls`, and patches CA bundles on `ratatoskr-pods` and
+and key into `/tls/identity`, and patches CA bundles on `ratatoskr-pods` and
 `ratatoskr-validation` webhook configurations. It must retry until the
 configurations are visible. Serving replicas each bootstrap into their own
 memory-backed volume. The webhook Service is `ratatoskr-webhook` in the Helm

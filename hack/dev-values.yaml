@@ -6,6 +6,9 @@ image:
   pullPolicy: Never
 driver: init
 datapath: iproute
+agent:
+  # k3d's k3s containerd path (used when switching the dev loop to agent).
+  criSocket: /run/k3s/containerd/containerd.sock
 exclusions:
   # k3s defaults for this k3d flannel dev loop. The operator chart itself
   # leaves these empty for real clusters to discover/configure explicitly.

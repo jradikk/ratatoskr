@@ -33,8 +33,54 @@ def rule(doc, resource, api_group=None):
     return matching[0]
 
 
-def check(docs):
-    assert set(docs) == {
+def check_agent(docs, socket):
+    role = docs["ClusterRole", "ratatoskr-agent"]
+    assert role["rules"] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
+        {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["get"]},
+        {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egressgateways"],
+         "verbs": ["get", "list", "watch"]},
+        {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egresspolicies"], "verbs": ["list"]},
+        {"apiGroups": [""], "resources": ["serviceaccounts/token"], "verbs": ["create"]},
+    ]
+    assert docs["ClusterRoleBinding", "ratatoskr-agent"]["subjects"] == [
+        {"kind": "ServiceAccount", "name": "ratatoskr-agent", "namespace": NAMESPACE}
+    ]
+    ds = docs["DaemonSet", "ratatoskr-agent"]["spec"]
+    pod = ds["template"]["spec"]
+    assert ds["selector"]["matchLabels"] == ds["template"]["metadata"]["labels"]
+    assert pod["serviceAccountName"] == "ratatoskr-agent"
+    assert pod["automountServiceAccountToken"] is True
+    assert pod["hostPID"] is True and pod["hostNetwork"] is True
+    assert pod["dnsPolicy"] == "ClusterFirstWithHostNet"
+    assert len(pod["containers"]) == 1
+    container = pod["containers"][0]
+    assert container["image"].endswith("/ratatoskr-agent:dev")
+    assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
+    assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
+    assert container["ports"] == [{"name": "health", "containerPort": 8081}]
+    assert container["securityContext"] == {
+        "runAsUser": 0, "privileged": False, "allowPrivilegeEscalation": False,
+        "seccompProfile": {"type": "RuntimeDefault"},
+        "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "SYS_ADMIN"]},
+    }
+    env = {e["name"]: e for e in container["env"]}
+    assert set(env) == {"NODE_NAME", "CRI_SOCKET", "OPERATOR_NAMESPACE"}
+    assert env["NODE_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
+    assert env["CRI_SOCKET"]["value"] == socket
+    assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
+    assert pod["volumes"] == [
+        {"name": "cri-socket", "hostPath": {"path": socket, "type": "Socket"}},
+        {"name": "netns", "hostPath": {"path": "/var/run/netns", "type": "DirectoryOrCreate"}},
+    ]
+    assert container["volumeMounts"] == [
+        {"name": "cri-socket", "mountPath": socket, "readOnly": True},
+        {"name": "netns", "mountPath": "/var/run/netns", "readOnly": True},
+    ]
+
+
+def check(docs, driver, socket="/run/containerd/containerd.sock"):
+    expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
         ("ServiceAccount", "ratatoskr-webhook"),
@@ -56,8 +102,37 @@ def check(docs):
         ("NetworkPolicy", "ratatoskr-webhook-ingress"),
         ("MutatingWebhookConfiguration", "ratatoskr-pods"),
         ("ValidatingWebhookConfiguration", "ratatoskr-validation"),
-    }, set(docs)
+    }
+    if driver == "agent":
+        expected |= {
+            ("ServiceAccount", "ratatoskr-agent"),
+            ("ClusterRole", "ratatoskr-agent"),
+            ("ClusterRoleBinding", "ratatoskr-agent"),
+            ("DaemonSet", "ratatoskr-agent"),
+        }
+    assert set(docs) == expected, set(docs) ^ expected
     assert not any(kind == "Secret" for kind, _ in docs)
+    if driver == "agent":
+        check_agent(docs, socket)
+    # Host mounts and capabilities are only granted to the node-local agent;
+    # the controller/webhook never receive the node CRI or netns paths.
+    for kind, name in (("Deployment", "ratatoskr-controller"),
+                       ("Deployment", "ratatoskr-webhook")):
+        pod = docs[kind, name]["spec"]["template"]["spec"]
+        assert not any("hostPath" in v for v in pod.get("volumes", []))
+        assert not pod.get("hostPID") and not pod.get("hostNetwork")
+    # Labeled workload Pods are admitted dynamically by Go; Helm must not
+    # statically install privileged clients or add capabilities to operator
+    # workloads other than the dedicated agent DaemonSet.
+    for (kind, name), document in docs.items():
+        if kind not in ("Pod", "Deployment", "DaemonSet") or name == "ratatoskr-agent":
+            continue
+        pod_spec = (document["spec"] if kind == "Pod" else
+                    document["spec"]["template"]["spec"])
+        for container in pod_spec.get("containers", []) + pod_spec.get("initContainers", []):
+            security = container.get("securityContext", {})
+            assert not security.get("privileged")
+            assert not security.get("capabilities", {}).get("add")
     gateway_sa = docs["ServiceAccount", "ratatoskr-gateway"]
     assert gateway_sa["automountServiceAccountToken"] is False
     gateway_role = docs["ClusterRole", "ratatoskr-gateway"]
@@ -108,7 +183,7 @@ def check(docs):
                  "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
-    assert ctrl_env["DRIVER"]["value"] == "init"
+    assert ctrl_env["DRIVER"]["value"] == driver
     assert ctrl_env["DATAPATH"]["value"] == "iproute"
     for spec in (webhook["containers"][0], webhook["initContainers"][0]):
         env = {e["name"]: e for e in spec["env"]}
@@ -176,10 +251,14 @@ def check(docs):
 
 if __name__ == "__main__":
     helm("lint", str(CHART), "--strict")
-    check(render())
-    check(render("-f", str(ROOT / "hack" / "dev-values.yaml")))
-    for args in (("--set", "driver=agent"), ("--set", "datapath=ebpf"),
+    helm("lint", str(CHART), "--strict", "-f", str(ROOT / "hack" / "dev-values.yaml"))
+    check(render(), "agent")
+    check(render("-f", str(ROOT / "hack" / "dev-values.yaml")), "init")
+    check(render("-f", str(ROOT / "hack" / "dev-values.yaml"),
+                 "--set", "driver=agent"), "agent", "/run/k3s/containerd/containerd.sock")
+    check(render("--set", "driver=init"), "init")
+    for args in (("--set", "driver=unknown"), ("--set", "datapath=ebpf"),
                  ("--set", "operatorNamespace=somewhere-else")):
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              *args, succeeds=False)
-    print("chart lint/template, RBAC and webhook scope checks passed (default + dev)")
+    print("chart lint/template, RBAC and webhook scope checks passed (agent + init, default + dev)")
