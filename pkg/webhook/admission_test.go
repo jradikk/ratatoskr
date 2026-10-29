@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -109,6 +110,18 @@ func TestMutatePodFailClosed(t *testing.T) {
 	if cfg.Endpoint.IsValid() {
 		t.Fatalf("unhealthy gateway unexpectedly selected: %+v", cfg)
 	}
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+		t.Fatalf("fail-closed missing endpoint config rejected: %+v", r.Result)
+	}
+	cfg.Endpoint = netip.MustParseAddr("10.9.9.9")
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); r.Allowed {
+		t.Fatal("forged endpoint accepted when gateway has no healthy endpoint")
+	}
 }
 func TestPodDenials(t *testing.T) {
 	ns, g := fixture()
@@ -137,6 +150,66 @@ func TestPodDenials(t *testing.T) {
 		})
 	}
 }
+func TestValidatePodCreateRequiresAuthorizedMutation(t *testing.T) {
+	namespace, gateway := fixture()
+	h := setup(t, namespace, gateway)
+	pod := optedPod()
+	unmutated := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
+	if unmutated.Allowed || !strings.Contains(unmutated.Result.Message, "lacks safe Ratatoskr mutation") {
+		t.Fatalf("opted-in Pod without mutator was allowed: %+v", unmutated.Result)
+	}
+	unlabeled := pod.DeepCopy()
+	delete(unlabeled.Labels, GatewayLabel)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, unlabeled, nil)); !r.Allowed {
+		t.Fatalf("unlabeled Pod rejected: %+v", r.Result)
+	}
+	injected := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &injected, nil)); !r.Allowed {
+		t.Fatalf("genuine mutated Pod rejected: %+v", r.Result)
+	}
+	forged := injected.DeepCopy()
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(forged.Annotations[ConfigAnnotation]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Endpoint = netip.MustParseAddr("10.9.9.9")
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed || !strings.Contains(r.Result.Message, "differs from authorized gateway status") {
+		t.Fatalf("forged endpoint accepted: %+v", r.Result)
+	}
+	forged = injected.DeepCopy()
+	forged.Annotations[ReadyAnnotation] = "true"
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("premature datapath readiness accepted")
+	}
+	forged = injected.DeepCopy()
+	forged.Spec.InitContainers[0].Image = "user-controlled:init"
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("forged init image accepted")
+	}
+	forged = injected.DeepCopy()
+	forged.Spec.Volumes = nil
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("missing Downward API config volume accepted")
+	}
+}
+
+func TestDefaultGatewayUsesOperatorNamespace(t *testing.T) {
+	namespace, gateway := fixture()
+	gateway.(*v1alpha1.EgressGateway).Namespace = "egress-operator"
+	h := setup(t, namespace, gateway)
+	h.Namespace = "egress-operator"
+	pod := optedPod()
+	injected := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &injected, nil)); !r.Allowed {
+		t.Fatalf("operator namespace default rejected: %+v", r.Result)
+	}
+}
+
 func TestPolicyMatchesDenied(t *testing.T) {
 	ns, g := fixture()
 	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}}}

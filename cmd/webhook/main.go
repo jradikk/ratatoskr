@@ -48,7 +48,7 @@ func run(ctx context.Context, bootstrap bool, dir string) error {
 	if err != nil {
 		return fmt.Errorf("configure webhook manager: %w", err)
 	}
-	h := &ratatoskr.Handler{Client: mgr.GetClient(), Namespace: os.Getenv("NAMESPACE"), InitImage: os.Getenv("INIT_IMAGE")}
+	h := &ratatoskr.Handler{Client: mgr.GetClient(), Namespace: operatorNamespace(), InitImage: os.Getenv("INIT_IMAGE")}
 	mgr.GetWebhookServer().Register("/mutate-v1alpha1-pod", &admission.Webhook{Handler: admission.HandlerFunc(h.MutatePod)})
 	mgr.GetWebhookServer().Register("/validate-v1alpha1", &admission.Webhook{Handler: admission.HandlerFunc(h.Validate)})
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -59,6 +59,16 @@ func run(ctx context.Context, bootstrap bool, dir string) error {
 	}
 	return mgr.Start(ctx)
 }
+
+// The webhook serves TLS in NAMESPACE, which may differ from the operator's
+// default gateway namespace. Keep the historical fallback for local installs.
+func operatorNamespace() string {
+	if namespace := os.Getenv("OPERATOR_NAMESPACE"); namespace != "" {
+		return namespace
+	}
+	return os.Getenv("NAMESPACE")
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	bootstrap := flag.Bool("bootstrap-tls", false, "bootstrap webhook TLS Secret and CA bundles")

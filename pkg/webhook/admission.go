@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -65,76 +66,10 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 			return denied(fmt.Errorf("reserved volume %s already exists", configVolume))
 		}
 	}
-	ns := req.Namespace
-	if ns == "" {
-		ns = pod.Namespace
-	}
-	if ns == "" {
-		return denied(fmt.Errorf("pod namespace is required"))
-	}
-	gatewayNS := pod.Labels[GatewayNamespace]
-	if annotation := pod.Annotations[GatewayNamespace]; annotation != "" {
-		if gatewayNS != "" && gatewayNS != annotation {
-			return denied(fmt.Errorf("conflicting gateway namespace label and annotation"))
-		}
-		gatewayNS = annotation
-	}
-	if gatewayNS == "" {
-		gatewayNS = h.Namespace
-	}
-	if gatewayNS == "" {
-		return denied(fmt.Errorf("NAMESPACE is required to resolve gateway"))
-	}
-	var gateway v1alpha1.EgressGateway
-	if err := h.Client.Get(ctx, types.NamespacedName{Namespace: gatewayNS, Name: name}, &gateway); err != nil {
-		return denied(fmt.Errorf("resolve EgressGateway: %w", err))
-	}
-	if err := supportedGateway(&gateway); err != nil {
-		return denied(err)
-	}
-	var namespace corev1.Namespace
-	if err := h.Client.Get(ctx, types.NamespacedName{Name: ns}, &namespace); err != nil {
-		return denied(fmt.Errorf("resolve workload namespace: %w", err))
-	}
-	if gateway.Spec.AllowedNamespaces.NamespaceSelector == nil {
-		return denied(fmt.Errorf("gateway denies all namespaces: namespaceSelector is absent"))
-	}
-	selector, err := metav1.LabelSelectorAsSelector(gateway.Spec.AllowedNamespaces.NamespaceSelector)
-	if err != nil {
-		return denied(fmt.Errorf("invalid namespaceSelector: %w", err))
-	}
-	if !selector.Matches(labels.Set(namespace.Labels)) {
-		return denied(fmt.Errorf("namespace %s is not allowed by gateway", ns))
-	}
-	if gateway.Status.GatewayID == 0 || gateway.Status.GatewayID > 0xffffff {
-		return denied(fmt.Errorf("gatewayID not allocated; retry after gateway reconciliation"))
-	}
-	matches, err := h.matchingPolicies(ctx, ns, pod.Labels)
+	cfg, err := h.clientConfig(ctx, req.Namespace, &pod)
 	if err != nil {
 		return denied(err)
 	}
-	if len(matches) > 1 {
-		return denied(fmt.Errorf("multiple EgressPolicies match pod: %v", matches))
-	}
-	if len(matches) == 1 {
-		return denied(fmt.Errorf("EgressPolicy %s matches pod; selective policies require M3", matches[0]))
-	}
-	cfg := datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
-	for _, e := range gateway.Status.EffectiveExclusions {
-		p, err := netip.ParsePrefix(e.CIDR)
-		if err != nil || !p.Addr().Is4() {
-			return denied(fmt.Errorf("gateway has invalid effective exclusion %q", e.CIDR))
-		}
-		cfg.Exclusions = append(cfg.Exclusions, p)
-	}
-	for _, endpoint := range gateway.Status.Endpoints {
-		ip, err := netip.ParseAddr(endpoint.PodIP)
-		if endpoint.UpstreamHealthy && err == nil && ip.Is4() && !ip.IsUnspecified() && !ip.IsMulticast() {
-			cfg.Endpoint = ip
-			break
-		}
-	}
-	// An absent endpoint is intentional: the init backend installs an unreachable route.
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return denied(err)
@@ -157,6 +92,85 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	}
 	return admission.PatchResponseFromRaw(req.Object.Raw, mutated)
 }
+
+// clientConfig is shared by mutation and CREATE validation so admission never
+// trusts an annotation for gateway authorization or datapath parameters.
+func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, pod *corev1.Pod) (datapath.ClientConfig, error) {
+	cfg := datapath.ClientConfig{}
+	ns := admissionNamespace
+	if ns == "" {
+		ns = pod.Namespace
+	}
+	if ns == "" {
+		return cfg, fmt.Errorf("pod namespace is required")
+	}
+	name := pod.Labels[GatewayLabel]
+	gatewayNS := pod.Labels[GatewayNamespace]
+	if annotation := pod.Annotations[GatewayNamespace]; annotation != "" {
+		if gatewayNS != "" && gatewayNS != annotation {
+			return cfg, fmt.Errorf("conflicting gateway namespace label and annotation")
+		}
+		gatewayNS = annotation
+	}
+	if gatewayNS == "" {
+		gatewayNS = h.Namespace
+	}
+	if gatewayNS == "" {
+		return cfg, fmt.Errorf("operator NAMESPACE is required to resolve gateway")
+	}
+	var gateway v1alpha1.EgressGateway
+	if err := h.Client.Get(ctx, types.NamespacedName{Namespace: gatewayNS, Name: name}, &gateway); err != nil {
+		return cfg, fmt.Errorf("resolve EgressGateway: %w", err)
+	}
+	if err := supportedGateway(&gateway); err != nil {
+		return cfg, err
+	}
+	var namespace corev1.Namespace
+	if err := h.Client.Get(ctx, types.NamespacedName{Name: ns}, &namespace); err != nil {
+		return cfg, fmt.Errorf("resolve workload namespace: %w", err)
+	}
+	if gateway.Spec.AllowedNamespaces.NamespaceSelector == nil {
+		return cfg, fmt.Errorf("gateway denies all namespaces: namespaceSelector is absent")
+	}
+	selector, err := metav1.LabelSelectorAsSelector(gateway.Spec.AllowedNamespaces.NamespaceSelector)
+	if err != nil {
+		return cfg, fmt.Errorf("invalid namespaceSelector: %w", err)
+	}
+	if !selector.Matches(labels.Set(namespace.Labels)) {
+		return cfg, fmt.Errorf("namespace %s is not allowed by gateway", ns)
+	}
+	if gateway.Status.GatewayID == 0 || gateway.Status.GatewayID > 0xffffff {
+		return cfg, fmt.Errorf("gatewayID not allocated; retry after gateway reconciliation")
+	}
+	matches, err := h.matchingPolicies(ctx, ns, pod.Labels)
+	if err != nil {
+		return cfg, err
+	}
+	if len(matches) > 1 {
+		return cfg, fmt.Errorf("multiple EgressPolicies match pod: %v", matches)
+	}
+	if len(matches) == 1 {
+		return cfg, fmt.Errorf("EgressPolicy %s matches pod; selective policies require M3", matches[0])
+	}
+	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
+	for _, e := range gateway.Status.EffectiveExclusions {
+		prefix, err := netip.ParsePrefix(e.CIDR)
+		if err != nil || !prefix.Addr().Is4() {
+			return cfg, fmt.Errorf("gateway has invalid effective exclusion %q", e.CIDR)
+		}
+		cfg.Exclusions = append(cfg.Exclusions, prefix)
+	}
+	for _, endpoint := range gateway.Status.Endpoints {
+		ip, err := netip.ParseAddr(endpoint.PodIP)
+		if endpoint.UpstreamHealthy && err == nil && ip.Is4() && !ip.IsUnspecified() && !ip.IsMulticast() {
+			cfg.Endpoint = ip
+			break
+		}
+	}
+	// An absent endpoint is intentional: the init backend installs an unreachable route.
+	return cfg, nil
+}
+
 func supportedGateway(g *v1alpha1.EgressGateway) error {
 	if g.Spec.Encryption != "" && g.Spec.Encryption != "none" {
 		return fmt.Errorf("gateway encryption %q is not implemented in M2", g.Spec.Encryption)
@@ -195,13 +209,20 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 	}
 	switch req.Kind.Kind {
 	case "Pod":
-		if req.Operation != admissionv1.Update {
-			return admission.Allowed("pod create handled by mutator")
-		}
-		var pod, old corev1.Pod
+		var pod corev1.Pod
 		if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 			return denied(err)
 		}
+		if req.Operation == admissionv1.Create {
+			if pod.Labels[GatewayLabel] == "" {
+				return admission.Allowed("not opted in")
+			}
+			if err := h.validateInjectedPod(ctx, req.Namespace, &pod); err != nil {
+				return denied(fmt.Errorf("opted-in pod lacks safe Ratatoskr mutation: %w", err))
+			}
+			return admission.Allowed("client init injected")
+		}
+		var old corev1.Pod
 		if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
 			return denied(err)
 		}
@@ -264,6 +285,86 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 	}
 	return admission.Allowed("valid")
 }
+
+// validateInjectedPod ensures that a selected pod cannot be admitted while the
+// mutator is unavailable. The init must read the operator's annotation through
+// the Downward API, rather than an arbitrary user-supplied command or file.
+func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace string, pod *corev1.Pod) error {
+	if h.InitImage == "" || pod.Spec.HostNetwork || len(pod.Spec.InitContainers) == 0 {
+		return fmt.Errorf("expected Ratatoskr init container is missing or unsupported")
+	}
+	init := pod.Spec.InitContainers[0]
+	if init.Name != initName || init.Image != h.InitImage || len(init.Command) != 0 ||
+		len(init.Args) != 1 || init.Args[0] != "-config=/var/run/ratatoskr/client.json" {
+		return fmt.Errorf("expected Ratatoskr init image, entrypoint and config argument")
+	}
+	if init.SecurityContext == nil || init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
+		init.SecurityContext.Capabilities == nil || len(init.SecurityContext.Capabilities.Add) != 1 ||
+		init.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" || len(init.SecurityContext.Capabilities.Drop) != 0 {
+		return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
+	}
+	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolume ||
+		init.VolumeMounts[0].MountPath != "/var/run/ratatoskr" || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" {
+		return fmt.Errorf("expected read-only Ratatoskr config volume mount")
+	}
+	paths := map[string]string{"POD_IP": "status.podIP", "POD_UID": "metadata.uid", "POD_NAME": "metadata.name"}
+	if len(init.Env) != len(paths) {
+		return fmt.Errorf("expected Ratatoskr Downward API identity environment")
+	}
+	for _, env := range init.Env {
+		path, ok := paths[env.Name]
+		if !ok || env.Value != "" || env.ValueFrom == nil || env.ValueFrom.FieldRef == nil ||
+			env.ValueFrom.FieldRef.FieldPath != path ||
+			(env.ValueFrom.FieldRef.APIVersion != "" && env.ValueFrom.FieldRef.APIVersion != "v1") {
+			return fmt.Errorf("expected Ratatoskr Downward API identity environment")
+		}
+		delete(paths, env.Name)
+	}
+	if len(paths) != 0 {
+		return fmt.Errorf("duplicate Ratatoskr identity environment")
+	}
+	volumeFound := false
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name != configVolume {
+			continue
+		}
+		if volumeFound || volume.DownwardAPI == nil || len(volume.DownwardAPI.Items) != 1 {
+			return fmt.Errorf("expected unique Ratatoskr Downward API config volume")
+		}
+		item := volume.DownwardAPI.Items[0]
+		if item.Path != "client.json" || item.FieldRef == nil ||
+			item.FieldRef.FieldPath != "metadata.annotations['"+ConfigAnnotation+"']" ||
+			(item.FieldRef.APIVersion != "" && item.FieldRef.APIVersion != "v1") {
+			return fmt.Errorf("expected Ratatoskr annotation projection")
+		}
+		volumeFound = true
+	}
+	if !volumeFound {
+		return fmt.Errorf("ratatoskr config volume missing")
+	}
+	if pod.Annotations[ReadyAnnotation] != "pending" {
+		return fmt.Errorf("datapath readiness must remain pending until init succeeds")
+	}
+	config := pod.Annotations[ConfigAnnotation]
+	if config == "" {
+		return fmt.Errorf("operator-generated client config annotation missing")
+	}
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(config), &cfg); err != nil {
+		return fmt.Errorf("client config annotation invalid: %w", err)
+	}
+	expected, err := h.clientConfig(ctx, admissionNamespace, pod)
+	if err != nil {
+		return fmt.Errorf("resolve authorized client config: %w", err)
+	}
+	// Compare typed configs: a forged endpoint, gateway ID, exclusion, identity,
+	// encryption or selective policy must not be admitted even with a real init.
+	if !reflect.DeepEqual(cfg, expected) {
+		return fmt.Errorf("client config differs from authorized gateway status")
+	}
+	return nil
+}
+
 func sameMapEntry(old, updated map[string]string, key string) bool {
 	oldValue, oldPresent := old[key]
 	newValue, newPresent := updated[key]
