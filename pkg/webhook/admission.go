@@ -205,8 +205,12 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 		if err := json.Unmarshal(req.OldObject.Raw, &old); err != nil {
 			return denied(err)
 		}
-		if old.Status.Phase == corev1.PodRunning && (old.Labels[GatewayLabel] != pod.Labels[GatewayLabel] || namespaceOverride(&old) != namespaceOverride(&pod)) {
-			return denied(fmt.Errorf("running pod gateway opt-in and namespace are immutable"))
+		// Mutation only runs on CREATE. Changing gateway selection on any UPDATE,
+		// including Pending pods, could start a workload without the injected init.
+		if !sameMapEntry(old.Labels, pod.Labels, GatewayLabel) ||
+			!sameMapEntry(old.Labels, pod.Labels, GatewayNamespace) ||
+			!sameMapEntry(old.Annotations, pod.Annotations, GatewayNamespace) {
+			return denied(fmt.Errorf("pod gateway opt-in and gateway namespace are immutable; change the Deployment template and recreate the pod"))
 		}
 	case "EgressGateway":
 		var g v1alpha1.EgressGateway
@@ -260,6 +264,8 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 	}
 	return admission.Allowed("valid")
 }
-func namespaceOverride(p *corev1.Pod) string {
-	return p.Labels[GatewayNamespace] + "/" + p.Annotations[GatewayNamespace]
+func sameMapEntry(old, updated map[string]string, key string) bool {
+	oldValue, oldPresent := old[key]
+	newValue, newPresent := updated[key]
+	return oldPresent == newPresent && oldValue == newValue
 }

@@ -153,21 +153,43 @@ func TestPolicyMatchesDenied(t *testing.T) {
 		t.Fatalf("multiple matches not explicit: %+v", r.Result)
 	}
 }
-func TestValidateRunningPodImmutable(t *testing.T) {
+func TestValidatePodSelectionImmutableAtEveryPhase(t *testing.T) {
 	h := setup(t)
 	old := optedPod()
-	old.Status.Phase = corev1.PodRunning
+	old.Status.Phase = corev1.PodPending
+	delete(old.Labels, GatewayLabel)
 	newPod := old.DeepCopy()
-	delete(newPod.Labels, GatewayLabel)
+	newPod.Labels[GatewayLabel] = "gateway"
 	r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
+	if r.Allowed || !strings.Contains(r.Result.Message, "change the Deployment template and recreate the pod") {
+		t.Fatalf("pending pod opted in without init: %+v", r.Result)
+	}
+
+	old = optedPod()
+	old.Status.Phase = corev1.PodRunning
+	newPod = old.DeepCopy()
+	delete(newPod.Labels, GatewayLabel)
+	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
+	if r.Allowed || !strings.Contains(r.Result.Message, "recreate the pod") {
+		t.Fatalf("running gateway label removed: %+v", r.Result)
+	}
+	newPod = old.DeepCopy()
+	newPod.Labels[GatewayNamespace] = "other"
+	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
 	if r.Allowed {
-		t.Fatal("running gateway label removed")
+		t.Fatal("running gateway namespace label changed")
 	}
 	newPod = old.DeepCopy()
 	newPod.Annotations = map[string]string{GatewayNamespace: "other"}
 	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
 	if r.Allowed {
-		t.Fatal("running gateway namespace changed")
+		t.Fatal("running gateway namespace annotation changed")
+	}
+	newPod = old.DeepCopy()
+	newPod.Annotations = map[string]string{ReadyAnnotation: "true"}
+	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
+	if !r.Allowed {
+		t.Fatalf("controller datapath-ready annotation update rejected: %+v", r.Result)
 	}
 }
 func TestPolicyOverlapAndGatewaySelector(t *testing.T) {
