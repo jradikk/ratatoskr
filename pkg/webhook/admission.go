@@ -51,8 +51,8 @@ func (h *Handler) validateModes() error {
 	if h.driver() != "init" && h.driver() != "agent" {
 		return fmt.Errorf("unsupported DRIVER %q", h.Driver)
 	}
-	if h.Datapath != "" && h.Datapath != "iproute" {
-		return fmt.Errorf("unsupported DATAPATH %q; eBPF requires M6", h.Datapath)
+	if h.Datapath != "" && h.Datapath != "iproute" && h.Datapath != "ebpf" {
+		return fmt.Errorf("unsupported DATAPATH %q", h.Datapath)
 	}
 	return nil
 }

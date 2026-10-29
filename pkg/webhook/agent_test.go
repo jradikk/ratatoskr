@@ -92,9 +92,18 @@ func TestAgentDriverOptInAndUnsupportedModes(t *testing.T) {
 		t.Fatalf("unlabeled pod rejected: %+v", r.Result)
 	}
 	pod = optedPod()
-	h.Datapath = "ebpf"
-	if r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)); r.Allowed || !strings.Contains(r.Result.Message, "M6") {
-		t.Fatalf("unsupported datapath admitted: %+v", r.Result)
+	for _, driver := range []string{"agent", "init"} {
+		h.Driver = driver
+		h.Datapath = "ebpf"
+		out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+		if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+			t.Fatalf("ebpf driver %s rejected at validating admission: %+v", driver, r.Result)
+		}
+	}
+	h.Driver = "agent"
+	h.Datapath = "not-a-datapath"
+	if r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)); r.Allowed || !strings.Contains(r.Result.Message, "unsupported DATAPATH") {
+		t.Fatalf("invalid datapath admitted: %+v", r.Result)
 	}
 	h.Datapath = "iproute"
 	h.Driver = "mystery"
