@@ -1,0 +1,29 @@
+# k3d cluster config for the "flannel" variant.
+# k3s default networking (flannel VXLAN + kube-router network policy). Primary dev loop.
+# Created/destroyed only through hack/k3d-up.sh / hack/k3d-down.sh, which also
+# validate that the image below matches K3S_IMAGE in hack/versions.env.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ratatoskr-flannel
+servers: 1
+agents: 2
+image: rancher/k3s:v1.36.5-k3s1
+kubeAPI:
+  hostIP: 127.0.0.1
+options:
+  k3d:
+    wait: true
+    timeout: 300s
+    disableLoadbalancer: true
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      - arg: --disable=servicelb
+        nodeFilters:
+          - server:*
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true

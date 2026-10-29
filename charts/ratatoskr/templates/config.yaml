@@ -1,0 +1,13 @@
+{{- include "ratatoskr.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratatoskr-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+data:
+  driver: {{ .Values.driver | quote }}
+  datapath: {{ .Values.datapath | quote }}
+  clusterDomain: {{ .Values.clusterDomain | quote }}
+  fwmarkMask: {{ .Values.fwmarkMask | quote }}

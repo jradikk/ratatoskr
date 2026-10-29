@@ -1,0 +1,24 @@
+# Calico Installation for the k3d "calico" variant (applied by hack/k3d-up.sh
+# after the Tigera operator is running). Pod CIDR matches the k3s default.
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  cni:
+    type: Calico
+    # k3s points containerd at these instead of /opt/cni/bin and /etc/cni/net.d.
+    binDir: /var/lib/rancher/k3s/data/cni
+    confDir: /var/lib/rancher/k3s/agent/etc/cni/net.d
+  calicoNetwork:
+    # Required on k3s: its containerd does not enable forwarding in pod netns.
+    containerIPForwarding: Enabled
+    linuxDataplane: Iptables
+    ipPools:
+      - name: default-ipv4-ippool
+        cidr: 10.42.0.0/16
+        blockSize: 26
+        encapsulation: VXLAN
+        natOutgoing: Enabled
+        nodeSelector: all()
+  controlPlaneReplicas: 1

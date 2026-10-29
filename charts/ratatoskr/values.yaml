@@ -1,0 +1,27 @@
+# Default values for the Ratatoskr chart. Components are added milestone by
+# milestone; see docs/design.md for the full picture.
+
+image:
+  registry: ghcr.io/skaldhall
+  # Defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# How pod network namespaces are programmed: "init" (MVP, NET_ADMIN init
+# container) or "agent" (DaemonSet; workloads need no capabilities).
+driver: agent
+
+# Datapath implementation: "iproute" or "ebpf". CRDs are identical for both.
+datapath: iproute
+
+# Kubernetes cluster DNS domain, used to rebuild search paths in dns.mode=gateway.
+clusterDomain: cluster.local
+
+# Firewall-mark bits reserved for Ratatoskr in pod and gateway netns. Must not
+# overlap Istio (0x539 / 0xfff) or Cilium (0x0f00, 0xf000 ranges).
+fwmarkMask: "0x00f00000"
+
+# Extra CIDRs never steered in any pod (in addition to auto-detected ones).
+exclusions:
+  serviceCIDRs: []
+  extraCIDRs: []

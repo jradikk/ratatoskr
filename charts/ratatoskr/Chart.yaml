@@ -1,0 +1,16 @@
+apiVersion: v2
+name: ratatoskr
+description: Label-driven egress gateways for Kubernetes (GENEVE in-cluster, pluggable VPN upstreams).
+type: application
+version: 0.0.0-dev
+appVersion: "dev"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/skaldhall/ratatoskr
+sources:
+  - https://github.com/skaldhall/ratatoskr
+keywords:
+  - egress
+  - vpn
+  - geneve
+  - wireguard
+  - ebpf

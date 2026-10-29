@@ -1,0 +1,24 @@
+# Helm values for Cilium on k3d (used by hack/k3d-up.sh for the cilium and
+# cilium-wg variants). k8sServiceHost/Port and encryption are set on the
+# command line by the script.
+ipam:
+  mode: kubernetes
+kubeProxyReplacement: false
+routingMode: tunnel
+tunnelProtocol: vxlan
+cni:
+  # k3s keeps CNI binaries/config outside the usual /opt/cni, /etc/cni paths.
+  binPath: /var/lib/rancher/k3s/data/cni
+  confPath: /var/lib/rancher/k3s/agent/etc/cni/net.d
+bpf:
+  autoMount:
+    # hack/k3d-up.sh mounts bpffs with shared propagation in every node.
+    enabled: false
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /run/cilium/cgroupv2
+operator:
+  replicas: 1
+hubble:
+  enabled: false

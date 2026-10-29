@@ -1,0 +1,2 @@
+Ratatoskr {{ .Chart.AppVersion }} installed in {{ .Release.Namespace }} (driver={{ .Values.driver }}, datapath={{ .Values.datapath }}).
+Create an EgressGateway, then label workloads with ratatoskr.skaldhall.io/gateway=<name>.

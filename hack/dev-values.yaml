@@ -1,0 +1,8 @@
+# Helm values for the local k3d dev loop (make dev-deploy). Images are built
+# locally and imported with `k3d image import`, never pulled.
+image:
+  registry: ghcr.io/skaldhall
+  tag: dev
+  pullPolicy: Never
+driver: init
+datapath: iproute
