@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -123,6 +124,60 @@ func TestMutatePodFailClosed(t *testing.T) {
 		t.Fatal("forged endpoint accepted when gateway has no healthy endpoint")
 	}
 }
+func TestProgrammingInitDatapathCapabilitiesAndEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		wantCaps   []corev1.Capability
+	}{
+		{"default iproute", "", []corev1.Capability{"NET_ADMIN"}},
+		{"explicit iproute", "iproute", []corev1.Capability{"NET_ADMIN"}},
+		{"ebpf", "ebpf", []corev1.Capability{"NET_ADMIN", "BPF", "PERFMON"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			namespace, gateway := fixture()
+			h := setup(t, namespace, gateway)
+			h.Datapath = tc.mode
+			pod := optedPod()
+			out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+			init := out.Spec.InitContainers[0]
+			if init.SecurityContext == nil || init.SecurityContext.Capabilities == nil || !slices.Equal(init.SecurityContext.Capabilities.Add, tc.wantCaps) || len(init.SecurityContext.Capabilities.Drop) != 0 || len(init.VolumeMounts) != 1 || len(out.Spec.Volumes) != 1 {
+				t.Fatalf("unexpected datapath capabilities or host mounts: %+v", init)
+			}
+			mode := tc.mode
+			if mode == "" {
+				mode = "iproute"
+			}
+			found := false
+			for _, env := range init.Env {
+				if env.Name == "DATAPATH" {
+					found = true
+					if env.Value != mode || env.ValueFrom != nil {
+						t.Fatalf("incorrect DATAPATH env: %+v", env)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("DATAPATH env absent")
+			}
+			if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+				t.Fatalf("injected init rejected: %+v", r.Result)
+			}
+			if mode == "ebpf" {
+				forged := out.DeepCopy()
+				forged.Spec.InitContainers[0].SecurityContext.Capabilities.Add = []corev1.Capability{"NET_ADMIN"}
+				if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+					t.Fatal("ebpf init without BPF/PERFMON accepted")
+				}
+				forged = out.DeepCopy()
+				forged.Spec.InitContainers[0].Env[len(forged.Spec.InitContainers[0].Env)-1].Value = "iproute"
+				if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+					t.Fatal("incorrect DATAPATH env accepted")
+				}
+			}
+		})
+	}
+}
+
 func TestPodDenials(t *testing.T) {
 	ns, g := fixture()
 	cases := []struct {

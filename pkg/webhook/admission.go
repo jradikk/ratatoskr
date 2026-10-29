@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +46,20 @@ func (h *Handler) driver() string {
 		return "init"
 	}
 	return h.Driver
+}
+
+func (h *Handler) datapath() string {
+	if h.Datapath == "" {
+		return "iproute"
+	}
+	return h.Datapath
+}
+
+func (h *Handler) initCapabilities() []corev1.Capability {
+	if h.datapath() == "ebpf" {
+		return []corev1.Capability{"NET_ADMIN", "BPF", "PERFMON"}
+	}
+	return []corev1.Capability{"NET_ADMIN"}
 }
 
 func (h *Handler) validateModes() error {
@@ -145,10 +160,11 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	} else {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}}}}})
 		privileged := false
-		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{Privileged: &privileged, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}}}, Env: []corev1.EnvVar{
+		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{Privileged: &privileged, Capabilities: &corev1.Capabilities{Add: h.initCapabilities()}}, Env: []corev1.EnvVar{
 			{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 			{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+			{Name: "DATAPATH", Value: h.datapath()},
 		}, VolumeMounts: []corev1.VolumeMount{{Name: configVolume, MountPath: "/var/run/ratatoskr", ReadOnly: true}}}}, pod.Spec.InitContainers...)
 		if cfg.Encryption == "wireguard" {
 			injectWireGuardToken(&pod)
@@ -426,8 +442,8 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	}
 	if h.driver() == "init" {
 		if init.SecurityContext == nil || init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
-			init.SecurityContext.Capabilities == nil || len(init.SecurityContext.Capabilities.Add) != 1 ||
-			init.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" || len(init.SecurityContext.Capabilities.Drop) != 0 {
+			init.SecurityContext.Capabilities == nil || !slices.Equal(init.SecurityContext.Capabilities.Add, h.initCapabilities()) ||
+			len(init.SecurityContext.Capabilities.Drop) != 0 {
 			return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
 		}
 		if len(init.VolumeMounts) < 1 || len(init.VolumeMounts) > 2 || init.VolumeMounts[0].Name != configVolume ||
@@ -435,10 +451,18 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 			return fmt.Errorf("expected read-only Ratatoskr config volume mount")
 		}
 		paths := map[string]string{"POD_IP": "status.podIP", "POD_UID": "metadata.uid", "POD_NAME": "metadata.name"}
-		if len(init.Env) != len(paths) {
-			return fmt.Errorf("expected Ratatoskr Downward API identity environment")
+		if len(init.Env) != len(paths)+1 {
+			return fmt.Errorf("expected Ratatoskr Downward API identity environment and DATAPATH")
 		}
+		datapathEnv := false
 		for _, env := range init.Env {
+			if env.Name == "DATAPATH" {
+				if datapathEnv || env.Value != h.datapath() || env.ValueFrom != nil {
+					return fmt.Errorf("programming init DATAPATH does not match webhook configuration")
+				}
+				datapathEnv = true
+				continue
+			}
 			path, ok := paths[env.Name]
 			if !ok || env.Value != "" || env.ValueFrom == nil || env.ValueFrom.FieldRef == nil ||
 				env.ValueFrom.FieldRef.FieldPath != path ||
@@ -447,8 +471,8 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 			}
 			delete(paths, env.Name)
 		}
-		if len(paths) != 0 {
-			return fmt.Errorf("duplicate Ratatoskr identity environment")
+		if len(paths) != 0 || !datapathEnv {
+			return fmt.Errorf("missing or duplicate Ratatoskr identity environment or DATAPATH")
 		}
 		volumeFound := false
 		for _, volume := range pod.Spec.Volumes {
