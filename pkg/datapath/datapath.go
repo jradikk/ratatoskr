@@ -57,12 +57,13 @@ type ClientConfig struct {
 	GatewayID uint32     `json:"gatewayID"`
 	// An invalid/absent Endpoint means no healthy gateway: keep only the
 	// unreachable route rather than allowing a lookup to fall through to main.
-	Endpoint   netip.Addr     `json:"endpoint,omitempty"`
-	Exclusions []netip.Prefix `json:"exclusions"`
-	MTU        int            `json:"mtu"`
-	Encryption string         `json:"encryption,omitempty"`
-	Identity   Identity       `json:"identity"`
-	Policy     Policy         `json:"policy"`
+	Endpoint           netip.Addr     `json:"endpoint,omitempty"`
+	AllowCloudMetadata bool           `json:"allowCloudMetadata,omitempty"`
+	Exclusions         []netip.Prefix `json:"exclusions"`
+	MTU                int            `json:"mtu"`
+	Encryption         string         `json:"encryption,omitempty"`
+	Identity           Identity       `json:"identity"`
+	Policy             Policy         `json:"policy"`
 }
 type GatewayConfig struct {
 	PodIP           netip.Addr   `json:"podIP"`
@@ -101,8 +102,41 @@ func (c ClientConfig) Validate() error {
 			return fmt.Errorf("exclusions must be IPv4 CIDRs")
 		}
 	}
-	if c.Policy.Mode != "" || len(c.Policy.Rules) > 0 || len(c.Policy.ExcludeCIDRs) > 0 {
-		return fmt.Errorf("selective policies require M3")
+	if c.Policy.Mode != "" && c.Policy.Mode != "include" && c.Policy.Mode != "exclude" {
+		return fmt.Errorf("unsupported policy mode %q", c.Policy.Mode)
+	}
+	if c.Policy.Mode == "" && len(c.Policy.Rules) > 0 {
+		return fmt.Errorf("policy rules require include or exclude mode")
+	}
+	for _, p := range c.Policy.ExcludeCIDRs {
+		if !p.IsValid() || !p.Addr().Is4() {
+			return fmt.Errorf("policy exclusions must be IPv4 CIDRs")
+		}
+	}
+	matches := 0
+	for _, r := range c.Policy.Rules {
+		for _, p := range r.CIDRs {
+			if !p.IsValid() || !p.Addr().Is4() {
+				return fmt.Errorf("policy destinations must be IPv4 CIDRs")
+			}
+		}
+		for _, p := range r.Ports {
+			if (p.Protocol != "TCP" && p.Protocol != "UDP") || p.Port == 0 {
+				return fmt.Errorf("policy ports require TCP/UDP and a nonzero port")
+			}
+		}
+		count := len(r.CIDRs)
+		if count == 0 {
+			count = 1
+		}
+		ports := len(r.Ports)
+		if ports == 0 {
+			ports = 1
+		}
+		matches += count * ports
+		if matches > 4096 {
+			return fmt.Errorf("policy exceeds 4096 destination/port matches")
+		}
 	}
 	return nil
 }

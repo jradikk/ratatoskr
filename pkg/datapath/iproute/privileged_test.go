@@ -98,7 +98,7 @@ func TestPrivilegedClient(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(rs) != 4 {
+		if len(rs) != 5 {
 			t.Fatalf("rules duplicated: %d", len(rs))
 		}
 		if !reflect.DeepEqual(before, mainRoutes(t, b)) {
@@ -239,6 +239,161 @@ func TestPrivilegedGateway(t *testing.T) {
 		upRoutes, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: datapath.GatewayTable}, netlink.RT_FILTER_TABLE)
 		if err != nil || len(upRoutes) < 2 {
 			t.Fatalf("recovery probes lost table100 route: %v", err)
+		}
+	})
+}
+
+func TestPrivilegedSelectiveRulesAndMetadata(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.1.8/24")
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Gw: net.ParseIP("10.42.1.1")}); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Exclusions: []netip.Prefix{netip.MustParsePrefix("198.18.0.0/16")}, Policy: datapath.Policy{Mode: "include", ExcludeCIDRs: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, Ports: []datapath.Port{{Protocol: "TCP", Port: 443}}}}}}
+		for _, mode := range []string{"include", "exclude"} {
+			c.Policy.Mode = mode
+			for i := 0; i < 2; i++ {
+				if err := b.ApplyClient(context.Background(), c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rules, err := b.ownedClientRules()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rules) != 5 {
+				t.Fatalf("%s: unexpected routing rules %d", mode, len(rules))
+			}
+			var marked bool
+			for _, r := range rules {
+				if r.Priority == datapath.RulePriority+998 {
+					marked = r.Mark == steeringMark && r.Mask != nil && *r.Mask == datapath.MarkMask
+				}
+			}
+			if !marked {
+				t.Fatal("missing masked fwmark lookup")
+			}
+			conn := b.nft()
+			chains, err := conn.ListChains()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var chain *nftables.Chain
+			for _, ch := range chains {
+				if ch.Table.Name == "ratatoskr_route" && ch.Name == "steer" {
+					chain = ch
+				}
+			}
+			if chain == nil || chain.Type != nftables.ChainTypeRoute || chain.Table.Family != nftables.TableFamilyIPv4 {
+				t.Fatal("missing IPv4 route output chain")
+			}
+			nr, err := conn.GetRules(chain.Table, chain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(nr) != 1+map[string]int{"include": 0, "exclude": 1}[mode] {
+				t.Fatalf("%s: wrong nft rule count: %d", mode, len(nr))
+			}
+			for _, ip := range []string{"203.0.113.12", "198.18.0.12"} {
+				direct, err := netlink.RouteGetWithOptions(net.ParseIP(ip), &netlink.RouteGetOptions{Mark: steeringMark})
+				if err != nil || len(direct) == 0 || direct[0].Table != unix.RT_TABLE_MAIN {
+					t.Fatalf("excluded %s did not use main: %v %v", ip, direct, err)
+				}
+			}
+			_, err = netlink.RouteGetWithOptions(net.ParseIP("169.254.169.254"), &netlink.RouteGetOptions{Mark: steeringMark})
+			if err == nil {
+				t.Fatal("metadata must be prohibited before link-local exemption")
+			}
+		}
+		c.Policy.Rules = nil
+		for _, mode := range []string{"include", "exclude"} {
+			c.Policy.Mode = mode
+			if err := b.ApplyClient(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			conn := b.nft()
+			chains, err := conn.ListChains()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, chain := range chains {
+				if chain.Table.Name != "ratatoskr_route" || chain.Name != "steer" {
+					continue
+				}
+				rules, err := conn.GetRules(chain.Table, chain)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := 0
+				if mode == "exclude" {
+					want = 1
+				}
+				if len(rules) != want {
+					t.Fatalf("empty %s should have %d steering rules, got %d", mode, want, len(rules))
+				}
+			}
+		}
+		c.AllowCloudMetadata = true
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		r, err := netlink.RouteGetWithOptions(net.ParseIP("169.254.169.254"), &netlink.RouteGetOptions{Mark: steeringMark})
+		if err != nil || len(r) == 0 || r[0].Table != unix.RT_TABLE_MAIN {
+			t.Fatalf("metadata allowed should use main: %v %v", r, err)
+		}
+		// Switch through the legacy full tunnel and back: neither mode may
+		// leave stale catch-all and selective rules installed together.
+		c.Policy.Mode = ""
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		c.Policy.Mode = "exclude"
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		transition, err := b.ownedClientRules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rule := range transition {
+			if rule.Priority == datapath.RulePriority+999 {
+				t.Fatal("stale full-tunnel catch-all after selective transition")
+			}
+		}
+		c.Endpoint = netip.Addr{}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		_, err = netlink.RouteGetWithOptions(net.ParseIP("198.51.100.12"), &netlink.RouteGetOptions{Mark: steeringMark | 0x40000000})
+		if err == nil {
+			t.Fatal("marked selective traffic fell through to main without endpoint")
+		}
+		if err := b.RemoveClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestPrivilegedRejectDualStackClient(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.1.8/24")
+		v6, err := netlink.ParseAddr("2001:db8::8/64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.h.AddrAdd(eth, v6); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400}
+		if err := b.ApplyClient(context.Background(), c); err == nil {
+			t.Fatal("dual-stack pod would bypass IPv4-only steering")
+		}
+		rules, err := b.ownedClientRules()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rules) != 0 {
+			t.Fatal("dual-stack rejection must precede routing changes")
 		}
 	})
 }

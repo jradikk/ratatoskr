@@ -5,6 +5,7 @@ package iproute
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -22,6 +24,10 @@ import (
 )
 
 const fallbackMetric = 4294967295
+const steeringMark uint32 = 0x00200000
+const metadataPriority = datapath.RulePriority - 1
+
+var metadataIP = netip.MustParsePrefix("169.254.169.254/32")
 
 type Backend struct{ h *netlink.Handle }
 
@@ -102,7 +108,7 @@ func (b *Backend) ownedClientRules() ([]netlink.Rule, error) {
 	}
 	var out []netlink.Rule
 	for _, r := range all {
-		if r.Protocol == datapath.RouteProtocol && r.Priority >= datapath.RulePriority && r.Priority <= datapath.RulePriority+999 {
+		if r.Protocol == datapath.RouteProtocol && r.Priority >= metadataPriority && r.Priority <= datapath.RulePriority+999 {
 			out = append(out, r)
 		}
 	}
@@ -111,6 +117,9 @@ func (b *Backend) ownedClientRules() ([]netlink.Rule, error) {
 func exclusionRules(c datapath.ClientConfig) []*netlink.Rule {
 	set := map[netip.Prefix]bool{}
 	for _, p := range c.Exclusions {
+		set[p.Masked()] = true
+	}
+	for _, p := range c.Policy.ExcludeCIDRs {
 		set[p.Masked()] = true
 	}
 	// Never recursively steer encapsulated packets to their own gateway.
@@ -134,6 +143,100 @@ func exclusionRules(c datapath.ClientConfig) []*netlink.Rule {
 	return out
 }
 
+// clientFirewall owns the client MSS and IPv4 steering nft tables, replacing
+// their prior contents in one batch.
+// route/output reroutes on mark changes; filter/output does not reroute.
+func (b *Backend) clientFirewall(c datapath.ClientConfig) error {
+	conn, t, err := b.table("ratatoskr")
+	if err != nil {
+		return err
+	}
+	mss := conn.AddChain(&nftables.Chain{Name: "mss", Table: t, Type: nftables.ChainTypeFilter, Hooknum: nftables.ChainHookPostrouting, Priority: nftables.ChainPriorityMangle})
+	if c.Endpoint.IsValid() {
+		conn.AddRule(&nftables.Rule{Table: t, Chain: mss, Exprs: append(matchIface(expr.MetaKeyOIFNAME, datapath.ClientDevice), mssExprs(c.MTU-40)...)})
+	}
+	// Postrouting sees the final tunnel OIF after route/output has rerouted.
+	// IPv4 route chains belong to the IP family (not the INet MSS table).
+	tables, err := conn.ListTables()
+	if err != nil {
+		return err
+	}
+	for _, old := range tables {
+		if old.Name == "ratatoskr_route" && old.Family == nftables.TableFamilyIPv4 {
+			conn.DelTable(old)
+		}
+	}
+	if c.Policy.Mode != "" {
+		routeTable := conn.AddTable(&nftables.Table{Name: "ratatoskr_route", Family: nftables.TableFamilyIPv4})
+		chain := conn.AddChain(&nftables.Chain{Name: "steer", Table: routeTable, Type: nftables.ChainTypeRoute, Hooknum: nftables.ChainHookOutput, Priority: nftables.ChainPriorityMangle})
+		// Any existing mesh/CNI mark bits outside MarkMask survive the update.
+		mark := []expr.Any{&expr.Meta{Key: expr.MetaKeyMARK, Register: 1}, &expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: native32(^datapath.MarkMask), Xor: native32(steeringMark)}, &expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1}}
+		for _, r := range c.Policy.Rules {
+			dsts := r.CIDRs
+			if len(dsts) == 0 {
+				dsts = []netip.Prefix{{}}
+			}
+			ports := r.Ports
+			if len(ports) == 0 {
+				ports = []datapath.Port{{}}
+			}
+			for _, dst := range dsts {
+				for _, port := range ports {
+					x := make([]expr.Any, 0, 10)
+					if dst.IsValid() {
+						addr := dst.Masked().Addr().As4()
+						mask := net.CIDRMask(dst.Bits(), 32)
+						x = append(x, &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4}, &expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: mask, Xor: make([]byte, 4)}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: addr[:]})
+					}
+					if port.Port != 0 {
+						proto := byte(unix.IPPROTO_TCP)
+						if port.Protocol == "UDP" {
+							proto = unix.IPPROTO_UDP
+						}
+						x = append(x, &expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}}, &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binary.BigEndian.AppendUint16(nil, port.Port)})
+					}
+					if c.Policy.Mode == "include" {
+						x = append(x, mark...)
+					} else {
+						x = append(x, &expr.Verdict{Kind: expr.VerdictReturn})
+					}
+					conn.AddRule(&nftables.Rule{Table: routeTable, Chain: chain, Exprs: x})
+				}
+			}
+		}
+		if c.Policy.Mode == "exclude" {
+			conn.AddRule(&nftables.Rule{Table: routeTable, Chain: chain, Exprs: mark})
+		}
+	}
+	return conn.Flush()
+}
+func native32(n uint32) []byte { b := make([]byte, 4); binary.NativeEndian.PutUint32(b, n); return b }
+
+// Reject IPv6-capable pod interfaces rather than silently leaving IPv6 on
+// eth0 unsteered. IPv6 steering is outside the v1 datapath contract.
+func (b *Backend) rejectDualStack() error {
+	link, err := b.h.LinkByName("eth0")
+	if isMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	addrs, err := b.h.AddrList(link, unix.AF_INET6)
+	if err != nil {
+		return err
+	}
+	for _, a := range addrs {
+		if a.IP == nil {
+			continue
+		}
+		if v, ok := netip.AddrFromSlice(a.IP); ok && v.Is6() && !v.IsLinkLocalUnicast() && !v.IsUnspecified() {
+			return fmt.Errorf("IPv6 address %s on eth0 is unsupported: IPv4-only steering would leak IPv6 traffic", v)
+		}
+	}
+	return nil
+}
+
 func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -141,32 +244,97 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := b.rejectDualStack(); err != nil {
+		return err
+	}
 	rs := exclusionRules(c)
 	if len(rs) >= 999 {
 		return fmt.Errorf("too many exclusions for reserved rule priority band")
 	}
 	table := datapath.ClientTable(c.GatewayID)
-	// Install the fail-closed table before any rule can refer to it.
+	// The fallback is installed before either catch-all or mark selectors.
 	fr := fallback(table)
 	if err := b.h.RouteReplace(&fr); err != nil {
 		return fmt.Errorf("client fallback: %w", err)
 	}
-	catch := netlink.NewRule()
-	catch.Priority = datapath.RulePriority + 999
-	catch.Table = table
-	if err := b.rule(catch); err != nil {
+	if !c.Endpoint.IsValid() {
+		// Withdraw the old healthy path immediately; never leave a previously
+		// programmed unicast default usable while updating nft or the rules.
+		routes, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for _, r := range routes {
+			if r.Dst == nil && r.Type == unix.RTN_UNICAST && int(r.Protocol) == datapath.RouteProtocol {
+				if err := b.h.RouteDel(&r); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	// The metadata rule precedes the link-local main lookup. A dedicated
+	// prohibit /32 in our table never changes main or foreign CNI routes.
+	mr := netlink.Route{Family: unix.AF_INET, Dst: prefix(metadataIP), Table: table, Type: unix.RTN_PROHIBIT, Protocol: datapath.RouteProtocol}
+	if !c.AllowCloudMetadata {
+		if err := b.h.RouteReplace(&mr); err != nil {
+			return fmt.Errorf("metadata prohibit: %w", err)
+		}
+	}
+	steer := netlink.NewRule()
+	steer.Priority = datapath.RulePriority + 999
+	steer.Table = table
+	if c.Policy.Mode != "" {
+		steer.Priority = datapath.RulePriority + 998
+		steer.Mark = steeringMark
+		mask := datapath.MarkMask
+		steer.Mask = &mask
+	}
+	// Install the catch-all before withdrawing an old selective nft chain.
+	// In the opposite direction, install nft before removing the catch-all.
+	if c.Policy.Mode == "" {
+		if err := b.rule(steer); err != nil {
+			return fmt.Errorf("client steering rule: %w", err)
+		}
+	}
+	if err := b.clientFirewall(c); err != nil {
+		return fmt.Errorf("client firewall: %w", err)
+	}
+	// Distinct priorities keep the old steering rule active until the new
+	// selector exists: switching full -> selective cannot leak via main.
+	if err := b.rule(steer); err != nil {
 		return fmt.Errorf("client steering rule: %w", err)
 	}
-	// Restrict traffic during updates by deleting old exemptions first. The
-	// catch-all and unreachable fallback remain installed if an update fails.
+	// Remove stale exemptions only after the new steering selector is active.
 	old, err := b.ownedClientRules()
 	if err != nil {
 		return err
 	}
 	for _, r := range old {
-		if r.Priority != catch.Priority {
+		if r.Priority != steer.Priority {
 			if err := b.h.RuleDel(&r); err != nil {
 				return err
+			}
+		}
+	}
+	if !c.AllowCloudMetadata {
+		meta := netlink.NewRule()
+		meta.Priority = metadataPriority
+		meta.Table = table
+		meta.Dst = prefix(metadataIP)
+		if err := b.rule(meta); err != nil {
+			return err
+		}
+	} else {
+		// The higher-priority metadata selector is gone before its route.
+		routes, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			return err
+		}
+		for _, r := range routes {
+			if r.Dst != nil && r.Dst.String() == metadataIP.String() && int(r.Protocol) == datapath.RouteProtocol {
+				if err := b.h.RouteDel(&r); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -229,9 +397,6 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if err := b.h.NeighSet(&netlink.Neigh{LinkIndex: link.Attrs().Index, IP: net.ParseIP("169.254.64.1"), HardwareAddr: mac, State: netlink.NUD_PERMANENT}); err != nil {
 		return err
 	}
-	if err := b.clientMSS(c.MTU - 40); err != nil {
-		return fmt.Errorf("client MSS: %w", err)
-	}
 	r := netlink.Route{Family: unix.AF_INET, Table: table, LinkIndex: link.Attrs().Index, Gw: net.ParseIP("169.254.64.1"), Src: ip(c.PodIP), Flags: unix.RTNH_F_ONLINK, Protocol: datapath.RouteProtocol, MTU: c.MTU}
 	if err := b.h.RouteReplace(&r); err != nil {
 		return fmt.Errorf("client tunnel default: %w", err)
@@ -273,7 +438,7 @@ func (b *Backend) RemoveClient(ctx context.Context, c datapath.ClientConfig) err
 		return err
 	}
 	for _, t := range tables {
-		if t.Name == "ratatoskr" && t.Family == nftables.TableFamilyINet {
+		if (t.Name == "ratatoskr" && t.Family == nftables.TableFamilyINet) || (t.Name == "ratatoskr_route" && t.Family == nftables.TableFamilyIPv4) {
 			conn.DelTable(t)
 		}
 	}
