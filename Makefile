@@ -77,6 +77,15 @@ images-multiarch: ## Build multi-arch images (no push; set PUSH=1 to push)
 	    --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(REGISTRY)/ratatoskr-$$c:$(TAG) . ; \
 	done
 
+##@ M1 image preparation (does not execute e2e)
+
+.PHONY: m1-images
+m1-images: ## Build local M1 proof images; no import, traffic test or registry push
+	$(MAKE) images TAG=dev
+	docker build -f test/e2e/tools/Dockerfile -t ratatoskr-tools:m1-local .
+	docker build -f test/e2e/ci/fakeupstream/Dockerfile -t ratatoskr-fakeupstream:m1-local .
+	docker build -f plugins/upstream/openvpn/Dockerfile -t ratatoskr-openvpn:m1-local .
+
 ##@ Local k3d environment
 
 .PHONY: dev-up
