@@ -19,7 +19,7 @@ func validateWireGuardEndpoint(endpoint *v1alpha1.GatewayEndpoint) error {
 	if err != nil || key == (wgtypes.Key{}) {
 		return fmt.Errorf("healthy WireGuard endpoint has no valid public key")
 	}
-	if len(endpoint.RegistrationCACert) == 0 || len(endpoint.RegistrationCACert) > 4096 {
+	if len(endpoint.RegistrationCACert) == 0 || len(endpoint.RegistrationCACert) >= 4096 {
 		return fmt.Errorf("healthy WireGuard endpoint has no valid registration CA")
 	}
 	block, rest := pem.Decode([]byte(endpoint.RegistrationCACert))

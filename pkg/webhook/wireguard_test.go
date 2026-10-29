@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 func wgEndpoint(t *testing.T) v1alpha1.GatewayEndpoint {
@@ -149,20 +151,48 @@ func TestWireGuardTokenForgedExtraMountRejected(t *testing.T) {
 	}
 }
 
-func TestWireGuardAdmissionFailClosedBeforeDatapathFields(t *testing.T) {
+func TestWireGuardAdmissionPinsHealthyEndpointAndFailsClosedWithoutOne(t *testing.T) {
 	namespace, object := fixture()
 	gateway := object.(*v1alpha1.EgressGateway)
 	gateway.Spec.Encryption = "wireguard"
 	gateway.Status.Endpoints = []v1alpha1.GatewayEndpoint{wgEndpoint(t)}
 	h := setup(t, namespace, gateway)
 	pod := optedPod()
-	r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
-	if r.Allowed || !strings.Contains(r.Result.Message, "datapath fields are not available") {
-		t.Fatalf("WG endpoint accepted before config fields: %+v", r.Result)
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Encryption != "wireguard" || cfg.Endpoint.String() != gateway.Status.Endpoints[0].PodIP || cfg.GatewayPublicKey != gateway.Status.Endpoints[0].WireguardPublicKey || cfg.RegistrationCACert != gateway.Status.Endpoints[0].RegistrationCACert || cfg.WireGuardPort != datapath.WireGuardPortDefault {
+		t.Fatal("healthy WireGuard endpoint public identity not pinned to selected PodIP")
+	}
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+		t.Fatalf("correctly pinned WireGuard pod denied: %+v", r.Result)
+	}
+	forged := out.DeepCopy()
+	cfg.GatewayPublicKey = wgEndpoint(t).WireguardPublicKey
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("forged gateway public key accepted")
+	}
+	forged = out.DeepCopy()
+	cfg.GatewayPublicKey = gateway.Status.Endpoints[0].WireguardPublicKey
+	cfg.RegistrationCACert = wgEndpoint(t).RegistrationCACert
+	raw, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("forged registration CA pin accepted")
 	}
 	gateway.Status.Endpoints[0].WireguardPublicKey = "wrong-key"
 	h = setup(t, namespace, gateway)
-	r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
+	r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
 	if r.Allowed || !strings.Contains(r.Result.Message, "public key") {
 		t.Fatalf("malformed WG endpoint key accepted: %+v", r.Result)
 	}
@@ -175,7 +205,14 @@ func TestWireGuardAdmissionFailClosedBeforeDatapathFields(t *testing.T) {
 	}
 	gateway.Status.Endpoints = nil
 	h = setup(t, namespace, gateway)
-	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	out = mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var missing datapath.ClientConfig
+	if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Endpoint.IsValid() || missing.GatewayPublicKey != "" || missing.RegistrationCACert != "" || missing.WireGuardPort != 0 {
+		t.Fatal("no-endpoint config leaked another gateway's public identity")
+	}
 	if len(out.Spec.InitContainers[0].VolumeMounts) != 2 || len(out.Spec.Containers[0].VolumeMounts) != 0 || !strings.Contains(out.Annotations[ConfigAnnotation], `"encryption":"wireguard"`) {
 		t.Fatalf("failclosed WG config or token mount missing: %+v", out.Spec.InitContainers[0].VolumeMounts)
 	}

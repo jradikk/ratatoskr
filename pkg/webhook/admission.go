@@ -208,9 +208,10 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 				if err := validateWireGuardEndpoint(&endpoint); err != nil {
 					return cfg, err
 				}
-				// Populate the selected endpoint's public key and registration CA
-				// once the committed datapath ClientConfig fields are available.
-				return cfg, fmt.Errorf("WireGuard client public-key, port and CA-pin datapath fields are not available yet")
+				// Status binds this public identity to the selected gateway PodIP.
+				cfg.GatewayPublicKey = endpoint.WireguardPublicKey
+				cfg.RegistrationCACert = endpoint.RegistrationCACert
+				cfg.WireGuardPort = datapath.WireGuardPortDefault
 			}
 			cfg.Endpoint = ip
 			break
