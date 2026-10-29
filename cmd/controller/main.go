@@ -15,6 +15,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,10 +37,12 @@ func main() {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(discoveryv1.AddToScheme(scheme))
+	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	utilruntime.Must(api.AddToScheme(scheme))
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: server.Options{BindAddress: "0"}, LeaderElection: *leader, LeaderElectionID: "ratatoskr-controller.skaldhall.io", Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Secret{}}}}})
 	if err == nil {
-		r := &controller.GatewayReconciler{Client: mgr.GetClient(), Scheme: scheme, Recorder: mgr.GetEventRecorder("egressgateway-controller"), Options: controller.OptionsFromEnv()}
+		r := &controller.GatewayReconciler{Client: mgr.GetClient(), Scheme: scheme, APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder("egressgateway-controller"), Options: controller.OptionsFromEnv()}
 		err = r.SetupWithManager(mgr)
 	}
 	if err == nil {

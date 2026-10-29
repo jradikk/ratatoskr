@@ -4,26 +4,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func ptrInt32(value int32) *int32 { return &value }
+func ptrInt32(value int32) *int32                     { return &value }
+func ptrPort(value int32) *intstr.IntOrString         { v := intstr.FromInt32(value); return &v }
+func protocol(value corev1.Protocol) *corev1.Protocol { return &value }
 
-func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr) ([]client.Object, error) {
+func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clusterDNS ...string) ([]client.Object, error) {
 	if gw.Spec.Upstream.SecretRef.Name == "" {
 		return nil, fmt.Errorf("upstream secretRef.name required")
 	}
 	if gw.Spec.Exclusions.AutoDetect != nil && !*gw.Spec.Exclusions.AutoDetect {
-		return nil, fmt.Errorf("disabled automatic exclusions are not supported in M2")
+		return nil, fmt.Errorf("disabled automatic exclusions are not supported")
 	}
 	// No POD_IP is serialized; every replica uses its own downward-API POD_IP.
 	config := datapath.GatewayConfig{GatewayID: gw.Status.GatewayID, Clients: ips, MTU: 1400, Encryption: "none"}
@@ -45,7 +49,7 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr) ([]c
 	}
 	priv := false
 	root := int64(0)
-	pod := corev1.PodSpec{AutomountServiceAccountToken: &priv, Volumes: []corev1.Volume{
+	pod := corev1.PodSpec{DNSPolicy: corev1.DNSClusterFirst, AutomountServiceAccountToken: &priv, Volumes: []corev1.Volume{
 		{Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: gw.Name}}}},
 		{Name: "upstream", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: gw.Spec.Upstream.SecretRef.Name, DefaultMode: ptrInt32(0400)}}},
 		{Name: "run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
@@ -72,6 +76,59 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr) ([]c
 	for k, v := range gw.Spec.Resources.Gateway.Requests {
 		c.Resources.Requests[corev1.ResourceName(k)] = resource.MustParse(v.String())
 	}
+	if gw.Spec.DNS.Mode == "gateway" {
+		if len(clusterDNS) == 0 || clusterDNS[0] == "" {
+			return nil, fmt.Errorf("cluster DNS IPv4 unavailable")
+		}
+		var clusterCIDRs []string
+		hasPod, hasService := false, false
+		for _, exclusion := range gw.Status.EffectiveExclusions {
+			switch exclusion.Source {
+			case "podCIDR":
+				hasPod = true
+				clusterCIDRs = append(clusterCIDRs, exclusion.CIDR)
+			case "serviceCIDR":
+				hasService = true
+				clusterCIDRs = append(clusterCIDRs, exclusion.CIDR)
+			}
+		}
+		if !hasPod || !hasService {
+			return nil, fmt.Errorf("cluster Pod and Service CIDRs required for safe DNS reverse forwarding")
+		}
+		upstreamDNS := r.Options.GatewayUpstreamDNSIP
+		if upstreamDNS != "" {
+			ip, err := netip.ParseAddr(upstreamDNS)
+			if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
+				return nil, fmt.Errorf("invalid GATEWAY_UPSTREAM_DNS_IP")
+			}
+		}
+		domain := r.Options.ClusterDomain
+		if domain == "" {
+			domain = "cluster.local"
+		}
+		pod.Containers[0].Env = append(pod.Containers[0].Env, corev1.EnvVar{Name: "CLUSTER_DNS_IP", Value: clusterDNS[0]}, corev1.EnvVar{Name: "CLUSTER_DOMAIN", Value: domain}, corev1.EnvVar{Name: "GATEWAY_DNS_LISTEN_ADDR", Value: ":1053"}, corev1.EnvVar{Name: "CLUSTER_CIDRS", Value: strings.Join(clusterCIDRs, ",")})
+		if upstreamDNS != "" {
+			pod.Containers[0].Env = append(pod.Containers[0].Env, corev1.EnvVar{Name: "UPSTREAM_DNS_IP", Value: upstreamDNS})
+		}
+		pod.Containers[0].Ports = append(pod.Containers[0].Ports, corev1.ContainerPort{Name: "dns-udp", ContainerPort: 1053, Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "dns-tcp", ContainerPort: 1053, Protocol: corev1.ProtocolTCP})
+	}
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
-	return []client.Object{cm, svc, dep}, nil
+	objects := []client.Object{cm, svc, dep}
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: selector}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}}}
+	// Kubelet readiness and controller /info use PodIP from host/network locations
+	// not expressible as portable namespace/pod selectors; keep only this TCP port open.
+	np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9900)}}}}
+	if gw.Spec.AllowedNamespaces.NamespaceSelector != nil {
+		peers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: gw.Spec.AllowedNamespaces.NamespaceSelector.DeepCopy(), PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: gw.Name}}}}
+		np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(datapath.GenevePort)}}})
+		if gw.Spec.DNS.Mode == "gateway" {
+			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(1053)}, {Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(1053)}}})
+		}
+	}
+
+	if gw.Spec.DNS.Mode == "gateway" {
+		dns := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-dns", Namespace: gw.Namespace, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, PublishNotReadyAddresses: true, Selector: selector, Ports: []corev1.ServicePort{{Name: "dns-udp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolUDP}, {Name: "dns-tcp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolTCP}}}}
+		objects = append(objects, dns)
+	}
+	return append(objects, np), nil
 }

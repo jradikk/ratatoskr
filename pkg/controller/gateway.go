@@ -15,13 +15,14 @@ import (
 	"os"
 	"reflect"
 	"sort"
-	"strings"
 	"time"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -48,18 +49,19 @@ const (
 )
 
 type Options struct {
-	OperatorNamespace, GatewayImage, OpenVPNImage, ImagePullPolicy, Driver, Datapath, ClusterDomain, ServiceCIDRs, PodCIDRs string
+	OperatorNamespace, GatewayImage, OpenVPNImage, ImagePullPolicy, Driver, Datapath, ClusterDomain, ServiceCIDRs, PodCIDRs, ExtraCIDRs, GatewayUpstreamDNSIP string
 }
 
 func OptionsFromEnv() Options {
 	return Options{
-		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"),
+		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"),
 	}
 }
 
 type GatewayReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
+	APIReader  client.Reader
 	Recorder   events.EventRecorder
 	Options    Options
 	HTTPClient *http.Client
@@ -272,21 +274,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.Options.OperatorNamespace == "" || r.Options.GatewayImage == "" || r.Options.OpenVPNImage == "" {
 		return r.failure(ctx, &gw, "InvalidConfiguration", fmt.Errorf("operator namespace and gateway/upstream images are required"))
 	}
-	var policies api.EgressPolicyList
-	if err := r.List(ctx, &policies); err != nil {
-		return ctrl.Result{}, err
-	}
-	for _, p := range policies.Items {
-		ns := p.Spec.GatewayRef.Namespace
-		if ns == "" {
-			ns = r.Options.OperatorNamespace
-		}
-		if p.Spec.GatewayRef.Name == gw.Name && ns == gw.Namespace {
-			return r.unsupported(ctx, &gw, "EgressPolicy compilation requires M3")
-		}
-	}
-	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none") || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init") {
-		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, DNS, driver or datapath not supported in M2")
+	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none") || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init") {
+		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
 	var secret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Spec.Upstream.SecretRef.Name}, &secret); err != nil {
@@ -295,37 +284,21 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if len(secret.Data["client.ovpn"]) == 0 {
 		return r.block(ctx, &gw, "SecretInvalid", fmt.Errorf("upstream Secret missing client.ovpn"))
 	}
-	// Until M3 implements ServiceCIDR/PodCIDR API discovery, never render a
-	// client config whose cluster exclusions are unknown. An omitted cluster
-	// CIDR could steer Kubernetes API/Service traffic into the upstream.
-	if strings.TrimSpace(r.Options.ServiceCIDRs) == "" || strings.TrimSpace(r.Options.PodCIDRs) == "" {
-		return r.block(ctx, &gw, "MissingClusterCIDR", fmt.Errorf("configure exclusions.serviceCIDRs and exclusions.podCIDRs until automatic discovery is available"))
+	exclusions, dnsIP, err := r.collectExclusions(ctx, &gw)
+	if err != nil {
+		return r.block(ctx, &gw, "ExclusionDiscoveryFailed", err)
+	}
+	gw.Status.EffectiveExclusions = exclusions
+	gw.Status.MTU = api.GatewayMTUStatus{} // Set only from measured /info link attributes below.
+	if gw.Spec.DNS.Mode == "gateway" && dnsIP == "" {
+		return r.block(ctx, &gw, "DNSUnavailable", fmt.Errorf("kube-system/kube-dns has no IPv4 ClusterIP"))
 	}
 	ips, err := r.selected(ctx, &gw)
 	if err != nil {
 		return r.block(ctx, &gw, "SelectionFailed", err)
 	}
-	for _, raw := range []string{r.Options.ServiceCIDRs, r.Options.PodCIDRs} {
-		for _, cidr := range strings.Split(raw, ",") {
-			cidr = strings.TrimSpace(cidr)
-			if cidr == "" {
-				continue
-			}
-			p, e := netip.ParsePrefix(cidr)
-			if e != nil || !p.Addr().Is4() {
-				return r.block(ctx, &gw, "InvalidClusterCIDR", fmt.Errorf("invalid IPv4 cluster CIDR"))
-			}
-		}
-	}
-	gw.Status.EffectiveExclusions = parseCIDRs(r.Options.ServiceCIDRs, r.Options.PodCIDRs, strings.Join(gw.Spec.Exclusions.ExtraCIDRs, ","))
-	for _, raw := range gw.Spec.Exclusions.ExtraCIDRs {
-		p, e := netip.ParsePrefix(raw)
-		if e != nil || !p.Addr().Is4() {
-			return r.block(ctx, &gw, "InvalidExclusion", fmt.Errorf("invalid IPv4 exclusion CIDR"))
-		}
-	}
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "Unsupported", Status: metav1.ConditionFalse, Reason: "Supported", Message: "M2 gateway configuration supported", ObservedGeneration: gw.Generation})
-	resources, err := r.render(&gw, ips)
+	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "Unsupported", Status: metav1.ConditionFalse, Reason: "Supported", Message: "gateway configuration supported", ObservedGeneration: gw.Generation})
+	resources, err := r.render(&gw, ips, dnsIP)
 	if err != nil {
 		return r.block(ctx, &gw, "RenderFailed", err)
 	}
@@ -334,9 +307,30 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return r.block(ctx, &gw, "ApplyFailed", err)
 		}
 	}
+	if gw.Spec.DNS.Mode != "gateway" {
+		var oldDNS corev1.Service
+		err := r.Get(ctx, types.NamespacedName{Name: gw.Name + "-dns", Namespace: gw.Namespace}, &oldDNS)
+		if err == nil && metav1.IsControlledBy(&oldDNS, &gw) {
+			if err = r.Delete(ctx, &oldDNS); err != nil {
+				return r.block(ctx, &gw, "DNSCleanupFailed", err)
+			}
+		} else if client.IgnoreNotFound(err) != nil {
+			return r.block(ctx, &gw, "DNSCleanupFailed", err)
+		}
+	}
+	if gw.Spec.DNS.Mode == "gateway" {
+		var dnsService corev1.Service
+		if err := r.Get(ctx, types.NamespacedName{Name: gw.Name + "-dns", Namespace: gw.Namespace}, &dnsService); err != nil {
+			return r.block(ctx, &gw, "DNSUnavailable", err)
+		}
+		ip, err := netip.ParseAddr(dnsService.Spec.ClusterIP)
+		if err != nil || !ip.Is4() || ip.IsUnspecified() {
+			return r.block(ctx, &gw, "DNSUnavailable", fmt.Errorf("gateway DNS Service has no usable IPv4 ClusterIP"))
+		}
+	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); err != nil {
-		return ctrl.Result{}, err
+		return r.block(ctx, &gw, "GatewayPodListFailed", err)
 	}
 	oldIP := ""
 	if len(gw.Status.Endpoints) > 0 {
@@ -353,9 +347,26 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if podReady(p) {
 			info, e := r.info(ctx, p.Status.PodIP)
 			if e == nil && info.Ready && net.ParseIP(info.ExitIP) != nil {
-				ep.UpstreamHealthy = true
-				ep.UpstreamExitIP = info.ExitIP
-				gw.Status.ReadyReplicas++
+				if info.measured() {
+					gw.Status.MTU = api.GatewayMTUStatus{GeneveMTU: info.GeneveMTU, EffectiveMTU: info.EffectiveMTU, MSS: info.MSS}
+					meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUUnknown", Status: metav1.ConditionFalse, Reason: "Measured", Message: "Gateway reports measured link MTUs", ObservedGeneration: gw.Generation})
+					if info.EffectiveMTU < 1280 {
+						if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MTUWarning") && r.Recorder != nil {
+							r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "BelowIPv6Minimum", "Measure", "effective MTU below 1280; IPv4 remains supported")
+						}
+						meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUWarning", Status: metav1.ConditionTrue, Reason: "BelowIPv6Minimum", Message: "Measured effective MTU supports IPv4 but is below IPv6 minimum 1280", ObservedGeneration: gw.Generation})
+					} else {
+						meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUWarning", Status: metav1.ConditionFalse, Reason: "Safe", Message: "Measured effective MTU at least 1280", ObservedGeneration: gw.Generation})
+					}
+					ep.UpstreamHealthy = true
+					ep.UpstreamExitIP = info.ExitIP
+					gw.Status.ReadyReplicas++
+				} else {
+					if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MTUUnknown") && r.Recorder != nil {
+						r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "MTUUnknown", "Measure", "gateway did not report consistent measured link MTUs")
+					}
+					meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUUnknown", Status: metav1.ConditionTrue, Reason: "InvalidMeasurement", Message: "gateway did not report consistent measured pod/GENEVE/upstream MTU", ObservedGeneration: gw.Generation})
+				}
 			}
 		}
 		gw.Status.Endpoints = append(gw.Status.Endpoints, ep)
@@ -407,8 +418,17 @@ func podReady(p *corev1.Pod) bool {
 }
 
 type gatewayInfo struct {
-	ExitIP string `json:"exitIP"`
-	Ready  bool   `json:"ready"`
+	ExitIP       string `json:"exitIP"`
+	Ready        bool   `json:"ready"`
+	PodMTU       int32  `json:"podMTU"`
+	GeneveMTU    int32  `json:"geneveMTU"`
+	UpstreamMTU  int32  `json:"upstreamMTU"`
+	EffectiveMTU int32  `json:"effectiveMTU"`
+	MSS          int32  `json:"mss"`
+}
+
+func (i gatewayInfo) measured() bool {
+	return i.PodMTU >= 576 && i.GeneveMTU >= 576 && i.UpstreamMTU >= 576 && i.GeneveMTU <= i.PodMTU && i.EffectiveMTU == min(i.GeneveMTU, i.UpstreamMTU) && i.MSS == i.EffectiveMTU-40
 }
 
 func (r *GatewayReconciler) info(ctx context.Context, ip string) (gatewayInfo, error) {
@@ -463,6 +483,12 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, ob
 		}
 		old.Spec.Ports = desired.Spec.Ports
 		old.Spec.Selector = desired.Spec.Selector
+	case *networkingv1.NetworkPolicy:
+		old := existing.(*networkingv1.NetworkPolicy)
+		if reflect.DeepEqual(old.Spec, desired.Spec) {
+			return nil
+		}
+		old.Spec = desired.Spec
 	case *appsv1.Deployment:
 		old := existing.(*appsv1.Deployment)
 		if reflect.DeepEqual(old.Spec, desired.Spec) {
@@ -484,34 +510,12 @@ func (r *GatewayReconciler) mapAll(ctx context.Context, _ client.Object) []recon
 	}
 	return out
 }
+
+//nolint:staticcheck // Watch legacy Endpoints as fallback alongside EndpointSlices. Secret reads are uncached GETs; do not watch/list Secrets.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&api.EgressGateway{}).Owns(&appsv1.Deployment{}).Owns(&corev1.ConfigMap{}).Owns(&corev1.Service{}).Owns(&corev1.Pod{}).
+	return ctrl.NewControllerManagedBy(mgr).For(&api.EgressGateway{}).Owns(&appsv1.Deployment{}).Owns(&corev1.ConfigMap{}).Owns(&corev1.Service{}).Owns(&networkingv1.NetworkPolicy{}).Owns(&corev1.Pod{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapAll), builder.WithPredicates(predicate.Funcs{CreateFunc: func(event.CreateEvent) bool { return true }, DeleteFunc: func(event.DeleteEvent) bool { return true }, UpdateFunc: func(e event.UpdateEvent) bool {
 			return !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) || !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) || !reflect.DeepEqual(e.ObjectOld.(*corev1.Pod).Status, e.ObjectNew.(*corev1.Pod).Status)
 		}})).
-		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&api.EgressPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Complete(r)
-}
-
-func parseCIDRs(parts ...string) []api.EffectiveExclusion {
-	seen := map[string]bool{}
-	out := []api.EffectiveExclusion{}
-	for i, part := range parts {
-		source := "extra"
-		if i == 0 {
-			source = "serviceCIDR"
-		}
-		if i == 1 {
-			source = "podCIDR"
-		}
-		for _, s := range strings.Split(part, ",") {
-			s = strings.TrimSpace(s)
-			p, e := netip.ParsePrefix(s)
-			if e == nil && p.Addr().Is4() && !seen[p.Masked().String()] {
-				seen[p.Masked().String()] = true
-				out = append(out, api.EffectiveExclusion{CIDR: p.Masked().String(), Source: source})
-			}
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CIDR < out[j].CIDR })
-	return out
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&api.EgressPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Endpoints{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Complete(r)
 }

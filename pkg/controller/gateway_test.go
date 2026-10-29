@@ -12,6 +12,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,7 +25,7 @@ import (
 func fixture(t *testing.T) (*GatewayReconciler, *api.EgressGateway) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme, discoveryv1.AddToScheme, networkingv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
@@ -51,6 +53,9 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatalf("invalid gateway config: %+v", cfg)
 	}
 	service := objs[1].(*corev1.Service)
+	if len(objs) != 4 {
+		t.Fatalf("expected ingress policy: %d objects", len(objs))
+	}
 	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Protocol != corev1.ProtocolUDP || service.Spec.Ports[0].Port != 6081 {
 		t.Fatalf("incorrect discovery Service: %+v", service.Spec)
 	}
@@ -176,7 +181,7 @@ func TestMissingClusterCIDRsFailsClosed(t *testing.T) {
 	if meta.IsStatusConditionTrue(gw.Status.Conditions, "Ready") || gw.Status.Phase != "Pending" {
 		t.Fatalf("gateway incorrectly ready with unknown ServiceCIDR: %+v", gw.Status)
 	}
-	if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MissingClusterCIDR") {
+	if !meta.IsStatusConditionTrue(gw.Status.Conditions, "ExclusionDiscoveryFailed") {
 		t.Fatalf("missing failure condition: %+v", gw.Status.Conditions)
 	}
 	var dep appsv1.Deployment
@@ -241,7 +246,7 @@ func TestGatewayPodIPChangeRequiresClientRestart(t *testing.T) {
 		t.Fatalf("status endpoint is not real PodIP: %+v", gw.Status.Endpoints)
 	}
 }
-func TestPolicyBlocksUncompiledMode(t *testing.T) {
+func TestPolicyNoLongerBlocksGateway(t *testing.T) {
 	r, gw := fixture(t)
 	ctx := context.Background()
 	gw.Status.GatewayID = 12
@@ -259,8 +264,12 @@ func TestPolicyBlocksUncompiledMode(t *testing.T) {
 	if err := r.Get(ctx, req.NamespacedName, gw); err != nil {
 		t.Fatal(err)
 	}
-	if !meta.IsStatusConditionTrue(gw.Status.Conditions, "Unsupported") {
-		t.Fatal("uncompiled policy was silently accepted")
+	if meta.IsStatusConditionTrue(gw.Status.Conditions, "Unsupported") {
+		t.Fatal("M3 policy incorrectly marked gateway unsupported")
+	}
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, req.NamespacedName, &dep); err != nil {
+		t.Fatalf("policy blocked gateway deployment: %v", err)
 	}
 }
 
