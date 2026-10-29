@@ -36,13 +36,14 @@ import (
 )
 
 const (
-	Audience         = "ratatoskr.skaldhall.io/gateway"
-	CAAnnotation     = "ratatoskr.skaldhall.io/registration-ca"
-	gatewayLabel     = "ratatoskr.skaldhall.io/gateway"
-	gatewayNamespace = "ratatoskr.skaldhall.io/gateway-namespace"
-	identityLabel    = "ratatoskr.skaldhall.io/gateway-name"
-	gatewayUIDLabel  = "ratatoskr.skaldhall.io/gateway-uid"
-	defaultTTL       = 24 * time.Hour
+	Audience                     = "ratatoskr.skaldhall.io/gateway"
+	CAAnnotation                 = "ratatoskr.skaldhall.io/registration-ca"
+	WireGuardPublicKeyAnnotation = "ratatoskr.skaldhall.io/wireguard-public-key"
+	gatewayLabel                 = "ratatoskr.skaldhall.io/gateway"
+	gatewayNamespace             = "ratatoskr.skaldhall.io/gateway-namespace"
+	identityLabel                = "ratatoskr.skaldhall.io/gateway-name"
+	gatewayUIDLabel              = "ratatoskr.skaldhall.io/gateway-uid"
+	defaultTTL                   = 24 * time.Hour
 )
 
 // PeerManager operates on the gateway's iproute backend. UnregisterPeer must remove
@@ -348,8 +349,25 @@ func (s *Server) RemoveDeletedPod(ctx context.Context, namespace, name, uid stri
 	return nil
 }
 
-// PublishCA annotates only this exact gateway Pod with public certificate PEM.
+// PublishCA is retained for callers that publish only the public CA. WireGuard
+// gateways must use PublishPublicIdentity to publish both values atomically.
 func (s *Server) PublishCA(ctx context.Context, caPEM []byte) error {
+	return s.publish(ctx, caPEM, "", false)
+}
+
+// PublishPublicIdentity atomically publishes the CA and a syntactically valid
+// WireGuard public key to this verified gateway Pod. Callers must pass the
+// backend's WireGuardPublicKey; 32-byte public and private keys cannot be
+// distinguished from their base64 representation alone.
+func (s *Server) PublishPublicIdentity(ctx context.Context, caPEM []byte, wgPublicKey string) error {
+	key, err := decodeKey(wgPublicKey)
+	if err != nil || len(key) != 32 || base64.StdEncoding.EncodeToString(key) != wgPublicKey {
+		return errors.New("invalid WireGuard public key")
+	}
+	return s.publish(ctx, caPEM, wgPublicKey, true)
+}
+
+func (s *Server) publish(ctx context.Context, caPEM []byte, wgPublicKey string, includeKey bool) error {
 	if !s.ready() || !publicCA(caPEM) {
 		return errors.New("registration unavailable")
 	}
@@ -370,9 +388,16 @@ func (s *Server) PublishCA(ctx context.Context, caPEM []byte) error {
 			{"op": "test", "path": "/metadata/resourceVersion", "value": pod.ResourceVersion},
 		}
 		if pod.Annotations == nil {
-			operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations", "value": map[string]string{CAAnnotation: string(caPEM)}})
+			annotationValues := map[string]string{CAAnnotation: string(caPEM)}
+			if includeKey {
+				annotationValues[WireGuardPublicKeyAnnotation] = wgPublicKey
+			}
+			operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations", "value": annotationValues})
 		} else {
 			operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations/ratatoskr.skaldhall.io~1registration-ca", "value": string(caPEM)})
+			if includeKey {
+				operations = append(operations, map[string]any{"op": "add", "path": "/metadata/annotations/ratatoskr.skaldhall.io~1wireguard-public-key", "value": wgPublicKey})
+			}
 		}
 		patch, err := json.Marshal(operations)
 		if err != nil {
@@ -398,23 +423,92 @@ func publicCA(data []byte) bool {
 	return err == nil && c.IsCA
 }
 
-// Certificates contains only the public CA and an unexported in-memory TLS key.
+// Certificates owns a process-local CA signing key and rotates short-lived
+// serving leaves in memory. The published CA never changes in this process.
 type Certificates struct {
-	caPEM  []byte
-	config *tls.Config
+	mu    sync.Mutex
+	caPEM []byte
+	ca    *x509.Certificate
+	caKey ed25519.PrivateKey
+	ip    netip.Addr
+	leaf  *tls.Certificate
+	now   func() time.Time
 }
 
-func (c *Certificates) PublicCert() []byte { return append([]byte(nil), c.caPEM...) }
+const (
+	caRenewalDeadline = 30 * 24 * time.Hour
+	leafLifetime      = 30 * 24 * time.Hour
+	leafRenewalWindow = 7 * 24 * time.Hour
+)
+
+func (c *Certificates) PublicCert() []byte {
+	if c == nil {
+		return nil
+	}
+	return append([]byte(nil), c.caPEM...)
+}
+
+// TLSConfig installs a dynamic GetCertificate callback; callers must use this
+// config rather than copying an initial serving certificate into their server.
+// No external scheduler is required: each handshake checks for leaf renewal.
 func (c *Certificates) TLSConfig(gatewayPodIP string) (*tls.Config, error) {
 	ip, ok := validIP(gatewayPodIP)
-	if !ok || c == nil || c.config == nil || c.config.Certificates[0].Leaf == nil || len(c.config.Certificates[0].Leaf.IPAddresses) != 1 || c.config.Certificates[0].Leaf.IPAddresses[0].String() != ip.String() {
+	if !ok || c == nil || c.ip != ip || c.leaf == nil {
 		return nil, errors.New("invalid gateway TLS identity")
 	}
-	return c.config.Clone(), nil
+	if _, err := c.currentCertificate(nil); err != nil {
+		return nil, err
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS13, GetCertificate: c.currentCertificate}, nil
 }
 
-// NewCertificates generates a new ephemeral CA and serving key per process.
-// Neither private key is serialized, logged or returned.
+// currentCertificate serializes renewal, then returns an immutable leaf
+// pointer safe for concurrent handshakes. Never return the signing key in an
+// error (or write it to a Kubernetes resource).
+func (c *Certificates) currentCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.now == nil || c.ca == nil || c.leaf == nil {
+		return nil, errors.New("gateway TLS identity unavailable")
+	}
+	now := c.now()
+	if now.Before(c.ca.NotBefore) || !now.Add(caRenewalDeadline).Before(c.ca.NotAfter) {
+		return nil, errors.New("gateway CA nearing expiry; restart gateway to publish a new CA")
+	}
+	if !now.Add(leafRenewalWindow).Before(c.leaf.Leaf.NotAfter) || now.Before(c.leaf.Leaf.NotBefore) {
+		leaf, err := c.issueLeaf(now)
+		if err != nil {
+			return nil, errors.New("gateway serving certificate renewal failed")
+		}
+		c.leaf = leaf
+	}
+	return c.leaf, nil
+}
+
+func (c *Certificates) issueLeaf(now time.Time) (*tls.Certificate, error) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
+	leaf := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "ratatoskr gateway"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(leafLifetime), IPAddresses: []net.IP{net.IP(c.ip.AsSlice())}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, c.ca, pub, c.caKey)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Certificate{Certificate: [][]byte{leafDER, c.ca.Raw}, PrivateKey: key, Leaf: parsed}, nil
+}
+
+// NewCertificates creates an in-memory CA valid for five years; serving leaves
+// rotate under the same CA before their 30-day validity expires. A gateway must
+// be replaced and its new CA published before the CA's final 30 days.
 func NewCertificates(gatewayPodIP string) (*Certificates, error) {
 	ip, ok := validIP(gatewayPodIP)
 	if !ok {
@@ -425,7 +519,11 @@ func NewCertificates(gatewayPodIP string) (*Certificates, error) {
 	if err != nil {
 		return nil, errors.New("certificate generation failed")
 	}
-	caTemplate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ratatoskr gateway ephemeral CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, errors.New("certificate generation failed")
+	}
+	caTemplate := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "ratatoskr gateway ephemeral CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(5, 0, 0), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caKey)
 	if err != nil {
 		return nil, errors.New("certificate generation failed")
@@ -434,23 +532,10 @@ func NewCertificates(gatewayPodIP string) (*Certificates, error) {
 	if err != nil {
 		return nil, errors.New("certificate generation failed")
 	}
-	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	c := &Certificates{caPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), ca: ca, caKey: caKey, ip: ip, now: time.Now}
+	c.leaf, err = c.issueLeaf(now)
 	if err != nil {
 		return nil, errors.New("certificate generation failed")
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, errors.New("certificate generation failed")
-	}
-	leaf := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "ratatoskr gateway"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(12 * time.Hour), IPAddresses: []net.IP{net.IP(ip.AsSlice())}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, KeyUsage: x509.KeyUsageDigitalSignature}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leaf, ca, pub, caKey)
-	if err != nil {
-		return nil, errors.New("certificate generation failed")
-	}
-	parsed, err := x509.ParseCertificate(leafDER)
-	if err != nil {
-		return nil, errors.New("certificate generation failed")
-	}
-	cert := tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: key, Leaf: parsed}
-	return &Certificates{caPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), config: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}}, nil
+	return c, nil
 }

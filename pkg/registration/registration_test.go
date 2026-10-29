@@ -225,6 +225,57 @@ func TestReconcileRevokesChangedIdentity(t *testing.T) {
 		})
 	}
 }
+func TestCertificateRenewalPreservesCA(t *testing.T) {
+	c, err := NewCertificates("10.1.2.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf, err := c.TLSConfig("10.1.2.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conf.MinVersion != tls.VersionTLS13 || conf.GetCertificate == nil || len(conf.Certificates) != 0 {
+		t.Fatal("serving config must dynamically serve TLS 1.3")
+	}
+	originalCA := c.PublicCert()
+	first, err := conf.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	c.now = func() time.Time { return start.Add(24 * time.Hour) }
+	early, err := conf.GetCertificate(nil)
+	if err != nil || early.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) != 0 {
+		t.Fatalf("unexpected early rotation: %v", err)
+	}
+	c.now = func() time.Time { return start.Add(25 * 24 * time.Hour) }
+	second, err := conf.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Leaf.SerialNumber.Cmp(second.Leaf.SerialNumber) == 0 {
+		t.Fatal("leaf did not rotate")
+	}
+	if !bytes.Equal(originalCA, c.PublicCert()) || bytes.Contains(originalCA, []byte("PRIVATE KEY")) {
+		t.Fatal("CA changed or private key published")
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(originalCA) {
+		t.Fatal("invalid CA")
+	}
+	for _, cert := range []*tls.Certificate{first, second} {
+		if _, err := cert.Leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "10.1.2.4", CurrentTime: start.Add(25 * 24 * time.Hour), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+			t.Fatalf("leaf not trusted: %v", err)
+		}
+		if _, err := cert.Leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "10.1.2.5", CurrentTime: start.Add(25 * 24 * time.Hour)}); err == nil {
+			t.Fatal("wrong IP accepted")
+		}
+	}
+	c.now = func() time.Time { return c.ca.NotAfter.Add(-caRenewalDeadline) }
+	if _, err := conf.GetCertificate(nil); err == nil || strings.Contains(err.Error(), "PRIVATE KEY") {
+		t.Fatal("CA near expiry was not refused safely")
+	}
+}
 func TestTLSAndPublication(t *testing.T) {
 	c, err := NewCertificates("10.1.2.4")
 	if err != nil {
@@ -245,8 +296,12 @@ func TestTLSAndPublication(t *testing.T) {
 	root, _ := x509.ParseCertificate(b.Bytes)
 	pool := x509.NewCertPool()
 	pool.AddCert(root)
+	leaf, err := conf.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"10.1.2.4", "10.1.2.5"} {
-		_, err := conf.Certificates[0].Leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+		_, err := leaf.Leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
 		if (err == nil) != (name == "10.1.2.4") {
 			t.Fatalf("SAN %s: %v", name, err)
 		}
@@ -254,7 +309,7 @@ func TestTLSAndPublication(t *testing.T) {
 	other, _ := NewCertificates("10.1.2.4")
 	otherPool := x509.NewCertPool()
 	otherPool.AppendCertsFromPEM(other.PublicCert())
-	if _, err := conf.Certificates[0].Leaf.Verify(x509.VerifyOptions{Roots: otherPool, DNSName: "10.1.2.4"}); err == nil {
+	if _, err := leaf.Leaf.Verify(x509.VerifyOptions{Roots: otherPool, DNSName: "10.1.2.4"}); err == nil {
 		t.Fatal("untrusted CA accepted")
 	}
 	s, _, _, _, _, _ := fixture(t)
@@ -284,5 +339,74 @@ func TestTLSAndPublication(t *testing.T) {
 	}
 	if net.ParseIP("10.1.2.4") == nil {
 		t.Fatal("invalid fixture")
+	}
+}
+
+func TestPublishPublicIdentity(t *testing.T) {
+	ca, err := NewCertificates("10.1.2.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	s, _, _, _, _, _ := fixture(t)
+	if err := s.PublishPublicIdentity(context.Background(), ca.PublicCert(), key); err != nil {
+		t.Fatal(err)
+	}
+	actions := s.Kubernetes.(*kt.Clientset).Actions()
+	var patches int
+	for _, a := range actions {
+		if a.Matches("update", "pods") {
+			t.Fatal("pods.Update used")
+		}
+		if a.Matches("patch", "pods") {
+			patches++
+			body := a.(ktesting.PatchAction).GetPatch()
+			if !bytes.Contains(body, []byte(WireGuardPublicKeyAnnotation)) || !bytes.Contains(body, []byte(CAAnnotation)) || !bytes.Contains(body, []byte("/metadata/uid")) || !bytes.Contains(body, []byte("/metadata/resourceVersion")) {
+				t.Fatal("incomplete atomic patch")
+			}
+		}
+	}
+	if patches != 1 {
+		t.Fatalf("want one atomic patch, got %d", patches)
+	}
+	pod, err := s.Kubernetes.CoreV1().Pods("operator").Get(context.Background(), "gateway-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Annotations[CAAnnotation] != string(ca.PublicCert()) || pod.Annotations[WireGuardPublicKeyAnnotation] != key {
+		t.Fatal("public identity missing")
+	}
+	for _, invalid := range []string{"", "bad", key + "="} {
+		if err := s.PublishPublicIdentity(context.Background(), ca.PublicCert(), invalid); err == nil {
+			t.Fatal("invalid key accepted")
+		}
+	}
+	if patchesNow := len(s.Kubernetes.(*kt.Clientset).Actions()); patchesNow != len(actions)+1 {
+		t.Fatal("invalid public key accessed Kubernetes API")
+	}
+}
+func TestPublishPublicIdentityRejectsWrongOwnPodUID(t *testing.T) {
+	ca, err := NewCertificates("10.1.2.4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	s, _, _, _, _, _ := fixture(t)
+	replacement, err := s.Kubernetes.CoreV1().Pods("operator").Get(context.Background(), "gateway-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement.UID = "replacement"
+	if _, err := s.Kubernetes.CoreV1().Pods("operator").Update(context.Background(), replacement, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.Kubernetes.(*kt.Clientset).ClearActions()
+	if err := s.PublishPublicIdentity(context.Background(), ca.PublicCert(), key); err == nil {
+		t.Fatal("wrong gateway Pod UID accepted")
+	}
+	for _, a := range s.Kubernetes.(*kt.Clientset).Actions() {
+		if a.Matches("patch", "pods") || a.Matches("update", "pods") {
+			t.Fatal("changed Pod was mutated")
+		}
 	}
 }
