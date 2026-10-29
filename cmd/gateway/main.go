@@ -309,6 +309,13 @@ func run(ctx context.Context, configPath string) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
+	if cfg.Encryption == "wireguard" {
+		stopRegistration, e := startEncryptedGateway(ctx, os.Getenv("GATEWAY_NAME"), cfg.PodIP, backend, serverErrors)
+		if e != nil {
+			return e
+		}
+		defer stopRegistration()
+	}
 	if listen := os.Getenv("GATEWAY_DNS_LISTEN_ADDR"); listen != "" {
 		stopDNS, e := startGatewayDNS(listen, func() bool { return current.Load().(state).ready }, serverErrors)
 		if e != nil {
