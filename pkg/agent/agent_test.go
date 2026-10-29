@@ -14,6 +14,7 @@ import (
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
+
 	"google.golang.org/grpc"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"

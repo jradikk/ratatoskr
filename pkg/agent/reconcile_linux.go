@@ -17,6 +17,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
+
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"

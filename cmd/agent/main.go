@@ -17,6 +17,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/agent"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
@@ -51,13 +52,16 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	conn, err := grpc.DialContext(dialCtx, "unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("connect CRI: %w", err)
 	}
 	defer conn.Close()
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := cri.NewRuntimeServiceClient(conn).Version(dialCtx, &cri.VersionRequest{Version: "0.1.0"}); err != nil {
+		return fmt.Errorf("CRI handshake: %w", err)
+	}
 	k8s, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return err
@@ -79,7 +83,7 @@ func run(ctx context.Context) error {
 		}
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	listener, err := net.Listen("tcp", ":8081")
+	listener, err := net.Listen("tcp", "0.0.0.0:8081") // #nosec G102 -- node health probes require a pod-network reachable bind.
 	if err != nil {
 		return err
 	}
@@ -89,7 +93,11 @@ func run(ctx context.Context) error {
 			logger.Error("health server failed", "error", err)
 		}
 	}()
-	defer server.Shutdown(context.Background())
+	defer func() {
+		if err := server.Shutdown(context.Background()); err != nil {
+			logger.Error("health shutdown failed", "error", err)
+		}
+	}()
 	return reconciler.Run(ctx)
 }
 func main() {

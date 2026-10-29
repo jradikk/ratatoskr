@@ -7,10 +7,10 @@ import (
 	"errors"
 
 	"github.com/skaldhall/ratatoskr/pkg/registration"
+
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -21,12 +21,12 @@ type TokenIssuer interface {
 
 func podBoundToken(ctx context.Context, issuer TokenIssuer, pod *corev1.Pod) (string, error) {
 	if issuer == nil || pod.UID == "" || pod.Spec.ServiceAccountName == "" || pod.Namespace == "" || pod.Name == "" {
-		return "", errors.New("Pod-bound token identity unavailable")
+		return "", errors.New("pod-bound token identity unavailable")
 	}
-	request := &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{Audiences: []string{registration.Audience}, BoundObjectRef: &authv1.BoundObjectReference{Kind: "Pod", APIVersion: "v1", Name: pod.Name, UID: types.UID(pod.UID)}}}
+	request := &authv1.TokenRequest{Spec: authv1.TokenRequestSpec{Audiences: []string{registration.Audience}, BoundObjectRef: &authv1.BoundObjectReference{Kind: "Pod", APIVersion: "v1", Name: pod.Name, UID: pod.UID}}}
 	result, err := issuer.CreateToken(ctx, pod.Namespace, pod.Spec.ServiceAccountName, request, metav1.CreateOptions{})
 	if err != nil {
-		return "", errors.New("Pod-bound TokenRequest failed")
+		return "", errors.New("pod-bound TokenRequest failed")
 	}
 	if result == nil || result.Status.Token == "" {
 		return "", errors.New("empty Pod-bound token")
