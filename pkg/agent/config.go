@@ -61,9 +61,6 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 	if c.Encryption == "" {
 		c.Encryption = "none"
 	}
-	if c.Encryption == "wireguard" {
-		return c, errors.New("agent WireGuard registration requires in-memory token API; refusing plaintext fallback")
-	}
 	for _, e := range gw.Status.EffectiveExclusions {
 		v, err := netip.ParsePrefix(e.CIDR)
 		if err != nil || !v.Addr().Is4() {
@@ -99,6 +96,14 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 	for _, e := range gw.Status.Endpoints {
 		v, err := netip.ParseAddr(e.PodIP)
 		if e.UpstreamHealthy && err == nil && v.Is4() && !v.IsUnspecified() && !v.IsMulticast() && v != ip {
+			if c.Encryption == "wireguard" {
+				if e.WireguardPublicKey == "" || e.RegistrationCACert == "" {
+					return c, errors.New("healthy WireGuard endpoint missing authenticated public identity")
+				}
+				c.GatewayPublicKey = e.WireguardPublicKey
+				c.RegistrationCACert = e.RegistrationCACert
+				c.WireGuardPort = datapath.WireGuardPortDefault
+			}
 			c.Endpoint = v
 			break
 		}

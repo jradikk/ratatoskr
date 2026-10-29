@@ -13,7 +13,9 @@ import (
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/registration"
 	"google.golang.org/grpc"
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -100,11 +102,45 @@ func TestConfigFailClosedAndEndpointHash(t *testing.T) {
 		t.Fatal("endpoint update not reflected")
 	}
 	gw.Spec.Encryption = "wireguard"
-	if _, err = Config(p, ns, gw, nil, "operator"); err == nil || !strings.Contains(err.Error(), "registration") {
-		t.Fatal("encrypted mode silently accepted")
+	if _, err = Config(p, ns, gw, nil, "operator"); err == nil || !strings.Contains(err.Error(), "public identity") {
+		t.Fatal("unauthenticated endpoint accepted")
+	}
+	gw.Status.Endpoints[0].WireguardPublicKey = "invalid"
+	gw.Status.Endpoints[0].RegistrationCACert = "invalid"
+	c, err = Config(p, ns, gw, nil, "operator")
+	if err != nil || c.Encryption != "wireguard" {
+		t.Fatalf("encrypted config: %v", err)
 	}
 	raw, _ := json.Marshal(datapath.ClientConfig{PodIP: c.PodIP})
 	if len(raw) == 0 {
 		t.Fatal("empty config encoding")
+	}
+}
+
+type captureIssuer struct {
+	request *authv1.TokenRequest
+	ns, sa  string
+}
+
+func (f *captureIssuer) CreateToken(_ context.Context, ns, sa string, req *authv1.TokenRequest, _ metav1.CreateOptions) (*authv1.TokenRequest, error) {
+	f.request = req
+	f.ns = ns
+	f.sa = sa
+	return &authv1.TokenRequest{Status: authv1.TokenRequestStatus{Token: "in-memory-only"}}, nil
+}
+func TestPodBoundTokenRequest(t *testing.T) {
+	issuer := &captureIssuer{}
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "p", UID: types.UID("uid")}, Spec: corev1.PodSpec{ServiceAccountName: "sa"}}
+	token, err := podBoundToken(context.Background(), issuer, p)
+	if err != nil || token != "in-memory-only" {
+		t.Fatalf("token request failed: %v", err)
+	}
+	ref := issuer.request.Spec.BoundObjectRef
+	if issuer.ns != "ns" || issuer.sa != "sa" || ref == nil || ref.Kind != "Pod" || ref.APIVersion != "v1" || ref.Name != "p" || ref.UID != "uid" || len(issuer.request.Spec.Audiences) != 1 || issuer.request.Spec.Audiences[0] != registration.Audience {
+		t.Fatal("token not bound to exact pod and audience")
+	}
+	p.Spec.ServiceAccountName = ""
+	if _, err := podBoundToken(context.Background(), issuer, p); err == nil {
+		t.Fatal("unbound token allowed")
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -57,9 +58,13 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("connect CRI: %w", err)
 	}
 	defer conn.Close()
+	k8s, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ready := &atomic.Bool{}
-	reconciler := &agent.Reconciler{Ready: ready, Client: k, CRI: cri.NewRuntimeServiceClient(conn), Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Log: logger}
+	reconciler := &agent.Reconciler{Ready: ready, Client: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Log: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

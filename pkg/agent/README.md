@@ -23,9 +23,11 @@ with admission controls preventing issuance for arbitrary Pods.
 Current limitations: existing webhook admission unconditionally injects a
 NET_ADMIN init container, so agent mode does **not** yet admit PSA-restricted
 workloads without a separately coordinated webhook update. The controller
-readiness check also still depends on successful init. Encrypted agent
-registration is blocked pending the in-memory token-provider API; the agent
-refuses WireGuard rather than tunneling plaintext. CRI PID fallback requires
+readiness check also still depends on successful init. Encrypted mode obtains an audience-restricted Pod-bound TokenRequest in memory,
+registers with pinned TLS against the gateway PodIP from the agent host netns,
+and only then applies the WireGuard client; a missing CA, registration failure,
+or token failure prevents readiness. Neither token nor WireGuard private key is
+written to Pod metadata or node files by this agent. CRI PID fallback requires
 cgroup ownership containing the exact Pod UID. Unknown CRI verbose formats
 fail closed. The marker is a non-secret in-netns dummy link named `rtk-ready`;
 its presence alongside the complete authorized config hash prevents redundant

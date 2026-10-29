@@ -15,6 +15,7 @@ import (
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
+	"github.com/skaldhall/ratatoskr/pkg/registration"
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,6 +38,11 @@ func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, pr
 			return err
 		}
 		if remove {
+			if marker != nil {
+				if _, ok := marker.(*netlink.Dummy); !ok {
+					return errors.New("readiness marker is not a dummy link")
+				}
+			}
 			if marker == nil {
 				return errors.New("refusing cleanup without owned marker")
 			}
@@ -46,9 +52,15 @@ func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, pr
 			return netlink.LinkDel(marker)
 		}
 		if marker != nil && previous == Hash(cfg) {
+			if _, ok := marker.(*netlink.Dummy); !ok {
+				return errors.New("readiness marker is not a dummy link")
+			}
 			return nil
 		} // restart adoption: preserve established tunnel and routes
 		if marker != nil {
+			if _, ok := marker.(*netlink.Dummy); !ok {
+				return errors.New("readiness marker is not a dummy link")
+			}
 			if err := netlink.LinkDel(marker); err != nil {
 				return err
 			}
@@ -68,6 +80,7 @@ func isMissingLink(err error) bool { var e netlink.LinkNotFoundError; return err
 type Reconciler struct {
 	Client                  client.Client
 	CRI                     cri.RuntimeServiceClient
+	Tokens                  TokenIssuer
 	Node, OperatorNamespace string
 	Log                     *slog.Logger
 	Ready                   *atomic.Bool
@@ -128,6 +141,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	defer target.Close()
+	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && existing != Hash(cfg) {
+		if r.Tokens == nil {
+			return errors.New("TokenRequest client unavailable")
+		}
+		if existing != "" {
+			var old datapath.ClientConfig
+			if json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &old) != nil || old.Encryption != cfg.Encryption {
+				return errors.New("unsafe encryption transition; refusing plaintext fallback")
+			}
+		}
+		var publicKey string
+		if err = InNamespace(target, func() error {
+			backend, e := iproute.New()
+			if e != nil {
+				return e
+			}
+			defer backend.Close()
+			publicKey, e = backend.PrepareClientWireGuard(ctx, cfg)
+			return e
+		}); err != nil {
+			return err
+		}
+		// Registration MUST happen in host netns: host routing has no client WG
+		// /32 policy, and its socket uses a TLS-pinned gateway PodIP, not DNS.
+		if err = registration.RegisterClient(ctx, registration.ClientRequest{GatewayPodIP: cfg.Endpoint, RegistrationCACert: []byte(cfg.RegistrationCACert), ClientPublicKey: publicKey, AgentHostNetwork: true, TokenProvider: func(ctx context.Context) (string, error) { return podBoundToken(ctx, r.Tokens, pod) }}); err != nil {
+			return fmt.Errorf("authenticate gateway peer: %w", err)
+		}
+	}
 	if err = Program(ctx, target, cfg, existing, removing); err != nil {
 		return err
 	}
