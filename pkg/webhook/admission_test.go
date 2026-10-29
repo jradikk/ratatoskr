@@ -210,29 +210,78 @@ func TestDefaultGatewayUsesOperatorNamespace(t *testing.T) {
 	}
 }
 
-func TestPolicyMatchesDenied(t *testing.T) {
+func TestPolicyMatchesCompiled(t *testing.T) {
 	ns, g := fixture()
-	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}}}
+	end := int32(444)
+	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}, Mode: "include", Rules: []v1alpha1.EgressRule{{CIDRs: []string{"198.51.100.0/24"}, Ports: []v1alpha1.EgressPort{{Protocol: "TCP", Port: 443, EndPort: &end}, {Protocol: "UDP", Port: 53}}}}, ExcludeCIDRs: []string{"203.0.113.0/24"}}}
 	h := setup(t, ns, g, p)
-	r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
-	if r.Allowed || !strings.Contains(r.Result.Message, "requires the M3 policy compiler") {
-		t.Fatalf("policy ignored: %+v", r.Result)
+	pod := optedPod()
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Identity.Policy != "policy" || cfg.Policy.Mode != "include" || len(cfg.Policy.Rules) != 1 || len(cfg.Policy.Rules[0].Ports) != 3 || len(cfg.Policy.ExcludeCIDRs) != 1 {
+		t.Fatalf("compiled policy missing CIDRs, ports, exclusions: %+v", cfg.Policy)
+	}
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+		t.Fatalf("compiled config not admitted: %+v", r.Result)
 	}
 	wrong := p.DeepCopy()
 	wrong.Spec.GatewayRef.Name = "another-gateway"
 	h = setup(t, ns, g, wrong)
-	r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
+	r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
 	if r.Allowed || !strings.Contains(r.Result.Message, "does not match selected gateway") {
 		t.Fatalf("wrong policy gatewayRef accepted: %+v", r.Result)
 	}
 	p2 := p.DeepCopy()
 	p2.Name = "policy2"
 	h = setup(t, ns, g, p, p2)
-	r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
+	r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
 	if r.Allowed || !strings.Contains(r.Result.Message, "multiple EgressPolicies") {
 		t.Fatalf("multiple matches not explicit: %+v", r.Result)
 	}
 }
+func TestExcludePolicyAndMetadata(t *testing.T) {
+	ns, g := fixture()
+	gateway := g.(*v1alpha1.EgressGateway)
+	gateway.Spec.Exclusions.AllowCloudMetadata = true
+	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "exclude", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}, Mode: "exclude", Rules: []v1alpha1.EgressRule{{CIDRs: []string{"10.0.0.0/8"}}}}}
+	h := setup(t, ns, gateway, p)
+	pod := optedPod()
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowCloudMetadata || cfg.Policy.Mode != "exclude" || len(cfg.Policy.Rules) != 1 {
+		t.Fatalf("exclude policy or metadata option missing: %+v", cfg)
+	}
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+		t.Fatalf("exclude policy rejected: %+v", r.Result)
+	}
+	cfg.AllowCloudMetadata = false
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); r.Allowed {
+		t.Fatal("forged metadata allowance accepted")
+	}
+}
+func TestPolicyValidationRejectsMalformedCompilation(t *testing.T) {
+	h := setup(t)
+	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, Mode: "include", Rules: []v1alpha1.EgressRule{{CIDRs: []string{"not-a-cidr"}}}}}
+	if r := h.Validate(context.Background(), req(t, "EgressPolicy", admissionv1.Create, p, nil)); r.Allowed || !strings.Contains(r.Result.Message, "invalid IPv4 CIDR") {
+		t.Fatalf("invalid destination CIDR accepted: %+v", r.Result)
+	}
+	p.Spec.Rules = []v1alpha1.EgressRule{{Ports: []v1alpha1.EgressPort{{Protocol: "TCP", Port: 0}}}}
+	if r := h.Validate(context.Background(), req(t, "EgressPolicy", admissionv1.Create, p, nil)); r.Allowed || !strings.Contains(r.Result.Message, "invalid port range") {
+		t.Fatalf("invalid port accepted: %+v", r.Result)
+	}
+}
+
 func TestValidatePodSelectionImmutableAtEveryPhase(t *testing.T) {
 	h := setup(t)
 	old := optedPod()
@@ -266,6 +315,12 @@ func TestValidatePodSelectionImmutableAtEveryPhase(t *testing.T) {
 		t.Fatal("running gateway namespace annotation changed")
 	}
 	newPod = old.DeepCopy()
+	newPod.Annotations = map[string]string{ConfigAnnotation: `{"gatewayID":42,"endpoint":"10.9.9.9"}`}
+	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
+	if r.Allowed {
+		t.Fatal("client config annotation replaced after admission")
+	}
+	newPod = old.DeepCopy()
 	newPod.Annotations = map[string]string{ReadyAnnotation: "true"}
 	r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Update, newPod, old))
 	if !r.Allowed {
@@ -274,7 +329,7 @@ func TestValidatePodSelectionImmutableAtEveryPhase(t *testing.T) {
 }
 func TestPolicyOverlapAndGatewaySelector(t *testing.T) {
 	ns, g := fixture()
-	existing := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "test"}}}}
+	existing := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{Mode: "include", WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "test"}}}}
 	pod := optedPod()
 	pod.Labels["app"] = "test"
 	h := setup(t, ns, g, existing, pod)

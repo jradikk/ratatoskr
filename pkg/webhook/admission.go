@@ -2,11 +2,11 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/netip"
-	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	policycompiler "github.com/skaldhall/ratatoskr/pkg/policy"
 )
 
 const (
@@ -152,7 +153,7 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 	if len(matches) > 1 {
 		return cfg, fmt.Errorf("multiple EgressPolicies match pod: %s and %s", matches[0].Name, matches[1].Name)
 	}
-	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
+	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, AllowCloudMetadata: gateway.Spec.Exclusions.AllowCloudMetadata, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
 	if len(matches) == 1 {
 		policy := matches[0]
 		policyNS := policy.Spec.GatewayRef.Namespace
@@ -162,9 +163,12 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		if policy.Spec.GatewayRef.Name != name || policyNS != gatewayNS {
 			return cfg, fmt.Errorf("EgressPolicy %s gatewayRef %s/%s does not match selected gateway %s/%s", policy.Name, policyNS, policy.Spec.GatewayRef.Name, gatewayNS, name)
 		}
+		compiled, err := policycompiler.Compile(policy.Spec)
+		if err != nil {
+			return cfg, fmt.Errorf("compile EgressPolicy %s: %w", policy.Name, err)
+		}
 		cfg.Identity.Policy = policy.Name
-		// Policy compilation is wired to pkg/policy when the datapath compiler lands.
-		return cfg, fmt.Errorf("EgressPolicy %s requires the M3 policy compiler before admission", policy.Name)
+		cfg.Policy = compiled
 	}
 	for _, e := range gateway.Status.EffectiveExclusions {
 		prefix, err := netip.ParsePrefix(e.CIDR)
@@ -246,6 +250,11 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 			!sameMapEntry(old.Annotations, pod.Annotations, GatewayNamespace) {
 			return denied(fmt.Errorf("pod gateway opt-in and gateway namespace are immutable; change the Deployment template and recreate the pod"))
 		}
+		// A restarted init can read the annotation again. Do not allow a pod
+		// creator to swap a validated policy, exclusion or remote after CREATE.
+		if old.Labels[GatewayLabel] != "" && !sameMapEntry(old.Annotations, pod.Annotations, ConfigAnnotation) {
+			return denied(fmt.Errorf("pod client config is immutable; recreate the pod to change its gateway configuration"))
+		}
 	case "EgressGateway":
 		var g v1alpha1.EgressGateway
 		if err := json.Unmarshal(req.Object.Raw, &g); err != nil {
@@ -263,6 +272,9 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 		var policy v1alpha1.EgressPolicy
 		if err := json.Unmarshal(req.Object.Raw, &policy); err != nil {
 			return denied(err)
+		}
+		if _, err := policycompiler.Compile(policy.Spec); err != nil {
+			return denied(fmt.Errorf("compile EgressPolicy %s: %w", policy.Name, err))
 		}
 		selector, err := metav1.LabelSelectorAsSelector(&policy.Spec.WorkloadSelector)
 		if err != nil {
@@ -387,9 +399,18 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	if err != nil {
 		return fmt.Errorf("resolve authorized client config: %w", err)
 	}
-	// Compare typed configs: a forged endpoint, gateway ID, exclusion, identity,
-	// encryption or selective policy must not be admitted even with a real init.
-	if !reflect.DeepEqual(cfg, expected) {
+	// Compare canonical JSON of typed configs: nil and empty slices that encode
+	// identically are equivalent. A forged endpoint, gateway ID, exclusion,
+	// metadata allowance, identity, encryption or policy still differs.
+	actualJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("encode submitted client config: %w", err)
+	}
+	expectedJSON, err := json.Marshal(expected)
+	if err != nil {
+		return fmt.Errorf("encode authorized client config: %w", err)
+	}
+	if !bytes.Equal(actualJSON, expectedJSON) {
 		return fmt.Errorf("client config differs from authorized gateway status")
 	}
 	return h.validateGatewayDNS(ctx, admissionNamespace, pod)

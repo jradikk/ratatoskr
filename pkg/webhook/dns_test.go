@@ -49,15 +49,32 @@ func TestGatewayDNSRequiresHealthyService(t *testing.T) {
 	if r = h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
 		t.Fatal("forged node DNS fallback accepted")
 	}
+	invalidService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "gateway-dns", Namespace: "system"}, Spec: corev1.ServiceSpec{ClusterIP: "None"}}
+	h = setup(t, ns, gateway, invalidService)
+	if r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)); r.Allowed || !strings.Contains(r.Result.Message, "no valid IPv4 ClusterIP") {
+		t.Fatalf("invalid DNS Service ClusterIP accepted: %+v", r.Result)
+	}
 	gateway.Status.Endpoints = nil
 	h = client(true)
 	if r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)); r.Allowed || !strings.Contains(r.Result.Message, "healthy gateway") {
 		t.Fatalf("unhealthy DNS gateway accepted: %+v", r.Result)
 	}
 }
+func TestClusterDNSUnchanged(t *testing.T) {
+	namespace, gateway := fixture()
+	h := setup(t, namespace, gateway)
+	pod := optedPod()
+	pod.Spec.DNSPolicy = corev1.DNSDefault
+	pod.Spec.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{"10.96.0.53"}, Searches: []string{"custom.example"}}
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	if out.Spec.DNSPolicy != pod.Spec.DNSPolicy || len(out.Spec.DNSConfig.Nameservers) != 1 || out.Spec.DNSConfig.Nameservers[0] != "10.96.0.53" || len(out.Spec.DNSConfig.Searches) != 1 || out.Spec.DNSConfig.Searches[0] != "custom.example" {
+		t.Fatalf("cluster DNS unexpectedly changed: %+v", out.Spec.DNSConfig)
+	}
+}
+
 func TestSelectorsOverlapWithoutExistingPods(t *testing.T) {
 	ns, _ := fixture()
-	existing := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}}
+	existing := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "existing", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, Mode: "include", WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}}
 	h := setup(t, ns, existing)
 	candidate := existing.DeepCopy()
 	candidate.Name = "candidate"
