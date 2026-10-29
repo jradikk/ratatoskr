@@ -10,7 +10,7 @@ Status: **local code/component validation passed; cluster failover and traffic a
 
 ## Validation
 
-Repository-wide `make test` (race/coverage), `make lint` (0 issues), `make vet`, `make build`, `make test-privileged`, strict Helm lint and chart static render/security tests passed on October 30, 2026. Focused tests verify affinity ordering/minimal churn, endpoint identity binding, deployment replica rendering, owner-chain protection and private metrics binding. No CI/e2e or live VPN test ran: per the user's instruction those are reserved for the final gate.
+Repository-wide `make test` (race/coverage), `make lint` (0 issues), `make vet`, `make build`, `make test-privileged`, strict Helm lint and chart static render/security tests passed on October 29, 2026. Focused tests verify affinity ordering/minimal churn, endpoint identity binding, deployment replica rendering, owner-chain protection and private metrics binding. No CI/e2e or live VPN test ran: per the user's instruction those are reserved for the final gate.
 
 ## Deferred / limitations
 
