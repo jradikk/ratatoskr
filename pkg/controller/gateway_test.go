@@ -218,3 +218,55 @@ func TestPolicyBlocksUncompiledMode(t *testing.T) {
 		t.Fatal("uncompiled policy was silently accepted")
 	}
 }
+
+func TestDatapathReadyRequiresSuccessfulNamedInit(t *testing.T) {
+	r, _ := fixture(t)
+	ctx := context.Background()
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "apps", Labels: map[string]string{GatewayLabel: "edge"}, Annotations: map[string]string{datapathReadyAnnotation: "pending"}}, Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: clientInitContainer}}}, Status: corev1.PodStatus{PodIP: "10.3.2.10"}}
+	if err := r.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want string) {
+		t.Helper()
+		if err := r.reconcilePodReadiness(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		var stored corev1.Pod
+		if err := r.Get(ctx, types.NamespacedName{Name: p.Name, Namespace: p.Namespace}, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored.Annotations[datapathReadyAnnotation] != want {
+			t.Fatalf("readiness %q; want %q", stored.Annotations[datapathReadyAnnotation], want)
+		}
+	}
+	check("pending")
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: clientInitContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}}}
+	check("error")
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "unrelated", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}
+	check("pending")
+	p.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: clientInitContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}
+	check("true")
+	p.Spec.InitContainers = nil
+	check("error")
+}
+func TestGatewayPodCannotBeMarkedWorkloadReady(t *testing.T) {
+	r, gw := fixture(t)
+	ctx := context.Background()
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-pod", Namespace: "operator", Labels: map[string]string{GatewayLabel: "edge", IdentityLabel: "edge"}, Annotations: map[string]string{datapathReadyAnnotation: "pending"}}, Spec: corev1.PodSpec{InitContainers: []corev1.Container{{Name: clientInitContainer}}}, Status: corev1.PodStatus{PodIP: "10.2.0.3", InitContainerStatuses: []corev1.ContainerStatus{{Name: clientInitContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}}}}}
+	if err := r.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.selected(ctx, gw); err != nil {
+		t.Fatal(err)
+	}
+	var stored corev1.Pod
+	if err := r.Get(ctx, types.NamespacedName{Name: p.Name, Namespace: p.Namespace}, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Annotations[datapathReadyAnnotation] != "pending" {
+		t.Fatal("gateway pod was marked as workload datapath ready")
+	}
+}

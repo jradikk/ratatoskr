@@ -39,10 +39,12 @@ import (
 )
 
 const (
-	GatewayLabel     = "ratatoskr.skaldhall.io/gateway"
-	GatewayNamespace = "ratatoskr.skaldhall.io/gateway-namespace"
-	IdentityLabel    = "ratatoskr.skaldhall.io/gateway-name"
-	ownerUIDLabel    = "ratatoskr.skaldhall.io/gateway-uid"
+	GatewayLabel            = "ratatoskr.skaldhall.io/gateway"
+	GatewayNamespace        = "ratatoskr.skaldhall.io/gateway-namespace"
+	IdentityLabel           = "ratatoskr.skaldhall.io/gateway-name"
+	ownerUIDLabel           = "ratatoskr.skaldhall.io/gateway-uid"
+	datapathReadyAnnotation = "ratatoskr.skaldhall.io/datapath-ready"
+	clientInitContainer     = "ratatoskr-init"
 )
 
 type Options struct {
@@ -135,6 +137,9 @@ func (r *GatewayReconciler) selected(ctx context.Context, gw *api.EgressGateway)
 			if target != gw.Namespace {
 				continue
 			}
+			if err := r.reconcilePodReadiness(ctx, p); err != nil {
+				return nil, err
+			}
 			ip, err := netip.ParseAddr(p.Status.PodIP)
 			if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
 				continue
@@ -147,6 +152,60 @@ func (r *GatewayReconciler) selected(ctx context.Context, gw *api.EgressGateway)
 	}
 	sort.Slice(ips, func(i, j int) bool { return ips[i].Less(ips[j]) })
 	return ips, nil
+}
+
+// reconcilePodReadiness only promotes webhook-injected workload pods after
+// Kubernetes reports the specific datapath init container exited successfully.
+// A PodIP alone (including on Pending pods) is never proof of initialized routes.
+func (r *GatewayReconciler) reconcilePodReadiness(ctx context.Context, p *corev1.Pod) error {
+	if _, injected := p.Annotations[datapathReadyAnnotation]; !injected {
+		return nil
+	}
+	hasInit := false
+	for _, c := range p.Spec.InitContainers {
+		if c.Name == clientInitContainer {
+			hasInit = true
+			break
+		}
+	}
+	state := "pending"
+	if !hasInit {
+		state = "error"
+	} else {
+		for _, s := range p.Status.InitContainerStatuses {
+			if s.Name != clientInitContainer {
+				continue
+			}
+			if s.State.Terminated != nil {
+				if s.State.Terminated.ExitCode == 0 {
+					state = "true"
+				} else {
+					state = "error"
+				}
+			} else if s.State.Waiting != nil && (s.State.Waiting.Reason == "CrashLoopBackOff" || s.State.Waiting.Reason == "CreateContainerConfigError" || s.State.Waiting.Reason == "CreateContainerError" || s.State.Waiting.Reason == "ImagePullBackOff" || s.State.Waiting.Reason == "ErrImagePull") {
+				state = "error"
+			}
+			break
+		}
+	}
+	if state == "true" {
+		ip, e := netip.ParseAddr(p.Status.PodIP)
+		if e != nil || !ip.Is4() || ip.IsUnspecified() {
+			state = "pending"
+		}
+	}
+	if p.Annotations[datapathReadyAnnotation] == state {
+		return nil
+	}
+	old := p.DeepCopy()
+	p.Annotations[datapathReadyAnnotation] = state
+	if err := r.Patch(ctx, p, client.MergeFrom(old)); err != nil {
+		return fmt.Errorf("patch selected Pod readiness %s/%s: %w", p.Namespace, p.Name, err)
+	}
+	if state == "error" && r.Recorder != nil {
+		r.Recorder.Eventf(p, nil, corev1.EventTypeWarning, "DatapathInitFailed", "CheckInit", "ratatoskr-init container did not complete successfully")
+	}
+	return nil
 }
 
 func (r *GatewayReconciler) status(ctx context.Context, gw *api.EgressGateway, ready bool, reason, message string) error {
