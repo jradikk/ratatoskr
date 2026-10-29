@@ -1,0 +1,6 @@
+# Development-only checks and editor output must not ship in release archives.
+tests/
+*.swp
+*.swo
+*.tmp
+.DS_Store

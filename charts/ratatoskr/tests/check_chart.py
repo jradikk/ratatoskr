@@ -155,6 +155,16 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
             security = container.get("securityContext", {})
             assert not security.get("privileged")
             assert not security.get("capabilities", {}).get("add")
+    # The operator images are nonroot distroless/static. Serving and TLS
+    # bootstrap may only write in the private memory-backed TLS volume.
+    for component in ("controller", "webhook"):
+        pod_spec = docs["Deployment", "ratatoskr-" + component]["spec"]["template"]["spec"]
+        for container in pod_spec.get("initContainers", []) + pod_spec["containers"]:
+            sc = container["securityContext"]
+            assert sc["runAsNonRoot"] and sc["runAsUser"] == 65532
+            assert sc["readOnlyRootFilesystem"] and sc["allowPrivilegeEscalation"] is False
+            assert sc["seccompProfile"]["type"] == "RuntimeDefault"
+            assert sc["capabilities"] == {"drop": ["ALL"]}
     gateway_sa = docs["ServiceAccount", "ratatoskr-gateway"]
     assert gateway_sa["automountServiceAccountToken"] is False
     gateway_role = docs["ClusterRole", "ratatoskr-gateway"]
@@ -280,6 +290,55 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
     assert {p["port"] for p in policy["ingress"][0]["ports"]} == {9443, 8081}
 
 
+def check_package():
+    """Build local throwaway charts only: never publish, sign, or store keys."""
+    import hashlib
+    import tarfile
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="ratatoskr-chart-") as tmp:
+        package_paths = []
+        for index in (1, 2):
+            target = Path(tmp) / str(index)
+            target.mkdir()
+            helm("package", str(CHART), "--destination", str(target))
+            archive = target / "ratatoskr-0.0.0-dev.tgz"
+            assert archive.is_file()
+            package_paths.append(archive)
+        digests = [hashlib.sha256(path.read_bytes()).digest() for path in package_paths]
+        assert digests[0] == digests[1], "repeated chart packages differ"
+        with tarfile.open(package_paths[0], "r:gz") as archive:
+            names = set(archive.getnames())
+            expected = {"ratatoskr/Chart.yaml", "ratatoskr/values.yaml",
+                        "ratatoskr/values.schema.json", "ratatoskr/README.md",
+                        "ratatoskr/.helmignore"}
+            expected |= {"ratatoskr/" + str(path.relative_to(CHART))
+                         for folder in ("templates", "crds")
+                         for path in (CHART / folder).glob("*") if path.is_file()}
+            assert names == expected, names ^ expected
+            assert len([name for name in names if name.startswith("ratatoskr/crds/")]) == 2
+            assert not any(name.startswith("ratatoskr/tests/") or name.endswith((".tmp", ".swp"))
+                           for name in names)
+            metadata = yaml.safe_load(archive.extractfile("ratatoskr/Chart.yaml"))
+            assert metadata["version"] == "0.0.0-dev" and metadata["appVersion"] == "dev"
+        release_dir = Path(tmp) / "release"
+        release_dir.mkdir()
+        helm("package", str(CHART), "--destination", str(release_dir),
+             "--version", "1.2.3", "--app-version", "1.2.3")
+        release = release_dir / "ratatoskr-1.2.3.tgz"
+        with tarfile.open(release, "r:gz") as archive:
+            metadata = yaml.safe_load(archive.extractfile("ratatoskr/Chart.yaml"))
+            assert metadata["version"] == "1.2.3" and metadata["appVersion"] == "1.2.3"
+        rendered = helm("template", "ratatoskr", str(release), "--namespace", NAMESPACE)
+        docs = {(doc["kind"], doc["metadata"]["name"]): doc
+                for doc in yaml.safe_load_all(rendered)}
+        for component in ("controller", "webhook", "agent"):
+            workload = docs[("DaemonSet" if component == "agent" else "Deployment"),
+                            "ratatoskr-" + component]
+            image = workload["spec"]["template"]["spec"]["containers"][0]["image"]
+            assert image.endswith("/ratatoskr-" + component + ":1.2.3"), image
+
+
 if __name__ == "__main__":
     helm("lint", str(CHART), "--strict")
     helm("lint", str(CHART), "--strict", "-f", str(ROOT / "hack" / "dev-values.yaml"))
@@ -302,7 +361,11 @@ if __name__ == "__main__":
                  ("--set", "operatorNamespace=somewhere-else"),
                  ("--set", "controller.replicas=2"),
                  ("--set", "controller.replicas=0"),
-                 ("--set", "webhook.replicas=0")):
+                 ("--set", "controller.replicas=1.5"),
+                 ("--set", "webhook.replicas=0"),
+                 ("--set", "image.pullPolicy=Maybe"),
+                 ("--set", "agent.criSocket=relative.sock")):
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              *args, succeeds=False)
-    print("chart lint/template, HA Lease RBAC, webhook/security checks passed (agent/init × iproute/ebpf)")
+    check_package()
+    print("chart lint/template, HA/RBAC/security and reproducible package checks passed")

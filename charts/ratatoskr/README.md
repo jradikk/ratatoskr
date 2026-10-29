@@ -51,6 +51,23 @@ powerful cluster-wide binding; restrict who may deploy/modify it. It has no
 Secret read permission. To check rendering without a node:
 `python3 charts/ratatoskr/tests/check_chart.py` (requires Helm and PyYAML).
 
+**M9 package staging (no publish):** Chart metadata remains intentionally
+`0.0.0-dev` / `dev`; do not install a release with those image tags. Run
+`python3 charts/ratatoskr/tests/check_chart.py` to lint and check rendered
+RBAC/security, compare two local archive hashes, and verify archive contents,
+CRDs, and version-derived image tags. Before staging a particular release
+`X.Y.Z`, ensure *all component images* (including
+`ratatoskr-upstream-openvpn`) already exist at `X.Y.Z` and correspond to the
+same source revision, then use `helm package charts/ratatoskr --version X.Y.Z
+--app-version X.Y.Z --destination <private-staging-dir>` and inspect the
+archive. Supply `--set image.tag=<explicit-tag>` only if image tags differ;
+never silently ship `:dev` or an unmatched tag. Chart packages install CRDs
+from `crds/` on initial install; Helm does not automatically upgrade or delete
+CRDs. Review CRD schema upgrades separately before a chart upgrade. Do not
+place Secret data, keys or live configuration in chart files or Helm values;
+packaging and validation require no cluster credentials. Publishing, signing,
+provenance and final traffic/e2e evidence are outside this chart-only check.
+
 **Controller HA and observability:** Set `controller.replicas` and
 `webhook.replicas` (both default to 1). More than one controller replica
 requires `controller.leaderElection.enabled=true`; the chart passes
