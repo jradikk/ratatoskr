@@ -19,8 +19,8 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- if not (has .Values.driver (list "init" "agent")) -}}
 {{- fail (printf "driver must be init or agent, got %q" .Values.driver) -}}
 {{- end -}}
-{{- if ne .Values.datapath "iproute" -}}
-{{- fail (printf "M5 only implements datapath=iproute (ebpf is not available); got %q" .Values.datapath) -}}
+{{- if not (has .Values.datapath (list "iproute" "ebpf")) -}}
+{{- fail (printf "datapath must be iproute or ebpf, got %q" .Values.datapath) -}}
 {{- end -}}
 {{- if and .Values.operatorNamespace (ne .Values.operatorNamespace .Release.Namespace) -}}
 {{- fail "operatorNamespace must match the Helm release namespace (webhook Service and TLS bootstrap use .Release.Namespace)" -}}

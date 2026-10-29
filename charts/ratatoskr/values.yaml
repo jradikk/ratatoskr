@@ -1,5 +1,5 @@
-# M5 defaults to the node agent; init is available for the local dev loop.
-# eBPF is rejected at template time until M6.
+# Agent is the production default; init remains available for dev.
+# M6 accepts iproute or ebpf; ebpf is opt-in and requires compatible nodes.
 image:
   registry: ghcr.io/skaldhall
   # Defaults to the chart appVersion when empty.

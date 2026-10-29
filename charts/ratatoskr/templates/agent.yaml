@@ -85,6 +85,8 @@ spec:
               value: {{ .Values.agent.criSocket | quote }}
             - name: OPERATOR_NAMESPACE
               value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
+            - name: DATAPATH
+              value: {{ .Values.datapath | quote }}
           ports:
             - name: health
               containerPort: 8081
@@ -106,7 +108,13 @@ spec:
               type: RuntimeDefault
             capabilities:
               drop: [ALL]
-              add: [NET_ADMIN, SYS_ADMIN]
+              add:
+                - NET_ADMIN
+                - SYS_ADMIN
+                {{- if eq .Values.datapath "ebpf" }}
+                - BPF
+                - PERFMON
+                {{- end }}
           volumeMounts:
             - name: cri-socket
               mountPath: {{ .Values.agent.criSocket | quote }}

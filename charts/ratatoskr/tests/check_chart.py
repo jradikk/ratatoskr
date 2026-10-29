@@ -33,7 +33,7 @@ def rule(doc, resource, api_group=None):
     return matching[0]
 
 
-def check_agent(docs, socket):
+def check_agent(docs, socket, datapath):
     role = docs["ClusterRole", "ratatoskr-agent"]
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
@@ -59,13 +59,16 @@ def check_agent(docs, socket):
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
     assert container["ports"] == [{"name": "health", "containerPort": 8081}]
+    bpf_enabled = datapath == "ebpf"
     assert container["securityContext"] == {
         "runAsUser": 0, "privileged": False, "allowPrivilegeEscalation": False,
         "seccompProfile": {"type": "RuntimeDefault"},
-        "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "SYS_ADMIN"]},
+        "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "SYS_ADMIN"] +
+                         (["BPF", "PERFMON"] if bpf_enabled else [])},
     }
     env = {e["name"]: e for e in container["env"]}
-    assert set(env) == {"NODE_NAME", "CRI_SOCKET", "OPERATOR_NAMESPACE"}
+    assert set(env) == {"NODE_NAME", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
+    assert env["DATAPATH"]["value"] == datapath
     assert env["NODE_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
     assert env["CRI_SOCKET"]["value"] == socket
     assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
@@ -79,7 +82,7 @@ def check_agent(docs, socket):
     ]
 
 
-def check(docs, driver, socket="/run/containerd/containerd.sock"):
+def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock"):
     expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
@@ -113,7 +116,7 @@ def check(docs, driver, socket="/run/containerd/containerd.sock"):
     assert set(docs) == expected, set(docs) ^ expected
     assert not any(kind == "Secret" for kind, _ in docs)
     if driver == "agent":
-        check_agent(docs, socket)
+        check_agent(docs, socket, datapath)
     # Host mounts and capabilities are only granted to the node-local agent;
     # the controller/webhook never receive the node CRI or netns paths.
     for kind, name in (("Deployment", "ratatoskr-controller"),
@@ -184,10 +187,14 @@ def check(docs, driver, socket="/run/containerd/containerd.sock"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
     assert ctrl_env["DRIVER"]["value"] == driver
-    assert ctrl_env["DATAPATH"]["value"] == "iproute"
+    assert ctrl_env["DATAPATH"]["value"] == datapath
     for spec in (webhook["containers"][0], webhook["initContainers"][0]):
         env = {e["name"]: e for e in spec["env"]}
         assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
+    serving_env = {e["name"]: e for e in webhook["containers"][0]["env"]}
+    assert serving_env["DRIVER"]["value"] == driver
+    assert serving_env["DATAPATH"]["value"] == datapath
+    assert docs["ConfigMap", "ratatoskr-config"]["data"]["datapath"] == datapath
     mutating = docs["MutatingWebhookConfiguration", "ratatoskr-pods"]["webhooks"]
     validating = docs["ValidatingWebhookConfiguration", "ratatoskr-validation"]["webhooks"]
     assert len(mutating) == 1 and len(validating) == 3
@@ -253,13 +260,17 @@ def check(docs, driver, socket="/run/containerd/containerd.sock"):
 if __name__ == "__main__":
     helm("lint", str(CHART), "--strict")
     helm("lint", str(CHART), "--strict", "-f", str(ROOT / "hack" / "dev-values.yaml"))
+    helm("lint", str(CHART), "--strict", "--set", "datapath=ebpf")
+    helm("lint", str(CHART), "--strict", "--set", "driver=init", "--set", "datapath=ebpf")
     check(render(), "agent")
     check(render("-f", str(ROOT / "hack" / "dev-values.yaml")), "init")
     check(render("-f", str(ROOT / "hack" / "dev-values.yaml"),
-                 "--set", "driver=agent"), "agent", "/run/k3s/containerd/containerd.sock")
+                 "--set", "driver=agent"), "agent", socket="/run/k3s/containerd/containerd.sock")
     check(render("--set", "driver=init"), "init")
-    for args in (("--set", "driver=unknown"), ("--set", "datapath=ebpf"),
+    check(render("--set", "datapath=ebpf"), "agent", "ebpf")
+    check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")
+    for args in (("--set", "driver=unknown"), ("--set", "datapath=unknown"),
                  ("--set", "operatorNamespace=somewhere-else")):
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              *args, succeeds=False)
-    print("chart lint/template, RBAC and webhook scope checks passed (agent + init, default + dev)")
+    print("chart lint/template, RBAC, security and webhook scope checks passed (agent/init × iproute/ebpf)")
