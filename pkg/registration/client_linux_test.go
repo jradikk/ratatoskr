@@ -55,8 +55,23 @@ func TestPinnedRegistrationTLSAndBearer(t *testing.T) {
 	if err := registerClient(context.Background(), request, dial); err != nil {
 		t.Fatal(err)
 	}
-	if seen != 1 {
-		t.Fatal("expected exactly one request")
+	request.AgentHostNetwork = true
+	request.BypassMark = 0
+	request.ProjectedTokenPath = ""
+	request.TokenProvider = func(context.Context) (string, error) { return strings.Repeat("A", 64), nil }
+	if err := registerClient(context.Background(), request, dial); err != nil {
+		t.Fatalf("agent in-memory token registration failed: %v", err)
+	}
+	request.TokenProvider = nil
+	if err := registerClient(context.Background(), request, dial); err == nil {
+		t.Fatal("agent without token provider accepted")
+	}
+	request.AgentHostNetwork = false
+	request.TokenProvider = nil
+	request.BypassMark = 0x00200000
+	request.ProjectedTokenPath = path
+	if seen != 2 {
+		t.Fatal("expected exactly two authenticated requests")
 	}
 	request.GatewayPodIP = netip.MustParseAddr("10.42.2.5")
 	if err := registerClient(context.Background(), request, dial); err == nil {
