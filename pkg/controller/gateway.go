@@ -333,7 +333,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.Options.OperatorNamespace == "" || r.Options.GatewayImage == "" || r.Options.OpenVPNImage == "" {
 		return r.failure(ctx, &gw, "InvalidConfiguration", fmt.Errorf("operator namespace and gateway/upstream images are required"))
 	}
-	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
+	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute" && r.Options.Datapath != "ebpf") || (r.Options.Datapath == "ebpf" && gw.Spec.Encryption == "wireguard") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
 		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
 	var secret corev1.Secret

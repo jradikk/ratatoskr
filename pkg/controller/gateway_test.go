@@ -105,6 +105,27 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatal("capability or secret isolation incorrect")
 	}
 }
+func TestEBPFGatewayRenderingAndWireGuardRefusal(t *testing.T) {
+	r, gw := fixture(t)
+	r.Options.Datapath = "ebpf"
+	gw.Status.GatewayID = 123
+	objects, err := r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := objects[2].(*appsv1.Deployment).Spec.Template.Spec.Containers[0]
+	if len(gateway.Env) < 2 || gateway.Env[1].Name != "DATAPATH" || gateway.Env[1].Value != "ebpf" {
+		t.Fatalf("missing eBPF gateway mode: %+v", gateway.Env)
+	}
+	if !reflect.DeepEqual(gateway.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "BPF", "PERFMON"}) {
+		t.Fatalf("gateway eBPF capability scope: %+v", gateway.SecurityContext.Capabilities)
+	}
+	gw.Spec.Encryption = "wireguard"
+	if _, err := r.render(gw, nil); err == nil {
+		t.Fatal("eBPF WireGuard must fail closed")
+	}
+}
+
 func TestAgentReadinessIsNotOwnedByController(t *testing.T) {
 	r, gw := fixture(t)
 	r.Options.Driver = "agent"
