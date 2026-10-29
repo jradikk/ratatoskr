@@ -20,6 +20,7 @@ import (
 	"github.com/vishvananda/netlink"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -80,6 +81,7 @@ func isMissingLink(err error) bool { var e netlink.LinkNotFoundError; return err
 
 type Reconciler struct {
 	Client                  client.Client
+	WatchClient             client.WithWatch
 	CRI                     cri.RuntimeServiceClient
 	Tokens                  TokenIssuer
 	Node, OperatorNamespace string
@@ -218,23 +220,62 @@ func copyAnnotations(in map[string]string) map[string]string {
 	return out
 }
 
-// Run performs bounded API resyncs; each iteration observes both pod and
-// gateway status changes (including endpoint health), without stale informer data.
+// Run watches node Pods and gateway status; periodic full resync recovers missed
+// events. The client makes live API reads rather than using a stale informer.
 func (r *Reconciler) Run(ctx context.Context) error {
-	ticker := time.NewTicker(5 * time.Second)
+	if r.WatchClient == nil {
+		return errors.New("watch client required")
+	}
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		err := r.Sync(ctx)
-		if r.Ready != nil {
-			r.Ready.Store(err == nil)
+		if ctx.Err() != nil {
+			return nil
+		}
+		watchCtx, cancel := context.WithCancel(ctx)
+		pods, err := r.WatchClient.Watch(watchCtx, &corev1.PodList{}, client.MatchingFields{"spec.nodeName": r.Node})
+		var gateways watch.Interface
+		if err == nil {
+			gateways, err = r.WatchClient.Watch(watchCtx, &api.EgressGatewayList{})
 		}
 		if err != nil {
-			r.Log.Error("node reconciliation failed", "error", err)
+			r.Log.Error("node API watch unavailable; retrying", "error", err)
 		}
-		select {
-		case <-ctx.Done():
+		syncErr := r.Sync(ctx)
+		if r.Ready != nil {
+			r.Ready.Store(syncErr == nil && err == nil)
+		}
+		if syncErr != nil {
+			r.Log.Error("node reconciliation failed", "error", syncErr)
+		}
+		if err == nil {
+			select {
+			case <-ctx.Done():
+			case <-ticker.C:
+			case _, ok := <-pods.ResultChan():
+				if !ok {
+					r.Log.Warn("pod watch closed; reconnecting")
+				}
+			case _, ok := <-gateways.ResultChan():
+				if !ok {
+					r.Log.Warn("gateway watch closed; reconnecting")
+				}
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+			}
+		}
+		cancel()
+		if pods != nil {
+			pods.Stop()
+		}
+		if gateways != nil {
+			gateways.Stop()
+		}
+		if ctx.Err() != nil {
 			return nil
-		case <-ticker.C:
 		}
 	}
 }
