@@ -80,6 +80,20 @@ def check(docs):
     assert docs["Service", "ratatoskr-webhook"]["spec"]["ports"] == [
         {"name": "https", "port": 443, "targetPort": "https"}
     ]
+    assert next(p["containerPort"] for p in webhook["containers"][0]["ports"]
+                if p["name"] == "https") == 9443
+    ctrl_env = {e["name"]: e for e in docs["Deployment", "ratatoskr-controller"]
+                ["spec"]["template"]["spec"]["containers"][0]["env"]}
+    for name in ("OPERATOR_NAMESPACE", "GATEWAY_IMAGE", "OPENVPN_IMAGE",
+                 "IMAGE_PULL_POLICY", "DRIVER", "DATAPATH", "CLUSTER_DOMAIN",
+                 "SERVICE_CIDRS", "POD_CIDRS"):
+        assert name in ctrl_env, name
+    assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
+    assert ctrl_env["DRIVER"]["value"] == "init"
+    assert ctrl_env["DATAPATH"]["value"] == "iproute"
+    for spec in (webhook["containers"][0], webhook["initContainers"][0]):
+        env = {e["name"]: e for e in spec["env"]}
+        assert env["OPERATOR_NAMESPACE"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.namespace"
     mutating = docs["MutatingWebhookConfiguration", "ratatoskr-pods"]["webhooks"]
     validating = docs["ValidatingWebhookConfiguration", "ratatoskr-validation"]["webhooks"]
     assert len(mutating) == 1 and len(validating) == 3
@@ -103,6 +117,10 @@ def check(docs):
         assert hook["rules"][0]["resources"] == [resource]
     controller = docs["ClusterRole", "ratatoskr-controller"]
     assert rule(controller, "secrets")["verbs"] == ["get"]
+    assert rule(controller, "nodes")["verbs"] == ["get", "list", "watch"]
+    assert [r for r in controller["rules"] if r["resources"] == ["pods"]] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["patch"]}
+    ]
     assert rule(controller, "egressgateways/status")["verbs"] == ["get", "update", "patch"]
     assert set(rule(controller, "deployments")["verbs"]) == {
         "get", "list", "watch", "create", "update", "patch", "delete"

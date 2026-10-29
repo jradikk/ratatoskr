@@ -15,9 +15,11 @@ operatorNamespace: ""
 clusterDomain: cluster.local
 fwmarkMask: "0x00f00000"
 
-# Extra CIDRs excluded from client steering (also passed to the Go processes).
+# CIDR overrides passed to the Go processes; podCIDRs may be left empty if
+# the controller detects them from Node specs. Extra CIDRs bypass the gateway.
 exclusions:
   serviceCIDRs: []
+  podCIDRs: []
   extraCIDRs: []
 
 controller:

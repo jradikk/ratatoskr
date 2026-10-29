@@ -54,10 +54,16 @@ spec:
               value: {{ .Values.fwmarkMask | quote }}
             - name: SERVICE_CIDRS
               value: {{ join "," .Values.exclusions.serviceCIDRs | quote }}
+            - name: POD_CIDRS
+              value: {{ join "," .Values.exclusions.podCIDRs | quote }}
             - name: EXTRA_CIDRS
               value: {{ join "," .Values.exclusions.extraCIDRs | quote }}
             - name: GATEWAY_IMAGE
               value: {{ include "ratatoskr.image" (list . "gateway") | quote }}
+            - name: OPENVPN_IMAGE
+              value: {{ include "ratatoskr.image" (list . "upstream-openvpn") | quote }}
+            - name: IMAGE_PULL_POLICY
+              value: {{ .Values.image.pullPolicy | quote }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -118,6 +124,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: CLUSTER_DOMAIN
               value: {{ .Values.clusterDomain | quote }}
             - name: TLS_SECRET_NAME
@@ -147,6 +157,10 @@ spec:
             - name: SERVICE_NAME
               value: ratatoskr-webhook
             - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace

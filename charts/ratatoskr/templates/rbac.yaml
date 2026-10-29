@@ -13,8 +13,13 @@ rules:
     resources: [egressgateways/status, egresspolicies/status]
     verbs: [get, update, patch]
   - apiGroups: [""]
-    resources: [namespaces, pods]
+    resources: [namespaces, pods, nodes]
     verbs: [get, list, watch]
+  # RBAC cannot restrict patch to pods bearing a particular label. Controller
+  # code must check the Ratatoskr gateway label before touching readiness.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]

@@ -13,9 +13,12 @@ init container needs `NET_ADMIN`; gateway containers need `NET_ADMIN`, while
 the OpenVPN upstream needs `NET_ADMIN`, `MKNOD`, `/dev/net/tun`, and a
 memory-backed `/run/ratatoskr`. The Go controller/webhook own that dynamic
 pod-spec construction, not the chart. `exclusions.serviceCIDRs` is for
-clusters whose service CIDR cannot be discovered reliably; `extraCIDRs` adds
-other direct-route exclusions. The chart passes these settings as comma-joined
-environment values to the controller and webhook.
+clusters whose service CIDR cannot be discovered reliably; `podCIDRs` optionally
+provides explicit cluster pod ranges and `extraCIDRs` adds direct-route
+exclusions. The chart passes CIDRs as comma-joined environment values. It sets
+`GATEWAY_IMAGE` and `OPENVPN_IMAGE` to the matching chart image tag and forwards
+`IMAGE_PULL_POLICY` so dynamically managed gateway workloads can use the same
+local-image policy as the operator.
 
 **TLS:** No private key is rendered by Helm. The webhook Deployment init
 container executes its own image with `--bootstrap-tls`, using a memory-backed
