@@ -233,7 +233,6 @@ func (r *GatewayReconciler) status(ctx context.Context, gw *api.EgressGateway, r
 		gw.Status.ReadyReplicas = 0
 	default:
 		gw.Status.Phase = "Pending"
-		gw.Status.ReadyReplicas = 0
 	}
 	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "Ready", Status: condition(ready), Reason: reason, Message: message, ObservedGeneration: gw.Generation})
 	var current api.EgressGateway
@@ -283,7 +282,7 @@ func validPublishedIdentity(caPEM, key string) bool {
 // this gateway's controlled Deployment, not merely a spoofable matching label.
 // Kubernetes Deployment Pods are owned by ReplicaSets, not directly by the CRD.
 func (r *GatewayReconciler) managedGatewayPod(ctx context.Context, gw *api.EgressGateway, pod *corev1.Pod) (bool, error) {
-	if pod.Namespace != gw.Namespace || pod.Labels[IdentityLabel] != gw.Name || pod.Labels[ownerUIDLabel] != string(gw.UID) || pod.Spec.ServiceAccountName != "ratatoskr-gateway" {
+	if pod.Namespace != gw.Namespace || pod.Labels[IdentityLabel] != gw.Name || pod.Labels[ownerUIDLabel] != string(gw.UID) || (gw.Spec.Encryption == "wireguard" && pod.Spec.ServiceAccountName != "ratatoskr-gateway") {
 		return false, nil
 	}
 	rsRef := metav1.GetControllerOf(pod)
@@ -333,7 +332,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.Options.OperatorNamespace == "" || r.Options.GatewayImage == "" || r.Options.OpenVPNImage == "" {
 		return r.failure(ctx, &gw, "InvalidConfiguration", fmt.Errorf("operator namespace and gateway/upstream images are required"))
 	}
-	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute" && r.Options.Datapath != "ebpf") || (r.Options.Datapath == "ebpf" && gw.Spec.Encryption == "wireguard") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
+	if (gw.Spec.Replicas < 0 || gw.Spec.Replicas > 32) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute" && r.Options.Datapath != "ebpf") || (r.Options.Datapath == "ebpf" && gw.Spec.Encryption == "wireguard") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
 		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
 	var secret corev1.Secret
@@ -391,19 +390,29 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); err != nil {
 		return r.block(ctx, &gw, "GatewayPodListFailed", err)
 	}
-	oldIP, oldWGKey, oldCA := "", "", ""
-	if len(gw.Status.Endpoints) > 0 {
-		oldIP = gw.Status.Endpoints[0].PodIP
-		oldWGKey = gw.Status.Endpoints[0].WireguardPublicKey
-		oldCA = gw.Status.Endpoints[0].RegistrationCACert
-	}
+	oldEndpoints := append([]api.GatewayEndpoint(nil), gw.Status.Endpoints...)
 	gw.Status.Endpoints = nil
 	gw.Status.ReadyReplicas = 0
+	seenPodIPs := make(map[string]bool, len(pods.Items))
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.DeletionTimestamp != nil || p.Status.PodIP == "" {
 			continue
 		}
+		// Labels are not proof of ownership. A matching but unmanaged Pod must
+		// never be published as a gateway endpoint or counted as ready.
+		managed, e := r.managedGatewayPod(ctx, &gw, p)
+		if e != nil {
+			return r.block(ctx, &gw, "GatewayPodIdentityFailed", e)
+		}
+		if !managed {
+			continue
+		}
+		addr, e := netip.ParseAddr(p.Status.PodIP)
+		if e != nil || !addr.Is4() || addr.IsUnspecified() || addr.IsMulticast() || seenPodIPs[p.Status.PodIP] {
+			continue
+		}
+		seenPodIPs[p.Status.PodIP] = true
 		ep := api.GatewayEndpoint{PodName: p.Name, PodIP: p.Status.PodIP}
 		if podReady(p) {
 			info, e := r.info(ctx, p.Status.PodIP)
@@ -419,7 +428,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					publicIdentityReady = managed && validPublishedIdentity(p.Annotations[registrationCAAnnotation], p.Annotations[wireguardKeyAnnotation]) && info.WireguardMTU >= 576
 				}
 				if info.measured() && publicIdentityReady {
-					gw.Status.MTU = api.GatewayMTUStatus{GeneveMTU: info.GeneveMTU, WireguardMTU: info.WireguardMTU, EffectiveMTU: info.EffectiveMTU, MSS: info.MSS}
+					// Use the smallest healthy replica budget so a client moved to
+					// another endpoint cannot exceed that replica's upstream MTU.
+					if gw.Status.MTU.EffectiveMTU == 0 || info.EffectiveMTU < gw.Status.MTU.EffectiveMTU {
+						gw.Status.MTU = api.GatewayMTUStatus{GeneveMTU: info.GeneveMTU, WireguardMTU: info.WireguardMTU, EffectiveMTU: info.EffectiveMTU, MSS: info.MSS}
+					}
 					meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUUnknown", Status: metav1.ConditionFalse, Reason: "Measured", Message: "Gateway reports measured link MTUs", ObservedGeneration: gw.Generation})
 					if info.EffectiveMTU < 1280 {
 						if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MTUWarning") && r.Recorder != nil {
@@ -447,35 +460,46 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		gw.Status.Endpoints = append(gw.Status.Endpoints, ep)
 	}
 	sort.Slice(gw.Status.Endpoints, func(i, j int) bool { return gw.Status.Endpoints[i].PodName < gw.Status.Endpoints[j].PodName })
-	newIP := ""
-	if len(gw.Status.Endpoints) > 0 {
-		newIP = gw.Status.Endpoints[0].PodIP
-	}
-	if oldIP != "" && oldIP != newIP && len(ips) > 0 {
-		meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionTrue, Reason: "GatewayPodIPChangedOrLost", Message: "Gateway PodIP changed or was lost; selected fixed-remote clients may require rollout; M2 cannot update running client netns", ObservedGeneration: gw.Generation})
+	// An init pod retains its original fixed GENEVE remote (and WG trust
+	// root). An agent-managed pod can update in place. Evaluate every former
+	// healthy endpoint, not merely the first sorted Pod name.
+	if r.Options.Driver != "agent" && len(ips) > 0 && endpointRestartRequired(oldEndpoints, gw.Status.Endpoints, gw.Spec.Encryption == "wireguard") {
+		meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionTrue, Reason: "EndpointChangedOrLost", Message: "a gateway endpoint or WireGuard identity changed; roll out init-driver clients pinned to it", ObservedGeneration: gw.Generation})
 		if r.Recorder != nil {
-			r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "ClientRestartRequired", "Rollout", "Gateway PodIP changed; roll out selected client pods")
+			r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "ClientRestartRequired", "Rollout", "Gateway endpoint changed; roll out affected init-driver clients")
 		}
+	} else {
+		meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionFalse, Reason: "AgentReconcilesOrNoChange", Message: "no init-driver client rollout required", ObservedGeneration: gw.Generation})
 	}
-	if gw.Spec.Encryption == "wireguard" && len(ips) > 0 && len(gw.Status.Endpoints) > 0 {
-		newKey := gw.Status.Endpoints[0].WireguardPublicKey
-		newCA := gw.Status.Endpoints[0].RegistrationCACert
-		if (oldWGKey != "" && oldWGKey != newKey) || (oldCA != "" && oldCA != newCA) {
-			meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionTrue, Reason: "GatewayWireGuardIdentityChanged", Message: "Gateway WireGuard public key or registration CA changed; M4 init clients require rollout", ObservedGeneration: gw.Generation})
-			if r.Recorder != nil {
-				r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "ClientRestartRequired", "Rollout", "Gateway WireGuard identity changed; roll out selected init client pods")
-			}
-		}
-	}
-	if len(ips) == 0 {
-		meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionFalse, Reason: "NoSelectedClients", Message: "No selected client pods need rollout", ObservedGeneration: gw.Generation})
-	}
-	ready := gw.Status.ReadyReplicas == 1
+	ready := gw.Status.ReadyReplicas > 0
 	if err := r.status(ctx, &gw, ready, "GatewayHealth", "gateway Pod and upstream must be healthy"); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
+
+// endpointRestartRequired compares healthy endpoints by PodIP, not Pod name.
+// Added replicas do not invalidate a pinned init client, but removal, loss
+// of health, or a changed authenticated identity does.
+func endpointRestartRequired(before, after []api.GatewayEndpoint, encrypted bool) bool {
+	current := make(map[string]api.GatewayEndpoint, len(after))
+	for _, e := range after {
+		if e.UpstreamHealthy {
+			current[e.PodIP] = e
+		}
+	}
+	for _, old := range before {
+		if !old.UpstreamHealthy {
+			continue
+		}
+		now, ok := current[old.PodIP]
+		if !ok || encrypted && (old.WireguardPublicKey != now.WireguardPublicKey || old.RegistrationCACert != now.RegistrationCACert) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *GatewayReconciler) block(ctx context.Context, gw *api.EgressGateway, reason string, err error) (ctrl.Result, error) {
 	// A formerly supported gateway must not keep forwarding under a failed contract.
 	var deployment appsv1.Deployment

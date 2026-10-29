@@ -105,6 +105,37 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatal("capability or secret isolation incorrect")
 	}
 }
+func TestGatewayReplicaRenderingAndEndpointRollout(t *testing.T) {
+	r, gw := fixture(t)
+	gw.Spec.Replicas = 3
+	gw.Status.GatewayID = 123
+	objects, err := r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep := objects[2].(*appsv1.Deployment)
+	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
+		t.Fatalf("expected three replicas: %+v", dep.Spec.Replicas)
+	}
+	a := api.GatewayEndpoint{PodName: "a", PodIP: "10.3.0.1", UpstreamHealthy: true, WireguardPublicKey: "old", RegistrationCACert: "ca"}
+	b := api.GatewayEndpoint{PodName: "b", PodIP: "10.3.0.2", UpstreamHealthy: true}
+	if endpointRestartRequired([]api.GatewayEndpoint{a}, []api.GatewayEndpoint{a, b}, false) {
+		t.Fatal("adding a healthy replica cannot invalidate a pinned client")
+	}
+	if !endpointRestartRequired([]api.GatewayEndpoint{a, b}, []api.GatewayEndpoint{a}, false) {
+		t.Fatal("removing a healthy replica must warn for pinned init clients")
+	}
+	changed := a
+	changed.WireguardPublicKey = "new"
+	if !endpointRestartRequired([]api.GatewayEndpoint{a}, []api.GatewayEndpoint{changed}, true) || endpointRestartRequired([]api.GatewayEndpoint{a}, []api.GatewayEndpoint{changed}, false) {
+		t.Fatal("only encrypted init clients require rollout on identity rotation")
+	}
+	gw.Spec.Replicas = 33
+	if _, err := r.render(gw, nil); err == nil {
+		t.Fatal("out-of-range replicas accepted")
+	}
+}
+
 func TestEBPFGatewayRenderingAndWireGuardRefusal(t *testing.T) {
 	r, gw := fixture(t)
 	r.Options.Datapath = "ebpf"
@@ -223,7 +254,7 @@ func TestReconcileAllocationAndUnsupported(t *testing.T) {
 	}
 	// WireGuard is supported beginning with M4; a still-unsupported value
 	// must instead remove a previously rendered gateway deployment.
-	gw.Spec.Replicas = 2
+	gw.Spec.Replicas = 33
 	if err := r.Update(ctx, gw); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +322,7 @@ func TestGatewayPodIPChangeRequiresClientRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	gw.Status.GatewayID = 77
-	gw.Status.Endpoints = []api.GatewayEndpoint{{PodName: "old", PodIP: "10.2.0.3"}}
+	gw.Status.Endpoints = []api.GatewayEndpoint{{PodName: "old", PodIP: "10.2.0.3", UpstreamHealthy: true}}
 	if err := r.Status().Update(ctx, gw); err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +333,8 @@ func TestGatewayPodIPChangeRequiresClientRestart(t *testing.T) {
 	if err := r.Status().Update(ctx, clientPod); err != nil {
 		t.Fatal(err)
 	}
-	gatewayPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "new", Namespace: "operator", Labels: map[string]string{ownerUIDLabel: string(gw.UID), IdentityLabel: "edge"}}, Status: corev1.PodStatus{PodIP: "10.2.0.4"}}
+	gatewayPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "new", Namespace: "operator", Labels: map[string]string{ownerUIDLabel: string(gw.UID), IdentityLabel: "edge"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", UID: "rs-uid"}}, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}, Status: corev1.PodStatus{PodIP: "10.2.0.4"}}
+	createOwnedReplicaSet(t, r, gw)
 	if err := r.Create(ctx, gatewayPod); err != nil {
 		t.Fatal(err)
 	}
@@ -398,5 +430,19 @@ func TestGatewayPodCannotBeMarkedWorkloadReady(t *testing.T) {
 	}
 	if stored.Annotations[datapathReadyAnnotation] != "pending" {
 		t.Fatal("gateway pod was marked as workload datapath ready")
+	}
+}
+
+// createOwnedReplicaSet models the Deployment -> ReplicaSet chain Kubernetes
+// creates before a gateway Pod can be trusted for endpoint publication.
+func createOwnedReplicaSet(t *testing.T, r *GatewayReconciler, gw *api.EgressGateway) {
+	t.Helper()
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, UID: "dep-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(gw, api.SchemeGroupVersion.WithKind("EgressGateway"))}}}
+	if err := r.Create(context.Background(), dep); err != nil {
+		t.Fatal(err)
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", Namespace: gw.Namespace, UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dep, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}}
+	if err := r.Create(context.Background(), rs); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,7 +36,8 @@ func TestGatewayMTURequiresMeasuredSafeLinks(t *testing.T) {
 			if err := r.Status().Update(ctx, gw); err != nil {
 				t.Fatal(err)
 			}
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-1", Namespace: "operator", Labels: map[string]string{ownerUIDLabel: string(gw.UID)}}, Status: corev1.PodStatus{PodIP: "10.42.0.5", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+			createOwnedReplicaSet(t, r, gw)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-1", Namespace: "operator", Labels: map[string]string{ownerUIDLabel: string(gw.UID), IdentityLabel: gw.Name}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", UID: "rs-uid"}}, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}, Status: corev1.PodStatus{PodIP: "10.42.0.5", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
 			if err := r.Create(ctx, pod); err != nil {
 				t.Fatal(err)
 			}

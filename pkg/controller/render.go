@@ -62,7 +62,13 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	owner := []metav1.OwnerReference{*metav1.NewControllerRef(gw, api.SchemeGroupVersion.WithKind("EgressGateway"))}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Data: map[string]string{"gateway.json": string(data)}}
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: selector, Ports: []corev1.ServicePort{{Name: "geneve", Port: datapath.GenevePort, TargetPort: intstr.FromInt32(datapath.GenevePort), Protocol: corev1.ProtocolUDP}}}}
-	replicas := int32(1)
+	replicas := gw.Spec.Replicas
+	if replicas == 0 { // API-server default is 1; fake-client and upgrade paths may omit it.
+		replicas = 1
+	}
+	if replicas < 1 || replicas > 32 {
+		return nil, fmt.Errorf("gateway replicas must be in 1..32")
+	}
 	pull := corev1.PullIfNotPresent
 	if r.Options.ImagePullPolicy != "" {
 		pull = corev1.PullPolicy(r.Options.ImagePullPolicy)
