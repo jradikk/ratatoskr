@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	authv1 "k8s.io/api/authentication/v1"
@@ -137,6 +139,20 @@ func TestClientMTUBounds(t *testing.T) {
 				t.Fatalf("clientMTU(%d,%d,%q) = %d, %v; want %d, error=%t", tc.pod, tc.gateway, tc.encryption, got, err, tc.want, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestReadinessMarkerRequiresUp(t *testing.T) {
+	if markerReady(nil) {
+		t.Fatal("absent marker is ready")
+	}
+	marker := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: Marker}}
+	if markerReady(marker) {
+		t.Fatal("down dummy with unchanged hash must not be adopted")
+	}
+	marker.Flags |= net.FlagUp
+	if !markerReady(marker) {
+		t.Fatal("newly raised dummy marker must be ready")
 	}
 }
 

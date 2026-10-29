@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"os"
 	"sync/atomic"
@@ -55,6 +56,10 @@ func completeClientMTU(cfg *datapath.ClientConfig) error {
 	return err
 }
 
+func markerReady(marker netlink.Link) bool {
+	return marker != nil && marker.Attrs().Flags&net.FlagUp != 0
+}
+
 // Program constructs its backend only after entering the selected sandbox netns.
 // The dummy marker is created LAST. Failure removes the marker and preserves the
 // backend's unreachable fallback; callers must never publish ready on failure.
@@ -99,8 +104,12 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 			if _, ok := marker.(*netlink.Dummy); !ok {
 				return errors.New("readiness marker is not a dummy link")
 			}
-			return nil
-		} // restart adoption: preserve established tunnel and routes
+			if markerReady(marker) {
+				return nil // restart adoption: preserve established tunnel and routes
+			}
+			// A down marker cannot satisfy wait-init. Discard and reprogram the
+			// owned datapath before publishing a fresh, UP readiness marker.
+		}
 		if marker != nil {
 			if _, ok := marker.(*netlink.Dummy); !ok {
 				return errors.New("readiness marker is not a dummy link")
