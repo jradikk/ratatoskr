@@ -108,34 +108,63 @@ func BootstrapTLS(ctx context.Context, k kubernetes.Interface, namespace, servic
 	if err = writePrivate(dir, "ca.crt", ca); err != nil {
 		return err
 	}
-	// Patch only CA bundles, leaving all other admin-controlled webhook settings unchanged.
-	m, err := k.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, mutatingName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get mutating webhook configuration: %w", err)
+	// Deployments can start before Helm creates admission configurations. Only
+	// absence and update conflicts are transient; forbidden and malformed objects
+	// fail immediately. One deadline bounds both patches, including caller waits.
+	patchCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if err := retryAdmissionConfig(patchCtx, "mutating", func(ctx context.Context) error {
+		m, err := k.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, mutatingName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if len(m.Webhooks) == 0 {
+			return errors.New("mutating webhook configuration has no webhooks")
+		}
+		for i := range m.Webhooks {
+			m.Webhooks[i].ClientConfig.CABundle = ca
+		}
+		_, err = k.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(ctx, m, metav1.UpdateOptions{})
+		return err
+	}); err != nil {
+		return err
 	}
-	if len(m.Webhooks) == 0 {
-		return errors.New("mutating webhook configuration has no webhooks")
+	return retryAdmissionConfig(patchCtx, "validating", func(ctx context.Context) error {
+		v, err := k.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, validatingName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if len(v.Webhooks) == 0 {
+			return errors.New("validating webhook configuration has no webhooks")
+		}
+		for i := range v.Webhooks {
+			v.Webhooks[i].ClientConfig.CABundle = ca
+		}
+		_, err = k.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(ctx, v, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func retryAdmissionConfig(ctx context.Context, kind string, patch func(context.Context) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("patch %s admission CA: %w", kind, err)
+		}
+		err := patch(ctx)
+		if err == nil {
+			return nil
+		}
+		if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			return fmt.Errorf("patch %s admission CA: %w", kind, err)
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("patch %s admission CA: %w", kind, ctx.Err())
+		case <-timer.C:
+		}
 	}
-	for i := range m.Webhooks {
-		m.Webhooks[i].ClientConfig.CABundle = ca
-	}
-	if _, err = k.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(ctx, m, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update mutating webhook CA: %w", err)
-	}
-	v, err := k.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, validatingName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get validating webhook configuration: %w", err)
-	}
-	if len(v.Webhooks) == 0 {
-		return errors.New("validating webhook configuration has no webhooks")
-	}
-	for i := range v.Webhooks {
-		v.Webhooks[i].ClientConfig.CABundle = ca
-	}
-	if _, err = k.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(ctx, v, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update validating webhook CA: %w", err)
-	}
-	return nil
 }
 func writePrivate(dir, name string, data []byte) error {
 	path := filepath.Join(dir, name)
