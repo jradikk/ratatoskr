@@ -82,7 +82,8 @@ def check_agent(docs, socket, datapath):
     ]
 
 
-def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock"):
+def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock",
+          controller_replicas=1, webhook_replicas=1, leader=False):
     expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
@@ -113,7 +114,25 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
             ("ClusterRoleBinding", "ratatoskr-agent"),
             ("DaemonSet", "ratatoskr-agent"),
         }
+    if leader:
+        expected |= {
+            ("Role", "ratatoskr-controller-leader"),
+            ("RoleBinding", "ratatoskr-controller-leader"),
+        }
     assert set(docs) == expected, set(docs) ^ expected
+    if leader:
+        lease = docs["Role", "ratatoskr-controller-leader"]
+        assert lease["metadata"]["namespace"] == NAMESPACE
+        assert lease["rules"] == [
+            {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "verbs": ["create"]},
+            {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"],
+             "resourceNames": ["ratatoskr-controller.skaldhall.io"], "verbs": ["get", "update"]},
+        ]
+        binding = docs["RoleBinding", "ratatoskr-controller-leader"]
+        assert binding["metadata"]["namespace"] == NAMESPACE
+        assert binding["subjects"] == [
+            {"kind": "ServiceAccount", "name": "ratatoskr-controller", "namespace": NAMESPACE}
+        ]
     assert not any(kind == "Secret" for kind, _ in docs)
     if driver == "agent":
         check_agent(docs, socket, datapath)
@@ -151,6 +170,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
     ]
     for component in ("controller", "webhook"):
         deployment = docs["Deployment", "ratatoskr-" + component]["spec"]
+        assert deployment["replicas"] == (controller_replicas if component == "controller" else webhook_replicas)
         pod = deployment["template"]
         service = docs["Service", "ratatoskr-" + component]["spec"]
         assert deployment["selector"]["matchLabels"] == service["selector"]
@@ -160,6 +180,9 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
         assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
         assert container["ports"][-1]["containerPort"] == 8081
+    ctrl_container = docs["Deployment", "ratatoskr-controller"]["spec"]["template"]["spec"]["containers"][0]
+    assert ctrl_container.get("args") == (["--leader-elect"] if leader else None)
+    assert not any(p["name"] == "metrics" for p in ctrl_container["ports"])
     webhook = docs["Deployment", "ratatoskr-webhook"]["spec"]["template"]["spec"]
     assert webhook["initContainers"][0]["args"] == ["--bootstrap-tls", "--tls-dir=/tls/identity"]
     assert webhook["containers"][0]["args"] == ["--tls-dir=/tls/identity"]
@@ -269,8 +292,17 @@ if __name__ == "__main__":
     check(render("--set", "driver=init"), "init")
     check(render("--set", "datapath=ebpf"), "agent", "ebpf")
     check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")
+    ha_args = ("--set", "controller.replicas=3", "--set", "webhook.replicas=2",
+               "--set", "controller.leaderElection.enabled=true")
+    helm("lint", str(CHART), "--strict", *ha_args)
+    check(render(*ha_args), "agent", controller_replicas=3, webhook_replicas=2, leader=True)
+    check(render("--set", "controller.leaderElection.enabled=true"), "agent", leader=True)
+    check(render("--set", "webhook.replicas=2"), "agent", webhook_replicas=2)
     for args in (("--set", "driver=unknown"), ("--set", "datapath=unknown"),
-                 ("--set", "operatorNamespace=somewhere-else")):
+                 ("--set", "operatorNamespace=somewhere-else"),
+                 ("--set", "controller.replicas=2"),
+                 ("--set", "controller.replicas=0"),
+                 ("--set", "webhook.replicas=0")):
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              *args, succeeds=False)
-    print("chart lint/template, RBAC, security and webhook scope checks passed (agent/init × iproute/ebpf)")
+    print("chart lint/template, HA Lease RBAC, webhook/security checks passed (agent/init × iproute/ebpf)")

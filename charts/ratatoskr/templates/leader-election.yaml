@@ -1,0 +1,36 @@
+{{- if .Values.controller.leaderElection.enabled }}
+# controller-runtime stores its leader lock in the controller Pod namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ratatoskr-controller-leader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  # Kubernetes RBAC cannot restrict create to a resourceName. Only the named
+  # Lease can be read or renewed by the controller after creation.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [ratatoskr-controller.skaldhall.io]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ratatoskr-controller-leader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ratatoskr-controller-leader
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

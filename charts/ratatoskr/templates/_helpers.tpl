@@ -25,6 +25,12 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- if and .Values.operatorNamespace (ne .Values.operatorNamespace .Release.Namespace) -}}
 {{- fail "operatorNamespace must match the Helm release namespace (webhook Service and TLS bootstrap use .Release.Namespace)" -}}
 {{- end -}}
+{{- if or (lt (int .Values.controller.replicas) 1) (lt (int .Values.webhook.replicas) 1) -}}
+{{- fail "controller.replicas and webhook.replicas must both be at least 1" -}}
+{{- end -}}
+{{- if and (gt (int .Values.controller.replicas) 1) (not .Values.controller.leaderElection.enabled) -}}
+{{- fail "controller.replicas > 1 requires controller.leaderElection.enabled=true to prevent concurrent reconciliation" -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "ratatoskr.selectorLabels" -}}

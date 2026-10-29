@@ -36,6 +36,9 @@ spec:
         - name: controller
           image: {{ include "ratatoskr.image" (list . "controller") | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.controller.leaderElection.enabled }}
+          args: ["--leader-elect"]
+          {{- end }}
           ports:
             - name: health
               containerPort: 8081

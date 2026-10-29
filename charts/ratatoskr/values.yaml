@@ -33,8 +33,12 @@ exclusions:
 
 controller:
   replicas: 1
+  # Required when replicas > 1; controller-runtime uses a namespaced Lease.
+  leaderElection:
+    enabled: false
   resources: {}
 webhook:
+  # Webhook replicas share one TLS Secret and use the same CA bundle.
   replicas: 1
   resources: {}
 

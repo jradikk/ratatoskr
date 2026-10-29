@@ -51,6 +51,20 @@ powerful cluster-wide binding; restrict who may deploy/modify it. It has no
 Secret read permission. To check rendering without a node:
 `python3 charts/ratatoskr/tests/check_chart.py` (requires Helm and PyYAML).
 
+**Controller HA and observability:** Set `controller.replicas` and
+`webhook.replicas` (both default to 1). More than one controller replica
+requires `controller.leaderElection.enabled=true`; the chart passes
+`--leader-elect` and grants the controller ServiceAccount create plus named
+get/update for the `ratatoskr-controller.skaldhall.io` Lease **only in the Helm
+release namespace**. RBAC cannot restrict Lease creation to a name. Webhooks
+are horizontally scalable without controller leader election; every replica
+reads the same TLS Secret and populates its private memory-backed serving
+volume. Health endpoints remain on `:8081`, admission on HTTPS `:9443`.
+The controller currently binds metrics to `0` (disabled), and the webhook
+does not serve metrics; this chart therefore does **not** publish a misleading
+metrics Service or open a metrics port in NetworkPolicy. Enable those only
+after Go exposes a definite metrics listener and access-control contract.
+
 **TLS:** No private key is rendered by Helm. The webhook Deployment init
 container executes its own image with `--bootstrap-tls`, using a memory-backed
 `/tls` emptyDir shared with the serving webhook (`--tls-dir=/tls/identity`). Bootstrap
