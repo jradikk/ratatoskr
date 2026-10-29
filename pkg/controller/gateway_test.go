@@ -105,6 +105,31 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatal("capability or secret isolation incorrect")
 	}
 }
+func TestAgentReadinessIsNotOwnedByController(t *testing.T) {
+	r, gw := fixture(t)
+	r.Options.Driver = "agent"
+	gw.Spec.AllowedNamespaces.NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "red"}}
+	ctx := context.Background()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "restricted", Namespace: "apps", UID: "pod-agent", Labels: map[string]string{GatewayLabel: gw.Name}, Annotations: map[string]string{datapathReadyAnnotation: "true"}}, Status: corev1.PodStatus{Phase: corev1.PodPending, PodIP: "10.3.2.4"}}
+	if err := r.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	ips, err := r.selected(ctx, gw)
+	if err != nil || len(ips) != 1 {
+		t.Fatalf("agent pod not selected: %v %v", ips, err)
+	}
+	var observed corev1.Pod
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed.Annotations[datapathReadyAnnotation] != "true" {
+		t.Fatal("controller overwrote agent readiness because wait-init has not exited")
+	}
+}
+
 func TestNoNamespaceSelectorDeniesEveryPod(t *testing.T) {
 	r, gw := fixture(t)
 	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "selected", Namespace: "apps", Labels: map[string]string{GatewayLabel: "edge"}}, Status: corev1.PodStatus{Phase: corev1.PodPending, PodIP: "10.3.2.4"}}

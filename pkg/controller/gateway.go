@@ -146,8 +146,14 @@ func (r *GatewayReconciler) selected(ctx context.Context, gw *api.EgressGateway)
 			if target != gw.Namespace {
 				continue
 			}
-			if err := r.reconcilePodReadiness(ctx, p); err != nil {
-				return nil, err
+			// The M5 node agent, not the capability-free wait-init, owns Pod
+			// readiness while driver=agent. The wait-init cannot terminate until
+			// the agent has installed its marker; interpreting it as failed init
+			// would overwrite the agent's correct datapath-ready annotation.
+			if r.Options.Driver != "agent" {
+				if err := r.reconcilePodReadiness(ctx, p); err != nil {
+					return nil, err
+				}
 			}
 			ip, err := netip.ParseAddr(p.Status.PodIP)
 			if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
@@ -327,7 +333,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.Options.OperatorNamespace == "" || r.Options.GatewayImage == "" || r.Options.OpenVPNImage == "" {
 		return r.failure(ctx, &gw, "InvalidConfiguration", fmt.Errorf("operator namespace and gateway/upstream images are required"))
 	}
-	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init") {
+	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
 		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
 	var secret corev1.Secret
