@@ -17,6 +17,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/datapath/ebpf"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
@@ -54,14 +55,13 @@ func completeConfig(cfg *datapath.ClientConfig, podIP string, podMTU int) error 
 	return cfg.Validate()
 }
 
-// initBackend selects a backend before making any privileged namespace changes.
-// The eBPF constructor is connected when its implementation becomes available.
+// initBackend selects a backend without silently falling back to iproute.
 func initBackend(mode string) (datapath.Backend, error) {
 	switch mode {
 	case "", "iproute":
 		return iproute.New()
 	case "ebpf":
-		return nil, errors.New("eBPF backend unavailable")
+		return ebpf.New()
 	default:
 		return nil, fmt.Errorf("unsupported DATAPATH %q", mode)
 	}

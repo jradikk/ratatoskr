@@ -16,7 +16,7 @@ func TestInitBackendSelectionFailsClosed(t *testing.T) {
 		}
 		backend.Close()
 	}
-	for _, mode := range []string{"ebpf", "unknown"} {
+	for _, mode := range []string{"unknown"} {
 		backend, err := initBackend(mode)
 		if err == nil || backend != nil {
 			t.Fatalf("mode %q should fail closed: backend=%v err=%v", mode, backend, err)

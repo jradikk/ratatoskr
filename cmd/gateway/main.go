@@ -23,6 +23,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/datapath/ebpf"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	gatewaydns "github.com/skaldhall/ratatoskr/pkg/dns"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
@@ -250,7 +251,7 @@ func gatewayBackend(mode string) (datapath.Backend, error) {
 	case "", "iproute":
 		return iproute.New()
 	case "ebpf":
-		return nil, errors.New("eBPF backend unavailable")
+		return ebpf.New()
 	default:
 		return nil, fmt.Errorf("unsupported DATAPATH %q", mode)
 	}
