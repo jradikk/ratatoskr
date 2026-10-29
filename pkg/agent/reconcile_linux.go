@@ -75,6 +75,17 @@ func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, pr
 		if err := netlink.LinkAdd(link); err != nil {
 			return fmt.Errorf("readiness marker: %w", err)
 		}
+		// wait-init requires both a dummy device AND IFF_UP. Never publish a
+		// down marker: it would leave restricted workloads blocked forever.
+		created, err := netlink.LinkByName(Marker)
+		if err != nil {
+			_ = netlink.LinkDel(link)
+			return fmt.Errorf("readiness marker lookup: %w", err)
+		}
+		if err := netlink.LinkSetUp(created); err != nil {
+			_ = netlink.LinkDel(created)
+			return fmt.Errorf("readiness marker up: %w", err)
+		}
 		return nil
 	})
 }
