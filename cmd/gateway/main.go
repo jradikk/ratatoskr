@@ -426,7 +426,7 @@ func run(ctx context.Context, configPath string) error {
 		case err := <-serverErrors:
 			cfg.UpstreamHealthy = false
 			_ = backend.ApplyGateway(context.Background(), cfg)
-			return fmt.Errorf("gateway health API failed: %w", err)
+			return fmt.Errorf("gateway service failed: %w", err)
 		case <-tick.C:
 		}
 	}

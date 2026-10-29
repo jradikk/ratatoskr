@@ -25,7 +25,7 @@ func TestGatewayHealthMetricTracksReadinessWithoutLabels(t *testing.T) {
 		if strings.Contains(text, "uid=") || strings.Contains(text, "secret=") || strings.Contains(text, "peer=") || strings.Contains(text, "go_gc_duration") {
 			t.Fatalf("metric labels/runtime leakage: %s", text)
 		}
-		if strings.Count(text, "ratatoskr_gateway_upstream_healthy ") != 1 {
+		if strings.Count(text, "\nratatoskr_gateway_upstream_healthy ") != 1 {
 			t.Fatalf("missing or duplicated metric: %s", text)
 		}
 		return text
