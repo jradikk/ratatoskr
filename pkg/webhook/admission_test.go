@@ -29,7 +29,7 @@ func setup(t *testing.T, objects ...client.Object) *Handler {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	return &Handler{Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(), Namespace: "system", InitImage: "ratatoskr:init"}
+	return &Handler{Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(), Namespace: "system", InitImage: "ratatoskr:init", ClusterDomain: "cluster.local"}
 }
 func fixture() (client.Object, client.Object) {
 	return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps", Labels: map[string]string{"team": "alpha"}}}, &v1alpha1.EgressGateway{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "system"}, Spec: v1alpha1.EgressGatewaySpec{Upstream: v1alpha1.UpstreamSpec{Type: "openvpn"}, AllowedNamespaces: v1alpha1.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"team": "alpha"}}}}, Status: v1alpha1.EgressGatewayStatus{GatewayID: 42, Endpoints: []v1alpha1.GatewayEndpoint{{PodIP: "10.2.3.4", UpstreamHealthy: true}}}}
@@ -134,7 +134,7 @@ func TestPodDenials(t *testing.T) {
 		{"disallowed", func(_ *v1alpha1.EgressGateway, n *corev1.Namespace) { n.Labels["team"] = "other" }, "not allowed"},
 		{"nil selector", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.AllowedNamespaces.NamespaceSelector = nil }, "denies all"},
 		{"encryption", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.Encryption = "wireguard" }, "not implemented"},
-		{"dns", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.DNS.Mode = "gateway" }, "not implemented"},
+		{"dns", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.DNS.Mode = "unknown" }, "unsupported"},
 		{"upstream", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.Upstream.Type = "custom" }, "not implemented"},
 	}
 	for _, tc := range cases {
@@ -212,11 +212,18 @@ func TestDefaultGatewayUsesOperatorNamespace(t *testing.T) {
 
 func TestPolicyMatchesDenied(t *testing.T) {
 	ns, g := fixture()
-	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}}}
+	p := &v1alpha1.EgressPolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "apps"}, Spec: v1alpha1.EgressPolicySpec{GatewayRef: v1alpha1.GatewayReference{Name: "gateway"}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: "gateway"}}}}
 	h := setup(t, ns, g, p)
 	r := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
-	if r.Allowed || !strings.Contains(r.Result.Message, "require M3") {
+	if r.Allowed || !strings.Contains(r.Result.Message, "requires the M3 policy compiler") {
 		t.Fatalf("policy ignored: %+v", r.Result)
+	}
+	wrong := p.DeepCopy()
+	wrong.Spec.GatewayRef.Name = "another-gateway"
+	h = setup(t, ns, g, wrong)
+	r = h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, optedPod(), nil))
+	if r.Allowed || !strings.Contains(r.Result.Message, "does not match selected gateway") {
+		t.Fatalf("wrong policy gatewayRef accepted: %+v", r.Result)
 	}
 	p2 := p.DeepCopy()
 	p2.Name = "policy2"

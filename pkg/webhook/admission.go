@@ -31,8 +31,8 @@ const (
 )
 
 type Handler struct {
-	Client               client.Client
-	Namespace, InitImage string
+	Client                              client.Client
+	Namespace, InitImage, ClusterDomain string
 }
 
 func denied(err error) admission.Response { return admission.Denied(err.Error()) }
@@ -68,6 +68,9 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	}
 	cfg, err := h.clientConfig(ctx, req.Namespace, &pod)
 	if err != nil {
+		return denied(err)
+	}
+	if err := h.mutateGatewayDNS(ctx, req.Namespace, &pod); err != nil {
 		return denied(err)
 	}
 	raw, err := json.Marshal(cfg)
@@ -147,12 +150,22 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		return cfg, err
 	}
 	if len(matches) > 1 {
-		return cfg, fmt.Errorf("multiple EgressPolicies match pod: %v", matches)
-	}
-	if len(matches) == 1 {
-		return cfg, fmt.Errorf("EgressPolicy %s matches pod; selective policies require M3", matches[0])
+		return cfg, fmt.Errorf("multiple EgressPolicies match pod: %s and %s", matches[0].Name, matches[1].Name)
 	}
 	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
+	if len(matches) == 1 {
+		policy := matches[0]
+		policyNS := policy.Spec.GatewayRef.Namespace
+		if policyNS == "" {
+			policyNS = h.Namespace
+		}
+		if policy.Spec.GatewayRef.Name != name || policyNS != gatewayNS {
+			return cfg, fmt.Errorf("EgressPolicy %s gatewayRef %s/%s does not match selected gateway %s/%s", policy.Name, policyNS, policy.Spec.GatewayRef.Name, gatewayNS, name)
+		}
+		cfg.Identity.Policy = policy.Name
+		// Policy compilation is wired to pkg/policy when the datapath compiler lands.
+		return cfg, fmt.Errorf("EgressPolicy %s requires the M3 policy compiler before admission", policy.Name)
+	}
 	for _, e := range gateway.Status.EffectiveExclusions {
 		prefix, err := netip.ParsePrefix(e.CIDR)
 		if err != nil || !prefix.Addr().Is4() {
@@ -175,8 +188,8 @@ func supportedGateway(g *v1alpha1.EgressGateway) error {
 	if g.Spec.Encryption != "" && g.Spec.Encryption != "none" {
 		return fmt.Errorf("gateway encryption %q is not implemented in M2", g.Spec.Encryption)
 	}
-	if g.Spec.DNS.Mode != "" && g.Spec.DNS.Mode != "cluster" {
-		return fmt.Errorf("gateway DNS mode %q is not implemented in M2", g.Spec.DNS.Mode)
+	if g.Spec.DNS.Mode != "" && g.Spec.DNS.Mode != "cluster" && g.Spec.DNS.Mode != "gateway" {
+		return fmt.Errorf("gateway DNS mode %q is unsupported", g.Spec.DNS.Mode)
 	}
 	if g.Spec.Upstream.Type != "openvpn" {
 		return fmt.Errorf("gateway upstream %q is not implemented in M2", g.Spec.Upstream.Type)
@@ -186,19 +199,19 @@ func supportedGateway(g *v1alpha1.EgressGateway) error {
 	}
 	return nil
 }
-func (h *Handler) matchingPolicies(ctx context.Context, ns string, podLabels map[string]string) ([]string, error) {
+func (h *Handler) matchingPolicies(ctx context.Context, ns string, podLabels map[string]string) ([]v1alpha1.EgressPolicy, error) {
 	var list v1alpha1.EgressPolicyList
 	if err := h.Client.List(ctx, &list, client.InNamespace(ns)); err != nil {
 		return nil, fmt.Errorf("list EgressPolicies: %w", err)
 	}
-	var matches []string
+	var matches []v1alpha1.EgressPolicy
 	for _, p := range list.Items {
 		sel, err := metav1.LabelSelectorAsSelector(&p.Spec.WorkloadSelector)
 		if err != nil {
 			return nil, fmt.Errorf("invalid selector on EgressPolicy %s: %w", p.Name, err)
 		}
 		if sel.Matches(labels.Set(podLabels)) {
-			matches = append(matches, p.Name)
+			matches = append(matches, p)
 		}
 	}
 	return matches, nil
@@ -262,6 +275,23 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 		if ns == "" {
 			return denied(fmt.Errorf("policy namespace required"))
 		}
+		// Reject overlapping selectors even when no selected Pod exists yet.
+		var policies v1alpha1.EgressPolicyList
+		if err := h.Client.List(ctx, &policies, client.InNamespace(ns)); err != nil {
+			return denied(fmt.Errorf("list EgressPolicies: %w", err))
+		}
+		for _, other := range policies.Items {
+			if other.Name == policy.Name {
+				continue
+			}
+			overlap, err := selectorsOverlap(&policy.Spec.WorkloadSelector, &other.Spec.WorkloadSelector)
+			if err != nil {
+				return denied(err)
+			}
+			if overlap {
+				return denied(fmt.Errorf("policy %s overlaps policy %s on a possible workload", policy.Name, other.Name))
+			}
+		}
 		var pods corev1.PodList
 		if err = h.Client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
 			return denied(err)
@@ -275,8 +305,8 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 				return denied(err)
 			}
 			for _, other := range matches {
-				if other != policy.Name {
-					return denied(fmt.Errorf("policy %s overlaps %s on pod %s", policy.Name, other, p.Name))
+				if other.Name != policy.Name {
+					return denied(fmt.Errorf("policy %s overlaps %s on pod %s", policy.Name, other.Name, p.Name))
 				}
 			}
 		}
@@ -362,7 +392,7 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	if !reflect.DeepEqual(cfg, expected) {
 		return fmt.Errorf("client config differs from authorized gateway status")
 	}
-	return nil
+	return h.validateGatewayDNS(ctx, admissionNamespace, pod)
 }
 
 func sameMapEntry(old, updated map[string]string, key string) bool {
