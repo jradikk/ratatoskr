@@ -8,6 +8,22 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
+func TestInitBackendSelectionFailsClosed(t *testing.T) {
+	for _, mode := range []string{"", "iproute"} {
+		backend, err := initBackend(mode)
+		if err != nil {
+			t.Fatalf("mode %q: %v", mode, err)
+		}
+		backend.Close()
+	}
+	for _, mode := range []string{"ebpf", "unknown"} {
+		backend, err := initBackend(mode)
+		if err == nil || backend != nil {
+			t.Fatalf("mode %q should fail closed: backend=%v err=%v", mode, backend, err)
+		}
+	}
+}
+
 func TestCompleteConfigAfterCNI(t *testing.T) {
 	t.Setenv("POD_UID", "test-uid")
 	t.Setenv("POD_NAME", "payments-0")

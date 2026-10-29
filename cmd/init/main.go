@@ -54,6 +54,19 @@ func completeConfig(cfg *datapath.ClientConfig, podIP string, podMTU int) error 
 	return cfg.Validate()
 }
 
+// initBackend selects a backend before making any privileged namespace changes.
+// The eBPF constructor is connected when its implementation becomes available.
+func initBackend(mode string) (datapath.Backend, error) {
+	switch mode {
+	case "", "iproute":
+		return iproute.New()
+	case "ebpf":
+		return nil, errors.New("eBPF backend unavailable")
+	default:
+		return nil, fmt.Errorf("unsupported DATAPATH %q", mode)
+	}
+}
+
 func run(configPath string, remove bool) error {
 	if err := platform.CheckKernel(); err != nil {
 		return err
@@ -83,7 +96,7 @@ func run(configPath string, remove bool) error {
 	if err := completeConfig(&cfg, os.Getenv("POD_IP"), podMTU); err != nil {
 		return err
 	}
-	backend, err := iproute.New()
+	backend, err := initBackend(os.Getenv("DATAPATH"))
 	if err != nil {
 		return err
 	}
@@ -92,7 +105,11 @@ func run(configPath string, remove bool) error {
 		return backend.RemoveClient(context.Background(), cfg)
 	}
 	if cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() {
-		pub, err := backend.PrepareClientWireGuard(context.Background(), cfg)
+		manager, ok := backend.(datapath.WireGuardManager)
+		if !ok {
+			return errors.New("selected datapath does not support WireGuard; refusing registration")
+		}
+		pub, err := manager.PrepareClientWireGuard(context.Background(), cfg)
 		if err != nil {
 			return fmt.Errorf("prepare WireGuard client: %w", err)
 		}
