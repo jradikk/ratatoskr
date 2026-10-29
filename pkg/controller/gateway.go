@@ -4,9 +4,11 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +21,7 @@ import (
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -40,12 +43,14 @@ import (
 )
 
 const (
-	GatewayLabel            = "ratatoskr.skaldhall.io/gateway"
-	GatewayNamespace        = "ratatoskr.skaldhall.io/gateway-namespace"
-	IdentityLabel           = "ratatoskr.skaldhall.io/gateway-name"
-	ownerUIDLabel           = "ratatoskr.skaldhall.io/gateway-uid"
-	datapathReadyAnnotation = "ratatoskr.skaldhall.io/datapath-ready"
-	clientInitContainer     = "ratatoskr-init"
+	GatewayLabel             = "ratatoskr.skaldhall.io/gateway"
+	GatewayNamespace         = "ratatoskr.skaldhall.io/gateway-namespace"
+	IdentityLabel            = "ratatoskr.skaldhall.io/gateway-name"
+	ownerUIDLabel            = "ratatoskr.skaldhall.io/gateway-uid"
+	datapathReadyAnnotation  = "ratatoskr.skaldhall.io/datapath-ready"
+	clientInitContainer      = "ratatoskr-init"
+	registrationCAAnnotation = "ratatoskr.skaldhall.io/registration-ca"
+	wireguardKeyAnnotation   = "ratatoskr.skaldhall.io/wireguard-public-key"
 )
 
 type Options struct {
@@ -252,6 +257,54 @@ func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, 
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
+func validPublishedIdentity(caPEM, key string) bool {
+	parsedKey, err := wgtypes.ParseKey(key)
+	if err != nil || parsedKey == (wgtypes.Key{}) || len(caPEM) == 0 || len(caPEM) >= 4096 {
+		return false
+	}
+	block, rest := pem.Decode([]byte(caPEM))
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 || len(block.Headers) != 0 {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || !cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return false
+	}
+	return cert.CheckSignatureFrom(cert) == nil && time.Now().After(cert.NotBefore) && time.Now().Before(cert.NotAfter)
+}
+
+// managedGatewayPod binds published WireGuard TLS/WG keys to a Pod created by
+// this gateway's controlled Deployment, not merely a spoofable matching label.
+// Kubernetes Deployment Pods are owned by ReplicaSets, not directly by the CRD.
+func (r *GatewayReconciler) managedGatewayPod(ctx context.Context, gw *api.EgressGateway, pod *corev1.Pod) (bool, error) {
+	if pod.Namespace != gw.Namespace || pod.Labels[IdentityLabel] != gw.Name || pod.Labels[ownerUIDLabel] != string(gw.UID) || pod.Spec.ServiceAccountName != "ratatoskr-gateway" {
+		return false, nil
+	}
+	rsRef := metav1.GetControllerOf(pod)
+	if rsRef == nil || rsRef.Kind != "ReplicaSet" || rsRef.APIVersion != "apps/v1" {
+		return false, nil
+	}
+	var rs appsv1.ReplicaSet
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: rsRef.Name}, &rs); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if rs.UID != rsRef.UID {
+		return false, nil
+	}
+	depRef := metav1.GetControllerOf(&rs)
+	if depRef == nil || depRef.Kind != "Deployment" || depRef.APIVersion != "apps/v1" {
+		return false, nil
+	}
+	var dep appsv1.Deployment
+	if err := r.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: depRef.Name}, &dep); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if dep.UID != depRef.UID || dep.Name != gw.Name || !metav1.IsControlledBy(&dep, gw) {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var gw api.EgressGateway
 	if err := r.Get(ctx, req.NamespacedName, &gw); err != nil {
@@ -274,7 +327,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.Options.OperatorNamespace == "" || r.Options.GatewayImage == "" || r.Options.OpenVPNImage == "" {
 		return r.failure(ctx, &gw, "InvalidConfiguration", fmt.Errorf("operator namespace and gateway/upstream images are required"))
 	}
-	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none") || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init") {
+	if (gw.Spec.Replicas != 0 && gw.Spec.Replicas != 1) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute") || (r.Options.Driver != "" && r.Options.Driver != "init") {
 		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
 	var secret corev1.Secret
@@ -332,9 +385,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); err != nil {
 		return r.block(ctx, &gw, "GatewayPodListFailed", err)
 	}
-	oldIP := ""
+	oldIP, oldWGKey, oldCA := "", "", ""
 	if len(gw.Status.Endpoints) > 0 {
 		oldIP = gw.Status.Endpoints[0].PodIP
+		oldWGKey = gw.Status.Endpoints[0].WireguardPublicKey
+		oldCA = gw.Status.Endpoints[0].RegistrationCACert
 	}
 	gw.Status.Endpoints = nil
 	gw.Status.ReadyReplicas = 0
@@ -347,8 +402,18 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if podReady(p) {
 			info, e := r.info(ctx, p.Status.PodIP)
 			if e == nil && info.Ready && net.ParseIP(info.ExitIP) != nil {
-				if info.measured() {
-					gw.Status.MTU = api.GatewayMTUStatus{GeneveMTU: info.GeneveMTU, EffectiveMTU: info.EffectiveMTU, MSS: info.MSS}
+				publicIdentityReady := true
+				if gw.Spec.Encryption == "wireguard" {
+					// A public key/certificate from an arbitrary Pod is not a trust
+					// anchor: bind it to the managed Deployment/Pod owner UID.
+					managed, e := r.managedGatewayPod(ctx, &gw, p)
+					if e != nil {
+						return r.block(ctx, &gw, "GatewayPodIdentityFailed", e)
+					}
+					publicIdentityReady = managed && validPublishedIdentity(p.Annotations[registrationCAAnnotation], p.Annotations[wireguardKeyAnnotation]) && info.WireguardMTU >= 576
+				}
+				if info.measured() && publicIdentityReady {
+					gw.Status.MTU = api.GatewayMTUStatus{GeneveMTU: info.GeneveMTU, WireguardMTU: info.WireguardMTU, EffectiveMTU: info.EffectiveMTU, MSS: info.MSS}
 					meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "MTUUnknown", Status: metav1.ConditionFalse, Reason: "Measured", Message: "Gateway reports measured link MTUs", ObservedGeneration: gw.Generation})
 					if info.EffectiveMTU < 1280 {
 						if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MTUWarning") && r.Recorder != nil {
@@ -360,6 +425,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 					}
 					ep.UpstreamHealthy = true
 					ep.UpstreamExitIP = info.ExitIP
+					if gw.Spec.Encryption == "wireguard" {
+						ep.WireguardPublicKey = p.Annotations[wireguardKeyAnnotation]
+						ep.RegistrationCACert = p.Annotations[registrationCAAnnotation]
+					}
 					gw.Status.ReadyReplicas++
 				} else {
 					if !meta.IsStatusConditionTrue(gw.Status.Conditions, "MTUUnknown") && r.Recorder != nil {
@@ -380,6 +449,16 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionTrue, Reason: "GatewayPodIPChangedOrLost", Message: "Gateway PodIP changed or was lost; selected fixed-remote clients may require rollout; M2 cannot update running client netns", ObservedGeneration: gw.Generation})
 		if r.Recorder != nil {
 			r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "ClientRestartRequired", "Rollout", "Gateway PodIP changed; roll out selected client pods")
+		}
+	}
+	if gw.Spec.Encryption == "wireguard" && len(ips) > 0 && len(gw.Status.Endpoints) > 0 {
+		newKey := gw.Status.Endpoints[0].WireguardPublicKey
+		newCA := gw.Status.Endpoints[0].RegistrationCACert
+		if (oldWGKey != "" && oldWGKey != newKey) || (oldCA != "" && oldCA != newCA) {
+			meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "ClientRestartRequired", Status: metav1.ConditionTrue, Reason: "GatewayWireGuardIdentityChanged", Message: "Gateway WireGuard public key or registration CA changed; M4 init clients require rollout", ObservedGeneration: gw.Generation})
+			if r.Recorder != nil {
+				r.Recorder.Eventf(&gw, nil, corev1.EventTypeWarning, "ClientRestartRequired", "Rollout", "Gateway WireGuard identity changed; roll out selected init client pods")
+			}
 		}
 	}
 	if len(ips) == 0 {
@@ -422,6 +501,7 @@ type gatewayInfo struct {
 	Ready        bool   `json:"ready"`
 	PodMTU       int32  `json:"podMTU"`
 	GeneveMTU    int32  `json:"geneveMTU"`
+	WireguardMTU int32  `json:"wireguardMTU"`
 	UpstreamMTU  int32  `json:"upstreamMTU"`
 	EffectiveMTU int32  `json:"effectiveMTU"`
 	MSS          int32  `json:"mss"`

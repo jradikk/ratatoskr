@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/wireguard"
 )
 
@@ -107,6 +108,24 @@ func (b *Backend) removeWireGuardRoutes() error {
 	return nil
 }
 
+// setWireGuardMTU reserves transport overhead on the pod's CNI eth0 carrier.
+// GENEVE's inner MTU is bounded separately by ClientConfig/GatewayConfig.MTU.
+func (b *Backend) setWireGuardMTU() error {
+	eth, err := b.h.LinkByName("eth0")
+	if err != nil {
+		return fmt.Errorf("WireGuard eth0 carrier unavailable: %w", err)
+	}
+	wg, err := b.h.LinkByName(datapath.WireGuardDevice)
+	if err != nil {
+		return err
+	}
+	limit := eth.Attrs().MTU - mtu.WireGuardOverhead(mtu.IPv4)
+	if limit < mtu.MinInnerMTU+mtu.GeneveOverhead(mtu.IPv4, 0) {
+		return fmt.Errorf("pod MTU too small for WireGuard plus GENEVE")
+	}
+	return b.h.LinkSetMTU(wg, limit)
+}
+
 // PrepareClientWireGuard creates/retains the client kernel identity before
 // authenticated HTTPS registration. It installs NO peer or WG route: the
 // registration socket must be explicitly marked WireGuardMark by the caller.
@@ -123,7 +142,14 @@ func (b *Backend) PrepareClientWireGuard(ctx context.Context, c datapath.ClientC
 	if err := b.rejectDualStack(); err != nil {
 		return "", err
 	}
-	return wireguard.Ensure(b.h, datapath.WireGuardDevice, c.WireGuardPort, datapath.WireGuardMark)
+	public, err := wireguard.Ensure(b.h, datapath.WireGuardDevice, c.WireGuardPort, datapath.WireGuardMark)
+	if err != nil {
+		return "", err
+	}
+	if err := b.setWireGuardMTU(); err != nil {
+		return "", err
+	}
+	return public, nil
 }
 
 // WireGuardPublicKey publishes only the public key of the current gateway (or

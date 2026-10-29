@@ -142,6 +142,7 @@ def check(docs):
     assert rule(controller, "endpointslices")["verbs"] == ["get", "list", "watch"]
     assert rule(controller, "servicecidrs")["verbs"] == ["get", "list", "watch"]
     assert set(rule(controller, "networkpolicies")["verbs"]) == {"get", "list", "watch", "create", "update", "patch", "delete"}
+    assert rule(controller, "replicasets")["verbs"] == ["get", "list", "watch"]
     assert [r for r in controller["rules"] if r["resources"] == ["pods"]] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["patch"]}
     ]

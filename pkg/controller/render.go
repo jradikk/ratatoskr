@@ -22,6 +22,18 @@ func ptrInt32(value int32) *int32                     { return &value }
 func ptrPort(value int32) *intstr.IntOrString         { v := intstr.FromInt32(value); return &v }
 func protocol(value corev1.Protocol) *corev1.Protocol { return &value }
 
+// gatewayAPIVolume projects only public cluster trust roots and a rotating,
+// short-lived gateway Pod-bound API token into the gateway container. The
+// OpenVPN upstream container must never mount this volume.
+func gatewayAPIVolume() corev1.Volume {
+	lifetime := int64(3600)
+	return corev1.Volume{Name: "gateway-api", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{DefaultMode: ptrInt32(0444), Sources: []corev1.VolumeProjection{
+		{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "token", ExpirationSeconds: &lifetime}},
+		{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "kube-root-ca.crt"}, Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}}}},
+		{DownwardAPI: &corev1.DownwardAPIProjection{Items: []corev1.DownwardAPIVolumeFile{{Path: "namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}}}},
+	}}}}
+}
+
 func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clusterDNS ...string) ([]client.Object, error) {
 	if gw.Spec.Upstream.SecretRef.Name == "" {
 		return nil, fmt.Errorf("upstream secretRef.name required")
@@ -29,8 +41,16 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	if gw.Spec.Exclusions.AutoDetect != nil && !*gw.Spec.Exclusions.AutoDetect {
 		return nil, fmt.Errorf("disabled automatic exclusions are not supported")
 	}
-	// No POD_IP is serialized; every replica uses its own downward-API POD_IP.
-	config := datapath.GatewayConfig{GatewayID: gw.Status.GatewayID, Clients: ips, MTU: 1400, Encryption: "none"}
+	// No POD_IP or private key is serialized; the gateway obtains both inside its
+	// own network namespace. The selected encryption mode preserves one GENEVE path.
+	mode := gw.Spec.Encryption
+	if mode == "" {
+		mode = "none"
+	}
+	if mode == "wireguard" && gw.Namespace != r.Options.OperatorNamespace {
+		return nil, fmt.Errorf("WireGuard gateway must live in operator namespace until scoped RBAC is configured")
+	}
+	config := datapath.GatewayConfig{GatewayID: gw.Status.GatewayID, Clients: ips, MTU: 1400, Encryption: mode}
 	if config.Clients == nil {
 		config.Clients = []netip.Addr{}
 	}
@@ -58,6 +78,19 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		{Name: "gateway", Image: r.Options.GatewayImage, ImagePullPolicy: pull, Command: []string{"/ratatoskr", "-config", "/config/gateway.json"}, Env: []corev1.EnvVar{{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}}}, Ports: []corev1.ContainerPort{{Name: "geneve", ContainerPort: datapath.GenevePort, Protocol: corev1.ProtocolUDP}, {Name: "health", ContainerPort: 9900}}, VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config", ReadOnly: true}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}, Drop: []corev1.Capability{"ALL"}}}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(9900)}}, PeriodSeconds: 5}},
 		{Name: "upstream", Image: r.Options.OpenVPNImage, ImagePullPolicy: pull, VolumeMounts: []corev1.VolumeMount{{Name: "upstream", MountPath: "/etc/ratatoskr/upstream", ReadOnly: true}, {Name: "run", MountPath: "/run/ratatoskr"}, {Name: "dev-net", MountPath: "/dev/net"}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "MKNOD"}, Drop: []corev1.Capability{"ALL"}}}},
 	}}
+	if mode == "wireguard" {
+		pod.ServiceAccountName = "ratatoskr-gateway"
+		pod.Volumes = append(pod.Volumes, gatewayAPIVolume())
+		gateway := &pod.Containers[0]
+		gateway.VolumeMounts = append(gateway.VolumeMounts, corev1.VolumeMount{Name: "gateway-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true})
+		gateway.Env = append(gateway.Env,
+			corev1.EnvVar{Name: "GATEWAY_NAME", Value: gw.Name},
+			corev1.EnvVar{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
+			corev1.EnvVar{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+			corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+		)
+		gateway.Ports = append(gateway.Ports, corev1.ContainerPort{Name: "wg-transport", ContainerPort: int32(datapath.WireGuardPortDefault), Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "registration", ContainerPort: 9443, Protocol: corev1.ProtocolTCP})
+	}
 	for k, v := range gw.Spec.NodeSelector {
 		if pod.NodeSelector == nil {
 			pod.NodeSelector = map[string]string{}
@@ -112,7 +145,7 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		}
 		pod.Containers[0].Ports = append(pod.Containers[0].Ports, corev1.ContainerPort{Name: "dns-udp", ContainerPort: 1053, Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "dns-tcp", ContainerPort: 1053, Protocol: corev1.ProtocolTCP})
 	}
-	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
 	objects := []client.Object{cm, svc, dep}
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: selector}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}}}
 	// Kubelet readiness and controller /info use PodIP from host/network locations
@@ -120,7 +153,11 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9900)}}}}
 	if gw.Spec.AllowedNamespaces.NamespaceSelector != nil {
 		peers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: gw.Spec.AllowedNamespaces.NamespaceSelector.DeepCopy(), PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: gw.Name}}}}
-		np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(datapath.GenevePort)}}})
+		if mode == "wireguard" {
+			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(int32(datapath.WireGuardPortDefault))}, {Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9443)}}})
+		} else {
+			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(datapath.GenevePort)}}})
+		}
 		if gw.Spec.DNS.Mode == "gateway" {
 			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(1053)}, {Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(1053)}}})
 		}

@@ -36,6 +36,9 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 		if _, err := wireguard.Ensure(b.h, datapath.WireGuardDevice, c.WireGuardPort, datapath.WireGuardMark); err != nil {
 			return err
 		}
+		if err := b.setWireGuardMTU(); err != nil {
+			return err
+		}
 		if err := b.wireguardGatewayBase(); err != nil {
 			return err
 		}

@@ -36,6 +36,34 @@ func fixture(t *testing.T) (*GatewayReconciler, *api.EgressGateway) {
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(gw, &corev1.Pod{}).WithObjects(gw, ns, secret).Build()
 	return &GatewayReconciler{Client: c, Scheme: scheme, Options: Options{OperatorNamespace: "operator", GatewayImage: "gateway:local", OpenVPNImage: "openvpn:local", Datapath: "iproute", ServiceCIDRs: "10.43.0.0/16", PodCIDRs: "10.42.0.0/16"}}, gw
 }
+func TestManagedWireGuardPodIdentity(t *testing.T) {
+	r, gw := fixture(t)
+	ctx := context.Background()
+	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, UID: "dep-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(gw, api.SchemeGroupVersion.WithKind("EgressGateway"))}}}
+	if err := r.Create(ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", Namespace: gw.Namespace, UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dep, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}}
+	if err := r.Create(ctx, rs); err != nil {
+		t.Fatal(err)
+	}
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: gw.Namespace, UID: "pod-uid", Labels: map[string]string{IdentityLabel: gw.Name, ownerUIDLabel: string(gw.UID)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}, Spec: corev1.PodSpec{ServiceAccountName: "ratatoskr-gateway"}}
+	managed, err := r.managedGatewayPod(ctx, gw, p)
+	if err != nil || !managed {
+		t.Fatalf("owned Pod denied: %v %v", managed, err)
+	}
+	forged := p.DeepCopy()
+	forged.OwnerReferences = nil
+	if managed, err = r.managedGatewayPod(ctx, gw, forged); err != nil || managed {
+		t.Fatalf("label-only Pod accepted: %v %v", managed, err)
+	}
+	forged = p.DeepCopy()
+	forged.OwnerReferences[0].UID = "wrong-rs-uid"
+	if managed, err = r.managedGatewayPod(ctx, gw, forged); err != nil || managed {
+		t.Fatalf("wrong ReplicaSet UID accepted: %v %v", managed, err)
+	}
+}
+
 func TestRenderSecurityAndPodIPContract(t *testing.T) {
 	r, gw := fixture(t)
 	gw.Status.GatewayID = 123
@@ -147,7 +175,9 @@ func TestReconcileAllocationAndUnsupported(t *testing.T) {
 	if gw.Status.GatewayID != id || meta.IsStatusConditionTrue(gw.Status.Conditions, "Ready") {
 		t.Fatalf("invalid unready status %+v", gw.Status)
 	}
-	gw.Spec.Encryption = "wireguard"
+	// WireGuard is supported beginning with M4; a still-unsupported value
+	// must instead remove a previously rendered gateway deployment.
+	gw.Spec.Replicas = 2
 	if err := r.Update(ctx, gw); err != nil {
 		t.Fatal(err)
 	}
