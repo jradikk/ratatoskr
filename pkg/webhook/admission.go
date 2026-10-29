@@ -19,6 +19,7 @@ import (
 
 	"github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/datapath/affinity"
 	policycompiler "github.com/skaldhall/ratatoskr/pkg/policy"
 )
 
@@ -261,20 +262,50 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		}
 		cfg.Exclusions = append(cfg.Exclusions, prefix)
 	}
+	// UID is normally not assigned when Pod CREATE admission runs. Prefer an
+	// existing UID where present; otherwise namespace/name is stable for this
+	// admission request and deliberately independent of endpoint list ordering.
+	// A future Pod reusing the same name may pick the same endpoint, safely.
+	key := string(pod.UID)
+	if key == "" {
+		if pod.Name == "" {
+			return cfg, fmt.Errorf("pod name or UID is required for stable gateway affinity")
+		}
+		key = ns + "/" + pod.Name
+	}
+	healthy := make(map[netip.Addr]v1alpha1.GatewayEndpoint)
 	for _, endpoint := range gateway.Status.Endpoints {
+		if !endpoint.UpstreamHealthy {
+			continue
+		}
 		ip, err := netip.ParseAddr(endpoint.PodIP)
-		if endpoint.UpstreamHealthy && err == nil && ip.Is4() && !ip.IsUnspecified() && !ip.IsMulticast() {
-			if encryption == "wireguard" {
-				if err := validateWireGuardEndpoint(&endpoint); err != nil {
-					return cfg, err
-				}
-				// Status binds this public identity to the selected gateway PodIP.
-				cfg.GatewayPublicKey = endpoint.WireguardPublicKey
-				cfg.RegistrationCACert = endpoint.RegistrationCACert
-				cfg.WireGuardPort = datapath.WireGuardPortDefault
+		if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			return cfg, fmt.Errorf("healthy gateway endpoint has invalid PodIP")
+		}
+		if prior, exists := healthy[ip]; exists && encryption == "wireguard" && (prior.WireguardPublicKey != endpoint.WireguardPublicKey || prior.RegistrationCACert != endpoint.RegistrationCACert) {
+			return cfg, fmt.Errorf("duplicate gateway PodIP has conflicting WireGuard identity")
+		}
+		healthy[ip] = endpoint
+	}
+	if len(healthy) != 0 {
+		ips := make([]netip.Addr, 0, len(healthy))
+		for ip := range healthy {
+			ips = append(ips, ip)
+		}
+		selected, err := affinity.Select(key, ips)
+		if err != nil {
+			return cfg, fmt.Errorf("select healthy gateway endpoint: %w", err)
+		}
+		cfg.Endpoint = selected
+		if encryption == "wireguard" {
+			endpoint := healthy[selected]
+			if err := validateWireGuardEndpoint(&endpoint); err != nil {
+				return cfg, err
 			}
-			cfg.Endpoint = ip
-			break
+			// Key and CA always belong to this exact selected PodIP.
+			cfg.GatewayPublicKey = endpoint.WireguardPublicKey
+			cfg.RegistrationCACert = endpoint.RegistrationCACert
+			cfg.WireGuardPort = datapath.WireGuardPortDefault
 		}
 	}
 	// An absent endpoint is intentional: the init backend installs an unreachable route.

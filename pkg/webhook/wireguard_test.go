@@ -85,6 +85,51 @@ func TestProjectedTokenInitOnly(t *testing.T) {
 	}
 }
 
+func TestWireGuardAffinityKeepsSelectedIdentityOnReorder(t *testing.T) {
+	namespace, object := fixture()
+	gateway := object.(*v1alpha1.EgressGateway)
+	gateway.Spec.Replicas = 3
+	gateway.Spec.Encryption = "wireguard"
+	first := wgEndpoint(t)
+	second := wgEndpoint(t)
+	second.PodIP = "10.1.2.4"
+	gateway.Status.Endpoints = []v1alpha1.GatewayEndpoint{first, second}
+	h := setup(t, namespace, gateway)
+	pod := optedPod()
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var cfg datapath.ClientConfig
+	if err := json.Unmarshal([]byte(out.Annotations[ConfigAnnotation]), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var selected v1alpha1.GatewayEndpoint
+	for _, endpoint := range gateway.Status.Endpoints {
+		if cfg.Endpoint.String() == endpoint.PodIP {
+			selected = endpoint
+		}
+	}
+	if selected.PodIP == "" || cfg.GatewayPublicKey != selected.WireguardPublicKey || cfg.RegistrationCACert != selected.RegistrationCACert {
+		t.Fatal("selected endpoint WG identity mismatch")
+	}
+	gateway.Status.Endpoints[0], gateway.Status.Endpoints[1] = gateway.Status.Endpoints[1], gateway.Status.Endpoints[0]
+	h = setup(t, namespace, gateway)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !r.Allowed {
+		t.Fatalf("WG identity changed on status reorder: %+v", r.Result)
+	}
+	forged := out.DeepCopy()
+	cfg.GatewayPublicKey = first.WireguardPublicKey
+	if selected.PodIP == first.PodIP {
+		cfg.GatewayPublicKey = second.WireguardPublicKey
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged.Annotations[ConfigAnnotation] = string(raw)
+	if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); r.Allowed {
+		t.Fatal("wrong replica public identity accepted")
+	}
+}
+
 func TestWireGuardTokenPreexistingMountRejected(t *testing.T) {
 	namespace, object := fixture()
 	gateway := object.(*v1alpha1.EgressGateway)

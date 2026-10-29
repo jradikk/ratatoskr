@@ -178,6 +178,68 @@ func TestProgrammingInitDatapathCapabilitiesAndEnv(t *testing.T) {
 	}
 }
 
+func TestInitGatewayAffinityStickyAcrossReorderAndFailover(t *testing.T) {
+	namespace, object := fixture()
+	gateway := object.(*v1alpha1.EgressGateway)
+	gateway.Spec.Replicas = 3
+	gateway.Status.Endpoints = []v1alpha1.GatewayEndpoint{
+		{PodIP: "10.2.3.4", UpstreamHealthy: true},
+		{PodIP: "10.2.3.5", UpstreamHealthy: true},
+		{PodIP: "10.2.3.6", UpstreamHealthy: true},
+	}
+	h := setup(t, namespace, gateway)
+	h.Driver = "init"
+	pod := optedPod() // UID is empty at CREATE admission; use namespace/name.
+	first := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var initial datapath.ClientConfig
+	if err := json.Unmarshal([]byte(first.Annotations[ConfigAnnotation]), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if !initial.Endpoint.IsValid() {
+		t.Fatal("healthy gateway endpoint not selected")
+	}
+	gateway.Status.Endpoints[0], gateway.Status.Endpoints[2] = gateway.Status.Endpoints[2], gateway.Status.Endpoints[0]
+	h = setup(t, namespace, gateway)
+	reordered := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var second datapath.ClientConfig
+	if err := json.Unmarshal([]byte(reordered.Annotations[ConfigAnnotation]), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Endpoint != initial.Endpoint {
+		t.Fatalf("endpoint list order changed sticky selection %s -> %s", initial.Endpoint, second.Endpoint)
+	}
+	if response := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &reordered, nil)); !response.Allowed {
+		t.Fatalf("sticky config rejected: %+v", response.Result)
+	}
+	for i := range gateway.Status.Endpoints {
+		if gateway.Status.Endpoints[i].PodIP == initial.Endpoint.String() {
+			gateway.Status.Endpoints[i].UpstreamHealthy = false
+		}
+	}
+	h = setup(t, namespace, gateway)
+	failedOver := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var third datapath.ClientConfig
+	if err := json.Unmarshal([]byte(failedOver.Annotations[ConfigAnnotation]), &third); err != nil {
+		t.Fatal(err)
+	}
+	if !third.Endpoint.IsValid() || third.Endpoint == initial.Endpoint {
+		t.Fatalf("failed endpoint still selected: %s", third.Endpoint)
+	}
+	if response := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &failedOver, nil)); !response.Allowed {
+		t.Fatalf("failover config rejected: %+v", response.Result)
+	}
+	gateway.Status.Endpoints = nil
+	h = setup(t, namespace, gateway)
+	closed := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	var missing datapath.ClientConfig
+	if err := json.Unmarshal([]byte(closed.Annotations[ConfigAnnotation]), &missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Endpoint.IsValid() {
+		t.Fatalf("no healthy endpoint did not fail closed: %+v", missing)
+	}
+}
+
 func TestPodDenials(t *testing.T) {
 	ns, g := fixture()
 	cases := []struct {
