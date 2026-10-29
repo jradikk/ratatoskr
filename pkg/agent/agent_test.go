@@ -15,6 +15,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -115,6 +116,69 @@ func TestConfigFailClosedAndEndpointHash(t *testing.T) {
 	raw, _ := json.Marshal(datapath.ClientConfig{PodIP: c.PodIP})
 	if len(raw) == 0 {
 		t.Fatal("empty config encoding")
+	}
+}
+
+func TestClientMTUBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, encryption   string
+		pod, gateway, want int
+		wantError          bool
+	}{
+		{name: "gateway cap", encryption: "none", pod: 1500, gateway: 1400, want: 1400},
+		{name: "small workload carrier", encryption: "none", pod: 1000, gateway: 1400, want: 950},
+		{name: "small workload with WireGuard", encryption: "wireguard", pod: 1000, gateway: 1400, want: 890},
+		{name: "WireGuard below minimum", encryption: "wireguard", pod: 680, gateway: 1400, wantError: true},
+		{name: "gateway below minimum", encryption: "none", pod: 1500, gateway: 575, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := clientMTU(tc.pod, tc.gateway, tc.encryption)
+			if (err != nil) != tc.wantError || (!tc.wantError && got != tc.want) {
+				t.Fatalf("clientMTU(%d,%d,%q) = %d, %v; want %d, error=%t", tc.pod, tc.gateway, tc.encryption, got, err, tc.want, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestHostPIDNetnsIdentity(t *testing.T) {
+	var self, host unix.Stat_t
+	if err := unix.Stat("/proc/self/ns/net", &self); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat("/proc/1/ns/net", &host); err != nil {
+		// Unprivileged CI may hide PID1 namespace; keep the synthetic hostPID
+		// case below and validate production fail-closed behavior explicitly.
+		f, openErr := os.Open("/proc/self/ns/net")
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		defer f.Close()
+		if err := rejectHost(f); err == nil {
+			t.Fatal("accepted namespace without readable PID1")
+		}
+		host = unix.Stat_t{Dev: self.Dev, Ino: self.Ino + 1}
+	}
+	if err := rejectForbiddenNetns(self, self, host); err == nil {
+		t.Fatal("agent netns accepted")
+	}
+	if err := rejectForbiddenNetns(host, self, host); err == nil {
+		t.Fatal("hostPID netns accepted")
+	}
+	// Isolated hostPID simulation: even if self and host differ, host identity
+	// must still be denied, while an unrelated sandbox identity remains valid.
+	if err := rejectForbiddenNetns(unix.Stat_t{Dev: 11, Ino: 12}, unix.Stat_t{Dev: 11, Ino: 13}, unix.Stat_t{Dev: 11, Ino: 12}); err == nil {
+		t.Fatal("distinct host namespace accepted")
+	}
+	if err := rejectForbiddenNetns(unix.Stat_t{Dev: 11, Ino: 14}, unix.Stat_t{Dev: 11, Ino: 13}, unix.Stat_t{Dev: 11, Ino: 12}); err != nil {
+		t.Fatalf("rejected unrelated sandbox: %v", err)
+	}
+}
+
+func TestPathRequiresSandboxPID(t *testing.T) {
+	info := map[string]string{"info": `{"runtimeSpec":{"linux":{"namespaces":[{"type":"network","path":"/var/run/netns/example"}]}}}`}
+	if f, err := openSandboxNetns(info, "pod-uid"); err == nil {
+		f.Close()
+		t.Fatal("trusted path without corroborating PID")
 	}
 }
 

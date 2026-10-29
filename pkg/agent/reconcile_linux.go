@@ -16,6 +16,7 @@ import (
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
+	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
 	"github.com/vishvananda/netlink"
@@ -26,11 +27,51 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// clientMTU caps the inner tunnel by both the actual workload carrier and the
+// gateway-advertised end-to-end limit. The gateway measurement alone does not
+// describe the workload's CNI on a heterogeneous node.
+func clientMTU(podMTU, gatewayMTU int, encryption string) (int, error) {
+	if gatewayMTU < mtu.MinInnerMTU {
+		return 0, fmt.Errorf("gateway effective MTU %d is below minimum %d", gatewayMTU, mtu.MinInnerMTU)
+	}
+	result, err := mtu.Compute(mtu.Params{
+		PodMTU: podMTU, Underlay: mtu.IPv4,
+		Encryption: mtu.Encryption(encryption), UpstreamMTU: gatewayMTU,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("compute workload eth0 tunnel MTU: %w", err)
+	}
+	return result.EffectiveMTU, nil
+}
+
+// completeClientMTU must execute inside the selected workload netns. It never
+// substitutes a host link or a gateway pod's carrier MTU for eth0.
+func completeClientMTU(cfg *datapath.ClientConfig) error {
+	link, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return fmt.Errorf("workload eth0 unavailable: %w", err)
+	}
+	cfg.MTU, err = clientMTU(link.Attrs().MTU, cfg.MTU, cfg.Encryption)
+	return err
+}
+
 // Program constructs its backend only after entering the selected sandbox netns.
 // The dummy marker is created LAST. Failure removes the marker and preserves the
 // backend's unreachable fallback; callers must never publish ready on failure.
-func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, previous string, remove bool) error {
+func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, gatewayMTU int, previous string, remove bool) error {
 	return InNamespace(target, func() error {
+		if !remove {
+			// Re-read the carrier immediately before ApplyClient; changing it
+			// after pre-registration requires a fresh reconciliation.
+			computed := *cfg
+			computed.MTU = gatewayMTU
+			if err := completeClientMTU(&computed); err != nil {
+				return err
+			}
+			if computed.MTU != cfg.MTU {
+				return errors.New("workload eth0 MTU changed during programming; retry")
+			}
+		}
 		backend, err := iproute.New()
 		if err != nil {
 			return err
@@ -49,12 +90,12 @@ func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, pr
 			if marker == nil {
 				return errors.New("refusing cleanup without owned marker")
 			}
-			if err := backend.RemoveClient(ctx, cfg); err != nil {
+			if err := backend.RemoveClient(ctx, *cfg); err != nil {
 				return err
 			}
 			return netlink.LinkDel(marker)
 		}
-		if marker != nil && previous == Hash(cfg) {
+		if marker != nil && previous == Hash(*cfg) {
 			if _, ok := marker.(*netlink.Dummy); !ok {
 				return errors.New("readiness marker is not a dummy link")
 			}
@@ -68,7 +109,7 @@ func Program(ctx context.Context, target *os.File, cfg datapath.ClientConfig, pr
 				return err
 			}
 		}
-		if err := backend.ApplyClient(ctx, cfg); err != nil {
+		if err := backend.ApplyClient(ctx, *cfg); err != nil {
 			return err
 		}
 		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: Marker}}
@@ -162,6 +203,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	defer target.Close()
+	gatewayMTU := cfg.MTU
+	if !removing {
+		if err = InNamespace(target, func() error { return completeClientMTU(&cfg) }); err != nil {
+			return err
+		}
+	}
 	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && existing != Hash(cfg) {
 		if r.Tokens == nil {
 			return errors.New("TokenRequest client unavailable")
@@ -201,7 +248,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return fmt.Errorf("authenticate gateway peer: %w", err)
 		}
 	}
-	if err = Program(ctx, target, cfg, existing, removing); err != nil {
+	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing); err != nil {
 		return err
 	}
 	if removing {

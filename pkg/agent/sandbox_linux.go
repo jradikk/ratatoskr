@@ -81,13 +81,8 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	if err := json.Unmarshal([]byte(info["info"]), &details); err != nil {
 		return nil, fmt.Errorf("unsupported CRI verbose info: %w", err)
 	}
-	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
-		if ns.Type == "network" && ns.Path != "" {
-			return openContainedNetns(ns.Path)
-		}
-	}
 	if details.PID <= 1 {
-		return nil, errors.New("sandbox PID unavailable")
+		return nil, errors.New("sandbox PID unavailable; cannot corroborate reported netns path")
 	}
 	// CRI metadata is authoritative for UID; the process path is opened without
 	// following any intermediate /proc symlinks and never accepted as host netns.
@@ -109,6 +104,26 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	if err := rejectHost(f); err != nil {
 		f.Close()
 		return nil, err
+	}
+	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
+		if ns.Type != "network" || ns.Path == "" {
+			continue
+		}
+		candidate, err := openContainedNetns(ns.Path)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		var pidStat, candidateStat unix.Stat_t
+		if err = unix.Fstat(int(f.Fd()), &pidStat); err == nil {
+			err = unix.Fstat(int(candidate.Fd()), &candidateStat)
+		}
+		f.Close()
+		if err != nil || !sameNetns(pidStat, candidateStat) {
+			candidate.Close()
+			return nil, errors.New("reported netns differs from sandbox PID netns")
+		}
+		return candidate, nil
 	}
 	return f, nil
 }
@@ -139,21 +154,38 @@ func openContainedNetns(path string) (*os.File, error) {
 	return f, nil
 }
 
-func rejectHost(f *os.File) error {
-	var target, host unix.Stat_t
-	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
-		return err
-	}
-	if err := unix.Stat("/proc/self/ns/net", &host); err != nil {
-		return err
-	}
-	if target.Dev == host.Dev && target.Ino == host.Ino {
-		return errors.New("refusing host network namespace")
-	}
+func sameNetns(a, b unix.Stat_t) bool {
+	return a.Dev == b.Dev && a.Ino == b.Ino && a.Ino != 0
+}
+
+func rejectForbiddenNetns(target unix.Stat_t, forbidden ...unix.Stat_t) error {
 	if target.Ino == 0 {
 		return errors.New("invalid network namespace")
 	}
+	for _, namespace := range forbidden {
+		if sameNetns(target, namespace) {
+			return errors.New("refusing agent or host network namespace")
+		}
+	}
 	return nil
+}
+
+func rejectHost(f *os.File) error {
+	var target unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
+		return err
+	}
+	// hostPID exposes node PID1 even when this agent's own Pod has a distinct
+	// network namespace. Both must be excluded before any setns attempt.
+	var forbidden []unix.Stat_t
+	for _, path := range []string{"/proc/self/ns/net", "/proc/1/ns/net"} {
+		var namespace unix.Stat_t
+		if err := unix.Stat(path, &namespace); err != nil {
+			return fmt.Errorf("verify forbidden namespace %s: %w", path, err)
+		}
+		forbidden = append(forbidden, namespace)
+	}
+	return rejectForbiddenNetns(target, forbidden...)
 }
 
 // InNamespace pins the calling thread throughout backend creation and execution.
