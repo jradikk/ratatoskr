@@ -106,11 +106,11 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 			if _, ok := marker.(*netlink.Dummy); !ok {
 				return errors.New("readiness marker is not a dummy link")
 			}
-			if markerReady(marker) {
-				return nil // restart adoption: preserve established tunnel and routes
+			if markerReady(marker) && canAdoptClient(ctx, backend, *cfg, mode) {
+				return nil // verified restart adoption: preserve established flows
 			}
-			// A down marker cannot satisfy wait-init. Discard and reprogram the
-			// owned datapath before publishing a fresh, UP readiness marker.
+			// Down or unverified markers cannot satisfy wait-init. Discard and
+			// reprogram before publishing a fresh UP readiness marker.
 		}
 		if marker != nil {
 			if _, ok := marker.(*netlink.Dummy); !ok {

@@ -55,6 +55,37 @@ func TestEBPFWireGuardUnsupportedBeforeRegistration(t *testing.T) {
 		t.Fatalf("unmanaged WG accepted or leaked backend: closed=%t, err=%v", closed, err)
 	}
 }
+
+type verifyingBackend struct {
+	stubBackend
+	verified *int
+	err      error
+}
+
+func (b *verifyingBackend) VerifyClient(_ context.Context, _ datapath.ClientConfig) error {
+	*b.verified++
+	return b.err
+}
+func TestEBPFAdoptionRequiresKernelVerification(t *testing.T) {
+	cfg := datapath.ClientConfig{GatewayID: 1}
+	closed := false
+	if canAdoptClient(context.Background(), &stubBackend{closed: &closed}, cfg, "ebpf") {
+		t.Fatal("adopted eBPF marker without verifier")
+	}
+	calls := 0
+	b := &verifyingBackend{stubBackend: stubBackend{closed: &closed}, verified: &calls, err: errors.New("tc filter missing")}
+	if canAdoptClient(context.Background(), b, cfg, "ebpf") || calls != 1 {
+		t.Fatal("adopted unhealthy eBPF selector")
+	}
+	b.err = nil
+	if !canAdoptClient(context.Background(), b, cfg, "ebpf") || calls != 2 {
+		t.Fatal("verified eBPF selector not adopted")
+	}
+	if !canAdoptClient(context.Background(), &stubBackend{closed: &closed}, cfg, "iproute") {
+		t.Fatal("changed established iproute restart behavior")
+	}
+}
+
 func TestModeHashBindsBackendWithoutBreakingIprouteAdoption(t *testing.T) {
 	c := datapath.ClientConfig{GatewayID: 9}
 	if HashForMode(c, "") != Hash(c) || HashForMode(c, "iproute") != Hash(c) {
