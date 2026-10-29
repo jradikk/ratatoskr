@@ -14,12 +14,14 @@
 #define MODE_FULL 0
 #define MODE_INCLUDE 1
 #define MODE_EXCLUDE 2
+#define MODE_LOCKDOWN 3
 #define REASON_NO_ENDPOINT 0
 #define REASON_TUNNEL_KEY 1
 #define REASON_TUNNEL_OPT 2
 #define REASON_REDIRECT 3
 #define REASON_METADATA 4
 #define REASON_BAD_CONFIG 5
+#define REASON_LOCKDOWN 6
 #define MAX_RULES 64
 #define MAX_EXCLUSIONS 1024
 
@@ -40,7 +42,7 @@ struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key,
 struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, MAX_RULES); __type(key, __u32); __type(value, struct rule_info); } rules SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1); __type(key, __u32); __type(value, struct client_config); } config SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1); __type(key, __u32); __type(value, struct geneve_opt); } identity SEC(".maps");
-struct { __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 6); __type(key, __u32); __type(value, __u64); } stats SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 7); __type(key, __u32); __type(value, __u64); } stats SEC(".maps");
 
 static __always_inline void count(__u32 reason) {
  __u64 *counter = bpf_map_lookup_elem(&stats, &reason);
@@ -76,6 +78,7 @@ int steer(struct __sk_buff *skb) {
  if ((void *)(eth+1)>end) return TC_ACT_SHOT;
  if (eth->h_proto==bpf_htons(ETH_P_IPV6)) return TC_ACT_SHOT; // IPv6 v1 non-goal: no unsteered leak.
  if (eth->h_proto!=bpf_htons(ETH_P_IP)) return TC_ACT_OK;
+ if (c->mode==MODE_LOCKDOWN) {count(REASON_LOCKDOWN);return TC_ACT_SHOT;}
  struct iphdr *iph=(void *)(eth+1);
  if ((void *)(iph+1)>end) return TC_ACT_SHOT;
  if (iph->ihl!=5) return TC_ACT_SHOT; // never bypass selectors on IPv4 options/malformed headers

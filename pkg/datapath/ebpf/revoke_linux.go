@@ -58,6 +58,9 @@ func (b *Backend) revokeOldEndpoint(eth netlink.Link) error {
 					_ = m.Close()
 					return err
 				}
+				// One map update atomically replaces the old policy decision
+				// with deny-all IPv4, including old CIDR/port direct passes.
+				config.Mode = 3 // MODE_LOCKDOWN in bpf/client.c
 				config.Healthy = 0
 				config.Endpoint = 0
 				config.Ifindex = 0

@@ -407,11 +407,61 @@ func TestPrivilegedFailedEndpointUpdateRevokesOldKernelSelector(t *testing.T) {
 		if err := b.objects.Config.Lookup(uint32(0), &config); err != nil {
 			t.Fatal(err)
 		}
-		if config.Healthy != 0 || config.Endpoint != 0 || config.Ifindex != 0 {
-			t.Fatalf("failed update left old healthy selector: %+v", config)
+		if config.Mode != 3 || config.Healthy != 0 || config.Endpoint != 0 || config.Ifindex != 0 {
+			t.Fatalf("failed update left old policy selector active: %+v", config)
+		}
+		for _, dest := range []string{"10.42.1.11", "203.0.113.7", "169.254.64.1"} {
+			got, _, err := b.objects.Steer.Test(packet(dest, 443, false))
+			if err != nil || got != 2 {
+				t.Fatalf("stale policy permitted %s after failed update: action=%d err=%v", dest, got, err)
+			}
 		}
 		if err := b.VerifyClient(context.Background(), c); err == nil {
 			t.Fatal("restart verifier accepted revoked old selector")
+		}
+	})
+}
+
+func TestPrivilegedFailedHealthyPolicyChangeDoesNotPermitOldDirectPass(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		dummy(t, b)
+		eth, err := b.h.LinkByName("eth0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Dst: &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}}); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Endpoint: netip.MustParseAddr("10.42.1.9"), Policy: datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}}}}}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		previouslyDirect := packet("198.51.100.8", 443, false)
+		if got, _, err := b.objects.Steer.Test(previouslyDirect); err != nil || got != 0 {
+			t.Fatalf("old include policy expected direct pass: %d %v", got, err)
+		}
+		changed := c
+		changed.Policy.Mode = "exclude" // formerly direct traffic now selected
+		if old, err := b.h.LinkByName(datapath.GatewayDevice); err != nil {
+			t.Fatal(err)
+		} else if err := b.h.LinkDel(old); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.h.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: datapath.GatewayDevice}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ApplyClient(context.Background(), changed); err == nil {
+			t.Fatal("failed to trigger policy update failure")
+		}
+		if got, _, err := b.objects.Steer.Test(previouslyDirect); err != nil || got != 2 {
+			t.Fatalf("failed policy update retained stale direct pass: action=%d err=%v", got, err)
+		}
+		config := clientClientConfig{}
+		if err := b.objects.Config.Lookup(uint32(0), &config); err != nil {
+			t.Fatal(err)
+		}
+		if config.Mode != 3 || config.Healthy != 0 {
+			t.Fatalf("prior policy not revoked: %+v", config)
 		}
 	})
 }
