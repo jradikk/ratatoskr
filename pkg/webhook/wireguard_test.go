@@ -83,6 +83,72 @@ func TestProjectedTokenInitOnly(t *testing.T) {
 	}
 }
 
+func TestWireGuardTokenPreexistingMountRejected(t *testing.T) {
+	namespace, object := fixture()
+	gateway := object.(*v1alpha1.EgressGateway)
+	gateway.Spec.Encryption = "wireguard"
+	gateway.Status.Endpoints = nil // no endpoint remains fail-closed, but still projects the token
+	h := setup(t, namespace, gateway)
+	cases := []struct {
+		name string
+		add  func(*corev1.Pod)
+	}{
+		{"app", func(p *corev1.Pod) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}
+		}},
+		{"other init", func(p *corev1.Pod) {
+			p.Spec.InitContainers = []corev1.Container{{Name: "other", Image: "other", VolumeMounts: []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}}}
+		}},
+		{"ephemeral", func(p *corev1.Pod) {
+			p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "other", Image: "other", VolumeMounts: []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}}}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := optedPod()
+			tc.add(pod)
+			response := h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil))
+			if response.Allowed || !strings.Contains(response.Result.Message, "reserved WireGuard token mount") {
+				t.Fatalf("preexisting %s mount exposed token: %+v", tc.name, response.Result)
+			}
+		})
+	}
+}
+
+func TestWireGuardTokenForgedExtraMountRejected(t *testing.T) {
+	namespace, object := fixture()
+	gateway := object.(*v1alpha1.EgressGateway)
+	gateway.Spec.Encryption = "wireguard"
+	gateway.Status.Endpoints = nil
+	h := setup(t, namespace, gateway)
+	pod := optedPod()
+	mutated := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	cases := []struct {
+		name string
+		add  func(*corev1.Pod)
+	}{
+		{"app", func(p *corev1.Pod) {
+			p.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}
+		}},
+		{"other init", func(p *corev1.Pod) {
+			p.Spec.InitContainers = append(p.Spec.InitContainers, corev1.Container{Name: "other", Image: "other", VolumeMounts: []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}})
+		}},
+		{"ephemeral", func(p *corev1.Pod) {
+			p.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "other", Image: "other", VolumeMounts: []corev1.VolumeMount{{Name: wgTokenVolume, MountPath: "/tmp/stolen"}}}}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forged := mutated.DeepCopy()
+			tc.add(forged)
+			response := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil))
+			if response.Allowed || !strings.Contains(response.Result.Message, "WireGuard token must not be mounted") {
+				t.Fatalf("forged %s mount exposed token: %+v", tc.name, response.Result)
+			}
+		})
+	}
+}
+
 func TestWireGuardAdmissionFailClosedBeforeDatapathFields(t *testing.T) {
 	namespace, object := fixture()
 	gateway := object.(*v1alpha1.EgressGateway)
