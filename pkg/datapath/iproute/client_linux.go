@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/wireguard"
 )
 
 const fallbackMetric = 4294967295
@@ -169,6 +170,14 @@ func (b *Backend) clientFirewall(c datapath.ClientConfig) error {
 	if c.Policy.Mode != "" {
 		routeTable := conn.AddTable(&nftables.Table{Name: "ratatoskr_route", Family: nftables.TableFamilyIPv4})
 		chain := conn.AddChain(&nftables.Chain{Name: "steer", Table: routeTable, Type: nftables.ChainTypeRoute, Hooknum: nftables.ChainHookOutput, Priority: nftables.ChainPriorityMangle})
+		// Registration and WG UDP sockets carry WireGuardMark; preserve their
+		// main-table bypass instead of rewriting the reserved mark to steering.
+		conn.AddRule(&nftables.Rule{Table: routeTable, Chain: chain, Exprs: []expr.Any{
+			&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
+			&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: native32(datapath.MarkMask), Xor: make([]byte, 4)},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: native32(datapath.WireGuardMark)},
+			&expr.Verdict{Kind: expr.VerdictReturn},
+		}})
 		// Any existing mesh/CNI mark bits outside MarkMask survive the update.
 		mark := []expr.Any{&expr.Meta{Key: expr.MetaKeyMARK, Register: 1}, &expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: native32(^datapath.MarkMask), Xor: native32(steeringMark)}, &expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1}}
 		for _, r := range c.Policy.Rules {
@@ -246,6 +255,31 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	}
 	if err := b.rejectDualStack(); err != nil {
 		return err
+	}
+	if c.Encryption == "wireguard" {
+		// Install plaintext deny before any WG-tunneled GENEVE route exists.
+		if err := b.wireguardGuard(true); err != nil {
+			return err
+		}
+		if _, err := b.PrepareClientWireGuard(ctx, c); err != nil {
+			return err
+		}
+		if c.Endpoint.IsValid() {
+			if c.GatewayPublicKey == "" {
+				return fmt.Errorf("WireGuard gateway public key missing")
+			}
+			if err := wireguard.ClientPeer(datapath.WireGuardDevice, c.Endpoint, c.GatewayPublicKey, c.WireGuardPort); err != nil {
+				return err
+			}
+		}
+		if err := b.wireguardRoutes(c.PodIP, c.Endpoint, c.Endpoint.IsValid()); err != nil {
+			return err
+		}
+		if !c.Endpoint.IsValid() {
+			if err := wireguard.ClearPeers(datapath.WireGuardDevice); err != nil {
+				return err
+			}
+		}
 	}
 	rs := exclusionRules(c)
 	if len(rs) >= 999 {
@@ -422,6 +456,17 @@ func (b *Backend) RemoveClient(ctx context.Context, c datapath.ClientConfig) err
 	// Removal is an explicit opt-out: only now restore the main route lookup.
 	for _, r := range rs {
 		if err := b.h.RuleDel(&r); err != nil {
+			return err
+		}
+	}
+	if c.Encryption == "wireguard" {
+		if err := b.removeWireGuardRoutes(); err != nil {
+			return err
+		}
+		if err := wireguard.Remove(b.h, datapath.WireGuardDevice); err != nil {
+			return err
+		}
+		if err := b.wireguardGuard(false); err != nil {
 			return err
 		}
 	}

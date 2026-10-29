@@ -16,7 +16,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"zero id", func(c *ClientConfig) { c.GatewayID = 0 }}, {"large id", func(c *ClientConfig) { c.GatewayID = 1 << 24 }},
 		{"ipv6", func(c *ClientConfig) { c.PodIP = netip.MustParseAddr("2001:db8::1") }}, {"small mtu", func(c *ClientConfig) { c.MTU = 575 }},
-		{"encrypted", func(c *ClientConfig) { c.Encryption = "wireguard" }}, {"loop", func(c *ClientConfig) { c.Endpoint = c.PodIP }},
+		{"encrypted", func(c *ClientConfig) { c.Encryption = "ipsec" }}, {"loop", func(c *ClientConfig) { c.Endpoint = c.PodIP }},
 		{"bad exclusion", func(c *ClientConfig) { c.Exclusions = []netip.Prefix{{}} }}, {"invalid mode", func(c *ClientConfig) { c.Policy.Mode = "unknown" }},
 	}
 	for _, tc := range cases {

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/wireguard"
 )
 
 // ApplyGateway keeps the pod's main routing table untouched. Forwarded packets
@@ -27,6 +28,17 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if c.Encryption == "wireguard" {
+		if err := b.wireguardGuard(true); err != nil {
+			return err
+		}
+		if _, err := wireguard.Ensure(b.h, datapath.WireGuardDevice, c.WireGuardPort, datapath.WireGuardMark); err != nil {
+			return err
+		}
+		if err := b.wireguardGatewayBase(); err != nil {
+			return err
+		}
 	}
 	// Default-drop must exist before we enable forwarding or change routes.
 	if err := b.gatewayFirewall(false, c.MTU-40); err != nil {

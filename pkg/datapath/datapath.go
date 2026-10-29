@@ -10,18 +10,22 @@ import (
 )
 
 const (
-	GenevePort            = 6081
-	ClientDevice          = "rtk0"
-	GatewayDevice         = "gnv0"
-	UpstreamDevice        = "upstream0"
-	ClientMAC             = "02:52:54:4b:00:01"
-	GatewayMAC            = "02:52:54:4b:00:02"
-	GatewayTable          = 100
-	ReturnTable           = 101
-	ProbeMark      uint32 = 0x00100000
-	MarkMask       uint32 = 0x00f00000
-	RulePriority          = 10000
-	RouteProtocol         = 186
+	GenevePort                  = 6081
+	ClientDevice                = "rtk0"
+	GatewayDevice               = "gnv0"
+	WireGuardDevice             = "rtkwg0"
+	WireGuardTable              = 102
+	WireGuardMark        uint32 = 0x00400000
+	WireGuardPortDefault uint16 = 51820
+	UpstreamDevice              = "upstream0"
+	ClientMAC                   = "02:52:54:4b:00:01"
+	GatewayMAC                  = "02:52:54:4b:00:02"
+	GatewayTable                = 100
+	ReturnTable                 = 101
+	ProbeMark            uint32 = 0x00100000
+	MarkMask             uint32 = 0x00f00000
+	RulePriority                = 10000
+	RouteProtocol               = 186
 )
 
 // Backend is implemented by iproute and (in M6) ebpf. Neither CRDs nor the
@@ -31,6 +35,16 @@ type Backend interface {
 	RemoveClient(context.Context, ClientConfig) error
 	ApplyGateway(context.Context, GatewayConfig) error
 	Close()
+}
+
+// WireGuardManager is an optional backend capability. Gateway peer registration
+// is explicit and must follow caller-side Pod-bound TokenReview authorization;
+// ApplyGateway intentionally never infers peers from its Clients list.
+type WireGuardManager interface {
+	PrepareClientWireGuard(context.Context, ClientConfig) (publicKey string, err error)
+	WireGuardPublicKey() (string, error)
+	RegisterPeer(context.Context, netip.Addr, netip.Addr, string) error
+	UnregisterPeer(context.Context, netip.Addr) error
 }
 
 type Port struct {
@@ -62,6 +76,9 @@ type ClientConfig struct {
 	Exclusions         []netip.Prefix `json:"exclusions"`
 	MTU                int            `json:"mtu"`
 	Encryption         string         `json:"encryption,omitempty"`
+	GatewayPublicKey   string         `json:"gatewayPublicKey,omitempty"`
+	RegistrationCACert string         `json:"registrationCACert,omitempty"`
+	WireGuardPort      uint16         `json:"wireGuardPort,omitempty"`
 	Identity           Identity       `json:"identity"`
 	Policy             Policy         `json:"policy"`
 }
@@ -71,6 +88,7 @@ type GatewayConfig struct {
 	Clients         []netip.Addr `json:"clients"`
 	MTU             int          `json:"mtu"`
 	Encryption      string       `json:"encryption,omitempty"`
+	WireGuardPort   uint16       `json:"wireGuardPort,omitempty"`
 	UpstreamHealthy bool         `json:"upstreamHealthy"`
 }
 
@@ -85,14 +103,23 @@ func validateBase(ip netip.Addr, id uint32, mtu int, encryption string) error {
 	if mtu < 576 || mtu > 65535 {
 		return fmt.Errorf("MTU must be in 576..65535")
 	}
-	if encryption != "" && encryption != "none" {
-		return fmt.Errorf("M1 supports encryption none only")
+	if encryption != "" && encryption != "none" && encryption != "wireguard" {
+		return fmt.Errorf("unsupported encryption %q", encryption)
 	}
 	return nil
 }
 func (c ClientConfig) Validate() error {
 	if err := validateBase(c.PodIP, c.GatewayID, c.MTU, c.Encryption); err != nil {
 		return err
+	}
+	if c.Encryption != "wireguard" && (c.GatewayPublicKey != "" || c.RegistrationCACert != "" || c.WireGuardPort != 0) {
+		return fmt.Errorf("WireGuard fields require wireguard encryption")
+	}
+	if len(c.RegistrationCACert) >= 4096 {
+		return fmt.Errorf("registration CA certificate exceeds 4095 bytes")
+	}
+	if c.Encryption == "wireguard" && c.Endpoint.IsValid() && (c.GatewayPublicKey == "" || c.RegistrationCACert == "") {
+		return fmt.Errorf("healthy WireGuard endpoint requires gateway public key and registration CA certificate")
 	}
 	if c.Endpoint.IsValid() && (!c.Endpoint.Is4() || c.Endpoint.IsUnspecified() || c.Endpoint.IsMulticast() || c.Endpoint == c.PodIP) {
 		return fmt.Errorf("endpoint must be a distinct unicast IPv4 address")
@@ -143,6 +170,9 @@ func (c ClientConfig) Validate() error {
 func (c GatewayConfig) Validate() error {
 	if err := validateBase(c.PodIP, c.GatewayID, c.MTU, c.Encryption); err != nil {
 		return err
+	}
+	if c.Encryption != "wireguard" && c.WireGuardPort != 0 {
+		return fmt.Errorf("WireGuard port requires wireguard encryption")
 	}
 	seen := make(map[netip.Addr]bool)
 	for _, ip := range c.Clients {

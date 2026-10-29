@@ -16,6 +16,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
@@ -291,7 +293,7 @@ func TestPrivilegedSelectiveRulesAndMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(nr) != 1+map[string]int{"include": 0, "exclude": 1}[mode] {
+			if len(nr) != 2+map[string]int{"include": 0, "exclude": 1}[mode] {
 				t.Fatalf("%s: wrong nft rule count: %d", mode, len(nr))
 			}
 			for _, ip := range []string{"203.0.113.12", "198.18.0.12"} {
@@ -324,9 +326,9 @@ func TestPrivilegedSelectiveRulesAndMetadata(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := 0
+				want := 1 // WG/registration bypass rule always precedes selectors.
 				if mode == "exclude" {
-					want = 1
+					want = 2
 				}
 				if len(rules) != want {
 					t.Fatalf("empty %s should have %d steering rules, got %d", mode, want, len(rules))
@@ -394,6 +396,160 @@ func TestPrivilegedRejectDualStackClient(t *testing.T) {
 		}
 		if len(rules) != 0 {
 			t.Fatal("dual-stack rejection must precede routing changes")
+		}
+	})
+}
+
+func TestPrivilegedWireGuardClient(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.1.8/24")
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Gw: net.ParseIP("10.42.1.1")}); err != nil {
+			t.Fatal(err)
+		}
+		gatewayPrivate, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), Endpoint: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320, Encryption: "wireguard", GatewayPublicKey: gatewayPrivate.PublicKey().String(), RegistrationCACert: "public-test-CA-placeholder"}
+		var firstKey string
+		for i := 0; i < 2; i++ {
+			if err := b.ApplyClient(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			got, err := b.WireGuardPublicKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if firstKey != "" && firstKey != got {
+				t.Fatal("client WG key changed on idempotent apply")
+			}
+			firstKey = got
+		}
+		dev, err := b.h.LinkByName(datapath.WireGuardDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wgRoute, err := netlink.RouteGetWithOptions(net.ParseIP("10.42.2.4"), &netlink.RouteGetOptions{})
+		if err != nil || len(wgRoute) != 1 || wgRoute[0].LinkIndex != dev.Attrs().Index || !wgRoute[0].Src.Equal(net.ParseIP("10.42.1.8")) {
+			t.Fatalf("WG route must source client pod IP: %v %v", wgRoute, err)
+		}
+		bypass, err := netlink.RouteGetWithOptions(net.ParseIP("10.42.2.4"), &netlink.RouteGetOptions{Mark: datapath.WireGuardMark})
+		if err != nil || len(bypass) != 1 || bypass[0].LinkIndex != eth.Attrs().Index {
+			t.Fatalf("WG socket mark did not bypass to main: %v %v", bypass, err)
+		}
+		conn := b.nft()
+		chains, err := conn.ListChains()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var input, output *nftables.Chain
+		for _, ch := range chains {
+			if ch.Table.Name == "ratatoskr_wg" {
+				if ch.Name == "input" {
+					input = ch
+				}
+				if ch.Name == "output" {
+					output = ch
+				}
+			}
+		}
+		if input == nil || output == nil {
+			t.Fatal("missing plaintext GENEVE guards")
+		}
+		for _, chain := range []*nftables.Chain{input, output} {
+			rules, err := conn.GetRules(chain.Table, chain)
+			if err != nil || len(rules) != 1 {
+				t.Fatalf("invalid plaintext GENEVE guard: %v %v", rules, err)
+			}
+		}
+		c.Endpoint = netip.Addr{}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		_, err = netlink.RouteGetWithOptions(net.ParseIP("203.0.113.7"), &netlink.RouteGetOptions{})
+		if err == nil {
+			t.Fatal("unhealthy gateway must not fall through")
+		}
+		if err := b.RemoveClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestPrivilegedWireGuardGatewayPeers(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.2.4/24")
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Gw: net.ParseIP("10.42.2.1")}); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320, Encryption: "wireguard", Clients: []netip.Addr{netip.MustParseAddr("10.42.1.8")}}
+		if err := b.ApplyGateway(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		wg, err := wgctrl.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer wg.Close()
+		d, err := wg.Device(datapath.WireGuardDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Peers) != 0 {
+			t.Fatal("gateway peer created before authenticated registration")
+		}
+		key1, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		key2, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		gw := netip.MustParseAddr("10.42.2.4")
+		client1 := netip.MustParseAddr("10.42.1.8")
+		client2 := netip.MustParseAddr("10.42.1.9")
+		for _, peer := range []struct {
+			ip  netip.Addr
+			key string
+		}{{client1, key1.PublicKey().String()}, {client2, key2.PublicKey().String()}, {client1, key1.PublicKey().String()}} {
+			if err := b.RegisterPeer(context.Background(), gw, peer.ip, peer.key); err != nil {
+				t.Fatal(err)
+			}
+		}
+		d, err = wg.Device(datapath.WireGuardDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Peers) != 2 {
+			t.Fatalf("authenticated gateway peers duplicated or lost: %d", len(d.Peers))
+		}
+		link, err := b.h.LinkByName(datapath.WireGuardDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, target := range []string{"10.42.1.8", "10.42.1.9"} {
+			r, err := netlink.RouteGetWithOptions(net.ParseIP(target), &netlink.RouteGetOptions{})
+			if err != nil || len(r) != 1 || r[0].LinkIndex != link.Attrs().Index || !r[0].Src.Equal(net.ParseIP("10.42.2.4")) {
+				t.Fatalf("gateway authenticated peer route/source invalid %s: %v %v", target, r, err)
+			}
+		}
+		if err := b.UnregisterPeer(context.Background(), client1); err != nil {
+			t.Fatal(err)
+		}
+		d, err = wg.Device(datapath.WireGuardDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Peers) != 1 {
+			t.Fatal("unregistered peer remained in kernel")
+		}
+		r, err := netlink.RouteGetWithOptions(net.ParseIP("10.42.1.8"), &netlink.RouteGetOptions{})
+		if err != nil && len(r) != 0 {
+			t.Fatal(err)
+		}
+		if err == nil && len(r) == 1 && r[0].LinkIndex == link.Attrs().Index {
+			t.Fatal("removed peer still routed through WG")
 		}
 	})
 }
