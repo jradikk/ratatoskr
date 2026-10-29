@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +20,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			AllowedNamespaces: AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"egress": "allowed"}}},
 			Exclusions:        ExclusionsSpec{ExtraCIDRs: []string{"10.0.0.0/8"}},
 		},
-		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamExitIP: "203.0.113.4", UpstreamHealthy: true, WireguardPublicKey: "public-key"}}},
+		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamExitIP: "203.0.113.4", UpstreamHealthy: true, WireguardPublicKey: "public-key", RegistrationCACert: "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"}}},
 	}
 	policy := &EgressPolicy{
 		TypeMeta:   metav1.TypeMeta{APIVersion: SchemeGroupVersion.String(), Kind: "EgressPolicy"},
@@ -30,6 +31,9 @@ func TestJSONRoundTrip(t *testing.T) {
 		encoded, err := json.Marshal(obj)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if obj == original && !strings.Contains(string(encoded), `"registrationCACert":"-----BEGIN CERTIFICATE-----`) {
+			t.Fatalf("gateway JSON omitted the registration CA certificate: %s", encoded)
 		}
 		decoded := reflect.New(reflect.TypeOf(obj).Elem()).Interface()
 		if err := json.Unmarshal(encoded, decoded); err != nil {
@@ -43,13 +47,14 @@ func TestJSONRoundTrip(t *testing.T) {
 
 func TestRuntimeDeepCopy(t *testing.T) {
 	autoDetect := true
-	gateway := &EgressGateway{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"team": "a"}}, Spec: EgressGatewaySpec{AllowedNamespaces: AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"team": "a"}}}, Exclusions: ExclusionsSpec{AutoDetect: &autoDetect, ExtraCIDRs: []string{"10.0.0.0/8"}}}}
+	gateway := &EgressGateway{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"team": "a"}}, Spec: EgressGatewaySpec{AllowedNamespaces: AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"team": "a"}}}, Exclusions: ExclusionsSpec{AutoDetect: &autoDetect, ExtraCIDRs: []string{"10.0.0.0/8"}}}, Status: EgressGatewayStatus{Endpoints: []GatewayEndpoint{{PodIP: "10.0.0.1", RegistrationCACert: "public-CA"}}}}
 	copied := gateway.DeepCopyObject().(*EgressGateway)
 	copied.Labels["team"] = "b"
 	copied.Spec.Exclusions.ExtraCIDRs[0] = "192.0.2.0/24"
+	copied.Status.Endpoints[0].RegistrationCACert = "different-CA"
 	copied.Spec.AllowedNamespaces.NamespaceSelector.MatchLabels["team"] = "b"
 	*copied.Spec.Exclusions.AutoDetect = false
-	if gateway.Labels["team"] != "a" || gateway.Spec.Exclusions.ExtraCIDRs[0] != "10.0.0.0/8" || gateway.Spec.AllowedNamespaces.NamespaceSelector.MatchLabels["team"] != "a" || !*gateway.Spec.Exclusions.AutoDetect {
+	if gateway.Labels["team"] != "a" || gateway.Spec.Exclusions.ExtraCIDRs[0] != "10.0.0.0/8" || gateway.Spec.AllowedNamespaces.NamespaceSelector.MatchLabels["team"] != "a" || !*gateway.Spec.Exclusions.AutoDetect || gateway.Status.Endpoints[0].RegistrationCACert != "public-CA" {
 		t.Fatal("gateway copy aliases original")
 	}
 	policy := &EgressPolicy{Spec: EgressPolicySpec{Rules: []EgressRule{{Ports: []EgressPort{{Protocol: "TCP", Port: 80}}}}, WorkloadSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}}}

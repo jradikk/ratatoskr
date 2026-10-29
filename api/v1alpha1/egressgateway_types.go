@@ -139,6 +139,12 @@ type GatewayEndpoint struct {
 	UpstreamExitIP     string `json:"upstreamExitIP,omitempty"`
 	UpstreamHealthy    bool   `json:"upstreamHealthy"`
 	WireguardPublicKey string `json:"wireguardPublicKey,omitempty"`
+	// RegistrationCACert is the PEM-encoded public, ephemeral CA certificate for
+	// authenticated peer registration on this endpoint. Never publish a private key.
+	// PEM is ASCII, so MaxLength also bounds the encoded value to 4096 bytes.
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=^-----BEGIN CERTIFICATE-----[[:space:]]+[A-Za-z0-9+/=[:space:]]+-----END CERTIFICATE-----[[:space:]]*$
+	RegistrationCACert string `json:"registrationCACert,omitempty"`
 }
 
 type EffectiveExclusion struct {

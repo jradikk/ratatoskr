@@ -337,6 +337,15 @@ spec:
                       type: string
                     podName:
                       type: string
+                    registrationCACert:
+                      description: |-
+                        RegistrationCACert is the PEM-encoded public, ephemeral CA certificate for
+                        authenticated peer registration on this endpoint. Never publish a private key.
+                        PEM is ASCII, so MaxLength also bounds the encoded value to 4096 bytes.
+                      maxLength: 4096
+                      pattern: ^-----BEGIN CERTIFICATE-----[[:space:]]+[A-Za-z0-9+/=[:space:]]+-----END
+                        CERTIFICATE-----[[:space:]]*$
+                      type: string
                     upstreamExitIP:
                       type: string
                     upstreamHealthy:
