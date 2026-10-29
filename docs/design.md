@@ -183,6 +183,13 @@ therefore breaks established connections — documented, not hidden. The selecti
 function lives in `pkg/datapath/affinity` and is used identically by both
 datapaths. `affinity: per-pod` is the only v1 value.
 
+**M2 init-only exception (ADR-0012):** until the node agent exists, selected
+pods keep one fixed remote gateway PodIP. If that pod is replaced with a new IP,
+steered traffic fails closed and selected client pods require a rollout to pick
+up the replacement endpoint. A Service VIP is not a valid fixed GENEVE remote:
+Linux also matches the received reply's outer source to that configured remote.
+From M5, the agent updates endpoints in place without restarting client pods.
+
 ### 4.5 Coexistence details
 
 - **Istio sidecar**: steering is in routing, so Envoy's upstream sockets (pod IP

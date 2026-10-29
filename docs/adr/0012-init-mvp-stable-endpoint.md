@@ -1,14 +1,14 @@
-# ADR-0012: Stable single-replica endpoint for the M2 init-driver MVP
+# ADR-0012: M2 init-driver restart and fixed GENEVE endpoints
 
-- Status: Rejected; not implemented
+- Status: Accepted; Service-VIP proposal rejected
 - Date: 2026-10-29
 
 ## Context
 
-M2 requires client pods to recover from a gateway pod restart without restarting
-those clients. The M2 `init` driver programs each pod's fixed-remote GENEVE
-device **once**, and no node agent exists until M5. A replacement gateway pod
-can receive a new PodIP. Neither a Kubernetes annotation update nor a controller
+The original M2 criterion required client pods to recover from a gateway pod
+restart without restarting those clients. The M2 `init` driver programs each
+pod's fixed-remote GENEVE device **once**, and no node agent exists until M5.
+A replacement gateway pod can receive a new PodIP. Neither a Kubernetes annotation update nor a controller
 reconcile changes a route/device already installed inside a running pod netns.
 Thus directly using the gateway PodIP in M2 contradicts its restart acceptance.
 
@@ -29,14 +29,18 @@ Service VIP is not a CNI-agnostic pod-network contract. This proposal also
 conflicts with the design invariant that outer GENEVE addresses are pod IPs.
 Do **not** implement this Service-IP exception or claim restart recovery from it.
 
-## Decisions awaiting user clarification
+## Decision (user-selected option 1, October 29, 2026)
 
-1. **Keep milestones in order:** M2 init mode fails closed when a gateway PodIP
-   changes; amend M2's restart acceptance to allow restarting selected client
-   pods. M5 agent mode then satisfies seamless client-pod recovery with in-place
-   endpoint updates. This changes an explicit M2 acceptance criterion.
-2. **Keep the M2 restart criterion:** bring a netns-capable endpoint updater
-   forward into M2 (agent or a NET_ADMIN restartable init sidecar), changing the
-   requested driver milestone split and capability/lifecycle model.
+Keep the milestone order and the M2 `init` driver. Each selected client pod's
+fixed-remote GENEVE device addresses the **gateway PodIP**, not a Service VIP.
+When the gateway PodIP changes, an already-running client has a stale endpoint:
+steered traffic must fail closed, and a rollout/recreation of those client pods
+is required before they can use the replacement endpoint. Record the need for
+rollout in gateway status/Events and the operations runbook; never claim the
+original no-client-restart M2 acceptance as passing.
 
-Neither change is adopted. The implementation must not silently choose either.
+M5 `agent` mode must update the client pod netns endpoint in place and meet
+recovery without restarting client pods. Its failure/connection impact is
+checked at the final e2e gate. This change to M2's original criterion was
+explicitly approved by the user; it does not relax final production fail-close
+or agent-mode recovery requirements.
