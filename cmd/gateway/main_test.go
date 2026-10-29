@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+func TestGatewayInnerMTUUsesObservedPodCarrier(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		config, pod, want int
+		fail              bool
+	}{{"flannel", 1400, 1450, 1400, false}, {"smaller CNI MTU", 1400, 1360, 1310, false}, {"IPv4 small but valid", 1400, 650, 600, false}, {"below IPv4 minimum", 1400, 600, 0, true}, {"invalid configured MTU", 0, 1500, 0, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := gatewayInnerMTU(tc.config, tc.pod)
+			if (err != nil) != tc.fail || (!tc.fail && got != tc.want) {
+				t.Fatalf("gateway MTU=%d error=%v; want=%d fail=%t", got, err, tc.want, tc.fail)
+			}
+		})
+	}
+}
+
 func TestReadGatewayConfigReload(t *testing.T) {
 	t.Setenv("POD_IP", "10.42.2.4")
 	path := filepath.Join(t.TempDir(), "gateway.json")

@@ -26,6 +26,18 @@ rules:
   - apiGroups: [""]
     resources: [services, configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [servicecidrs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
   # Dynamic upstream Secret names cannot be restricted with resourceNames here.
   # The controller uses uncached, direct GET only to check required keys; it
   # never lists/watches Secrets or logs their bytes. Upstream bytes are mounted
@@ -65,6 +77,9 @@ rules:
   - apiGroups: [ratatoskr.skaldhall.io]
     resources: [egressgateways, egresspolicies]
     verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
   # Init and serving processes share this ServiceAccount. Only the two fixed
   # admission configurations may receive CA patches.
   - apiGroups: [admissionregistration.k8s.io]

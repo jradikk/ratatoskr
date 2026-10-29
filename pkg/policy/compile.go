@@ -49,7 +49,7 @@ func Compile(spec v1alpha1.EgressPolicySpec) (datapath.Policy, error) {
 				return p, fmt.Errorf("rule %d: port range exceeds 4096 entries", i)
 			}
 			for n := port.Port; n <= end; n++ {
-				v := datapath.Port{Protocol: port.Protocol, Port: uint16(n)}
+				v := datapath.Port{Protocol: port.Protocol, Port: uint16(n)} // #nosec G115 -- n is validated in [1,65535] before the bounded loop.
 				if !seen[v] {
 					seen[v] = true
 					out.Ports = append(out.Ports, v)

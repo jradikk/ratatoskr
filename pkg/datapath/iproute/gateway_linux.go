@@ -232,16 +232,6 @@ func mssExprs(mss int) []expr.Any {
 	v := binary.BigEndian.AppendUint16(nil, uint16(mss)) // #nosec G115 -- validated IPv4 MTU is 576..65535; MSS is MTU-40.
 	return []expr.Any{&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}}, &expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 13, Len: 1}, &expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 1, Mask: []byte{2}, Xor: []byte{0}}, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{2}}, &expr.Exthdr{DestRegister: 1, Type: 2, Offset: 2, Len: 2, Op: expr.ExthdrOpTcpopt}, &expr.Cmp{Op: expr.CmpOpGt, Register: 1, Data: v}, &expr.Immediate{Register: 1, Data: v}, &expr.Exthdr{SourceRegister: 1, Type: 2, Offset: 2, Len: 2, Op: expr.ExthdrOpTcpopt}}
 }
-func (b *Backend) clientMSS(mss int) error {
-	conn, t, err := b.table("ratatoskr")
-	if err != nil {
-		return err
-	}
-	chain := conn.AddChain(&nftables.Chain{Name: "mss", Table: t, Type: nftables.ChainTypeFilter, Hooknum: nftables.ChainHookOutput, Priority: nftables.ChainPriorityMangle})
-	x := append(matchIface(expr.MetaKeyOIFNAME, datapath.ClientDevice), mssExprs(mss)...)
-	conn.AddRule(&nftables.Rule{Table: t, Chain: chain, Exprs: x})
-	return conn.Flush()
-}
 func (b *Backend) gatewayFirewall(healthy bool, mss int) error {
 	conn, t, err := b.table("ratatoskr_gw")
 	if err != nil {

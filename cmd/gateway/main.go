@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -23,7 +24,11 @@ import (
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
+	gatewaydns "github.com/skaldhall/ratatoskr/pkg/dns"
+	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/version"
+
+	mdns "github.com/miekg/dns"
 )
 
 // A private loopback endpoint in the shared pod network namespace is the only
@@ -33,7 +38,11 @@ type state struct {
 	ready         bool
 	exitIP        string
 	upstreamIndex int
+	podMTU        int
+	geneveMTU     int
 	upstreamMTU   int
+	effectiveMTU  int
+	mss           int
 }
 type upstreamInfo struct {
 	ExitIP string `json:"exitIP"`
@@ -71,14 +80,113 @@ func probe(client *http.Client) (state, error) {
 	if err != nil {
 		return s, err
 	}
-	if link.Attrs().Flags&net.FlagUp == 0 || link.Attrs().MTU < 576 {
-		return s, errors.New("upstream link down")
+	if link.Attrs().Flags&net.FlagUp == 0 || link.Attrs().MTU < mtu.MinInnerMTU {
+		return s, errors.New("upstream link down or MTU too small")
 	}
+	eth, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return s, fmt.Errorf("read gateway eth0: %w", err)
+	}
+	gnv, err := netlink.LinkByName(datapath.GatewayDevice)
+	if err != nil {
+		return s, fmt.Errorf("read gateway GENEVE MTU: %w", err)
+	}
+	s.podMTU = eth.Attrs().MTU
+	s.geneveMTU = gnv.Attrs().MTU
+	s.upstreamMTU = link.Attrs().MTU
+	maxGeneve := s.podMTU - mtu.GeneveOverhead(mtu.IPv4, 0)
+	if s.geneveMTU > maxGeneve {
+		return state{}, errors.New("GENEVE MTU exceeds pod carrier MTU")
+	}
+	s.effectiveMTU = s.geneveMTU
+	if s.upstreamMTU < s.effectiveMTU {
+		s.effectiveMTU = s.upstreamMTU
+	}
+	if s.effectiveMTU < mtu.MinInnerMTU {
+		return state{}, errors.New("gateway inner MTU below IPv4 minimum")
+	}
+	s.mss = s.effectiveMTU - 40
 	s.ready = true
 	s.exitIP = info.ExitIP
 	s.upstreamIndex = link.Attrs().Index
-	s.upstreamMTU = link.Attrs().MTU
 	return s, nil
+}
+
+func gatewayInnerMTU(configMTU, podMTU int) (int, error) {
+	computed, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: mtu.EncryptionNone})
+	if err != nil {
+		return 0, err
+	}
+	if configMTU < mtu.MinInnerMTU {
+		return 0, errors.New("gateway configured MTU below IPv4 minimum")
+	}
+	if configMTU < computed.GeneveMTU {
+		return configMTU, nil
+	}
+	return computed.GeneveMTU, nil
+}
+func clampGatewayMTU(cfg *datapath.GatewayConfig) error {
+	eth, err := netlink.LinkByName("eth0")
+	if err != nil {
+		return fmt.Errorf("look up gateway eth0: %w", err)
+	}
+	cfg.MTU, err = gatewayInnerMTU(cfg.MTU, eth.Attrs().MTU)
+	return err
+}
+
+func startGatewayDNS(listen string, ready func() bool, errorsCh chan<- error) (func(), error) {
+	cluster, err := netip.ParseAddr(os.Getenv("CLUSTER_DNS_IP"))
+	if err != nil {
+		return nil, errors.New("CLUSTER_DNS_IP is required for gateway DNS")
+	}
+	upstream := netip.Addr{}
+	if raw := os.Getenv("UPSTREAM_DNS_IP"); raw != "" {
+		upstream, err = netip.ParseAddr(raw)
+		if err != nil {
+			return nil, errors.New("invalid UPSTREAM_DNS_IP")
+		}
+	}
+	var cidrs []netip.Prefix
+	for _, s := range strings.Split(os.Getenv("CLUSTER_CIDRS"), ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		p, e := netip.ParsePrefix(s)
+		if e != nil || !p.Addr().Is4() {
+			return nil, errors.New("invalid CLUSTER_CIDRS for gateway DNS")
+		}
+		cidrs = append(cidrs, p.Masked())
+	}
+	f, err := gatewaydns.New(gatewaydns.Options{ClusterDNS: cluster, UpstreamDNS: upstream, ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ClusterCIDRs: cidrs, ExternalReady: ready})
+	if err != nil {
+		return nil, err
+	}
+	udp, err := net.ListenPacket("udp4", listen)
+	if err != nil {
+		return nil, fmt.Errorf("listen gateway DNS/UDP: %w", err)
+	}
+	tcp, err := net.Listen("tcp4", listen)
+	if err != nil {
+		_ = udp.Close()
+		return nil, fmt.Errorf("listen gateway DNS/TCP: %w", err)
+	}
+	servers := []*mdns.Server{{PacketConn: udp, Net: "udp", Handler: f}, {Listener: tcp, Net: "tcp", Handler: f}}
+	for _, srv := range servers {
+		go func() {
+			if e := srv.ActivateAndServe(); e != nil {
+				select {
+				case errorsCh <- fmt.Errorf("gateway DNS listener: %w", e):
+				default:
+				}
+			}
+		}()
+	}
+	return func() {
+		for _, srv := range servers {
+			_ = srv.Shutdown()
+		}
+	}, nil
 }
 
 // readGatewayConfig loads non-secret ConfigMap data afresh so selected pod
@@ -127,6 +235,9 @@ func run(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := clampGatewayMTU(&cfg); err != nil {
+		return err
+	}
 	backend, err := iproute.New()
 	if err != nil {
 		return err
@@ -152,9 +263,14 @@ func run(ctx context.Context, configPath string) error {
 		s := current.Load().(state)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(struct {
-			ExitIP string `json:"exitIP"`
-			Ready  bool   `json:"ready"`
-		}{s.exitIP, s.ready})
+			ExitIP       string `json:"exitIP"`
+			Ready        bool   `json:"ready"`
+			PodMTU       int    `json:"podMTU"`
+			GeneveMTU    int    `json:"geneveMTU"`
+			UpstreamMTU  int    `json:"upstreamMTU"`
+			EffectiveMTU int    `json:"effectiveMTU"`
+			MSS          int    `json:"mss"`
+		}{s.exitIP, s.ready, s.podMTU, s.geneveMTU, s.upstreamMTU, s.effectiveMTU, s.mss})
 	})
 	server.Handler = mux
 	listener, err := net.Listen("tcp", server.Addr)
@@ -172,6 +288,13 @@ func run(ctx context.Context, configPath string) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
+	if listen := os.Getenv("GATEWAY_DNS_LISTEN_ADDR"); listen != "" {
+		stopDNS, e := startGatewayDNS(listen, func() bool { return current.Load().(state).ready }, serverErrors)
+		if e != nil {
+			return e
+		}
+		defer stopDNS()
+	}
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
@@ -180,6 +303,9 @@ func run(ctx context.Context, configPath string) error {
 	prev := state{}
 	for {
 		next, readErr := readGatewayConfig(configPath)
+		if readErr == nil {
+			readErr = clampGatewayMTU(&next)
+		}
 		if readErr != nil {
 			// A missing/invalid replacement must never keep using stale selected
 			// pod permissions or an old upstream-ready accept rule.
