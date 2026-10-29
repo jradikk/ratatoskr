@@ -1,7 +1,8 @@
 # Spec issues and resolutions
 
-Problems found in the build specification, with the resolution adopted. Each is
-reflected in `design.md` and the ADRs.
+Problems found in the build specification. Resolved issues have a documented
+approach; unresolved acceptance criteria below need explicit agreement before
+later milestones are treated as complete.
 
 | # | Issue | Resolution |
 |---|---|---|
@@ -14,4 +15,11 @@ reflected in `design.md` and the ADRs.
 | S7 | DNS `gateway` mode must rebuild search domains, but the cluster domain is not always `cluster.local`. | Chart value `clusterDomain`. |
 | S8 | Replies to inbound connections from non-excluded sources (e.g. a LoadBalancer with `externalTrafficPolicy: Local` that preserves client IPs) would be steered into the tunnel, breaking ingress to labeled pods. | A connmark on connections entering via `eth0` routes their replies through `main`. |
 | S9 | `allowCloudMetadata` is listed under "exclusions (never steered)", which makes `false` vs `true` ambiguous. | `false` (default): `169.254.169.254` is **blocked** in labeled pods (`prohibit` route). `true`: it is reachable via the normal node path. It is never steered in either case. |
-| S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) does not fit the dev VM (3.8 GiB RAM, no swap). | M0–M7 run on flannel. Before M8, the VM needs ~8 GiB, or the matrix runs variant by variant with `FORCE=1` and reduced Istio resources. |
+| S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) may not fit the dev VM (3.8 GiB RAM, no swap). | Assess available resources before each variant and stop if insufficient. Do not bypass the VM limits. |
+| S12 | The previous `FORCE=1` option to bypass the k3d memory/CPU preflight conflicted with the instruction to stop on missing VM resources. | Removed the option; resource checks are mandatory before creating a cluster. |
+
+## Unresolved acceptance conflicts
+
+| # | Conflict | Proposed clarification (not yet adopted) |
+|---|---|---|
+| S11 | The working rules require the **full live e2e suite at the end of every milestone**, but M0 contains no datapath and M1's acceptance explicitly requires only hand-run live steps 4–6 and 9. A full suite also requires an OpenVPN config that may not be provided. | Gate each milestone on its stated acceptance tests and on only the live steps it implements; require the full live suite once all steps exist (M5 onward), skipping the credential-dependent tier with a clear message if `RATATOSKR_E2E_OVPN` is unset. Do not count an unimplemented or skipped tier as passing. |
