@@ -133,7 +133,7 @@ func TestPodDenials(t *testing.T) {
 		{"unallocated", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Status.GatewayID = 0 }, "gatewayID"},
 		{"disallowed", func(_ *v1alpha1.EgressGateway, n *corev1.Namespace) { n.Labels["team"] = "other" }, "not allowed"},
 		{"nil selector", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.AllowedNamespaces.NamespaceSelector = nil }, "denies all"},
-		{"encryption", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.Encryption = "wireguard" }, "not implemented"},
+		{"encryption", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.Encryption = "invalid" }, "unsupported"},
 		{"dns", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.DNS.Mode = "unknown" }, "unsupported"},
 		{"upstream", func(g *v1alpha1.EgressGateway, _ *corev1.Namespace) { g.Spec.Upstream.Type = "custom" }, "not implemented"},
 	}

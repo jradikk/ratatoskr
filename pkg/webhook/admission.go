@@ -29,6 +29,9 @@ const (
 	ReadyAnnotation  = prefix + "datapath-ready"
 	initName         = "ratatoskr-init"
 	configVolume     = "ratatoskr-client-config"
+	wgTokenVolume    = "ratatoskr-wg-token"             // #nosec G101 -- volume name, not a token value.
+	wgTokenAudience  = "ratatoskr.skaldhall.io/gateway" // #nosec G101 -- projected token audience, not a credential.
+	wgTokenMount     = "/var/run/ratatoskr/wg-token"    // #nosec G101 -- fixed mount path, not token bytes.
 )
 
 type Handler struct {
@@ -63,8 +66,22 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 		}
 	}
 	for _, v := range pod.Spec.Volumes {
-		if v.Name == configVolume {
-			return denied(fmt.Errorf("reserved volume %s already exists", configVolume))
+		if v.Name == configVolume || v.Name == wgTokenVolume {
+			return denied(fmt.Errorf("reserved volume %s already exists", v.Name))
+		}
+	}
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.Containers...), pod.Spec.InitContainers...) {
+		for _, mount := range c.VolumeMounts {
+			if mount.Name == wgTokenVolume || mount.MountPath == wgTokenMount {
+				return denied(fmt.Errorf("reserved WireGuard token mount already exists"))
+			}
+		}
+	}
+	for _, c := range pod.Spec.EphemeralContainers {
+		for _, mount := range c.VolumeMounts {
+			if mount.Name == wgTokenVolume || mount.MountPath == wgTokenMount {
+				return denied(fmt.Errorf("reserved WireGuard token mount already exists"))
+			}
 		}
 	}
 	cfg, err := h.clientConfig(ctx, req.Namespace, &pod)
@@ -90,6 +107,9 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 		{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 	}, VolumeMounts: []corev1.VolumeMount{{Name: configVolume, MountPath: "/var/run/ratatoskr", ReadOnly: true}}}}, pod.Spec.InitContainers...)
+	if cfg.Encryption == "wireguard" {
+		injectWireGuardToken(&pod)
+	}
 	mutated, err := json.Marshal(&pod)
 	if err != nil {
 		return denied(err)
@@ -153,7 +173,11 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 	if len(matches) > 1 {
 		return cfg, fmt.Errorf("multiple EgressPolicies match pod: %s and %s", matches[0].Name, matches[1].Name)
 	}
-	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, AllowCloudMetadata: gateway.Spec.Exclusions.AllowCloudMetadata, MTU: 0, Encryption: "none", Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
+	encryption := gateway.Spec.Encryption
+	if encryption == "" {
+		encryption = "none"
+	}
+	cfg = datapath.ClientConfig{GatewayID: gateway.Status.GatewayID, AllowCloudMetadata: gateway.Spec.Exclusions.AllowCloudMetadata, MTU: 0, Encryption: encryption, Identity: datapath.Identity{Namespace: ns, Pod: pod.Name}, Exclusions: []netip.Prefix{}}
 	if len(matches) == 1 {
 		policy := matches[0]
 		policyNS := policy.Spec.GatewayRef.Namespace
@@ -180,6 +204,14 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 	for _, endpoint := range gateway.Status.Endpoints {
 		ip, err := netip.ParseAddr(endpoint.PodIP)
 		if endpoint.UpstreamHealthy && err == nil && ip.Is4() && !ip.IsUnspecified() && !ip.IsMulticast() {
+			if encryption == "wireguard" {
+				if err := validateWireGuardEndpoint(&endpoint); err != nil {
+					return cfg, err
+				}
+				// Populate the selected endpoint's public key and registration CA
+				// once the committed datapath ClientConfig fields are available.
+				return cfg, fmt.Errorf("WireGuard client public-key, port and CA-pin datapath fields are not available yet")
+			}
 			cfg.Endpoint = ip
 			break
 		}
@@ -189,8 +221,8 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 }
 
 func supportedGateway(g *v1alpha1.EgressGateway) error {
-	if g.Spec.Encryption != "" && g.Spec.Encryption != "none" {
-		return fmt.Errorf("gateway encryption %q is not implemented in M2", g.Spec.Encryption)
+	if g.Spec.Encryption != "" && g.Spec.Encryption != "none" && g.Spec.Encryption != "wireguard" {
+		return fmt.Errorf("gateway encryption %q is unsupported", g.Spec.Encryption)
 	}
 	if g.Spec.DNS.Mode != "" && g.Spec.DNS.Mode != "cluster" && g.Spec.DNS.Mode != "gateway" {
 		return fmt.Errorf("gateway DNS mode %q is unsupported", g.Spec.DNS.Mode)
@@ -345,7 +377,7 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 		init.SecurityContext.Capabilities.Add[0] != "NET_ADMIN" || len(init.SecurityContext.Capabilities.Drop) != 0 {
 		return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
 	}
-	if len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != configVolume ||
+	if len(init.VolumeMounts) < 1 || len(init.VolumeMounts) > 2 || init.VolumeMounts[0].Name != configVolume ||
 		init.VolumeMounts[0].MountPath != "/var/run/ratatoskr" || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" {
 		return fmt.Errorf("expected read-only Ratatoskr config volume mount")
 	}
@@ -412,6 +444,20 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	}
 	if !bytes.Equal(actualJSON, expectedJSON) {
 		return fmt.Errorf("client config differs from authorized gateway status")
+	}
+	if expected.Encryption == "wireguard" {
+		if err := validateWireGuardToken(pod); err != nil {
+			return err
+		}
+	} else {
+		if len(init.VolumeMounts) != 1 {
+			return fmt.Errorf("unencrypted init must not mount WireGuard token")
+		}
+		for _, volume := range pod.Spec.Volumes {
+			if volume.Name == wgTokenVolume {
+				return fmt.Errorf("unencrypted pod must not project WireGuard token")
+			}
+		}
 	}
 	return h.validateGatewayDNS(ctx, admissionNamespace, pod)
 }
