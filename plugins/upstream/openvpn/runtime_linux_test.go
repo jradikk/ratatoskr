@@ -189,6 +189,11 @@ func TestCommandStarterRejectsAndCleansRuntimeCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(secret, "client.ovpn"), []byte("client\nremote vpn.example.invalid\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, binary := range []string{"", "openvpn", "/usr/sbin/../sbin/openvpn"} {
+		if _, err := CommandStarter(binary, secret, runtime)(context.Background()); err == nil {
+			t.Fatal("noncanonical executable accepted")
+		}
+	}
 	start := CommandStarter("/nonexistent-synthetic-openvpn", secret, runtime)
 	if _, err := start(context.Background()); err == nil {
 		t.Fatal("missing process executable accepted")

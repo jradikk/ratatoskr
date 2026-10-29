@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -68,7 +69,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if serveErr != nil && serveErr != http.ErrServerClosed {
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
 	}
 	return nil

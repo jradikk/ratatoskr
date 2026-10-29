@@ -36,7 +36,7 @@ func EnsureTUN() error {
 	const path = "/dev/net/tun"
 	st, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if err = os.MkdirAll("/dev/net", 0755); err != nil {
+		if err = os.MkdirAll("/dev/net", 0750); err != nil {
 			return errors.New("cannot create TUN directory")
 		}
 		if err = syscall.Mknod(path, syscall.S_IFCHR|0600, int(10<<8|200)); err != nil && !errors.Is(err, syscall.EEXIST) {
@@ -91,10 +91,15 @@ func (p *commandProcess) Stop(ctx context.Context) error {
 // CommandStarter loads only the specified mounted configuration, never logs it,
 // and writes the sanitized copy to a private temporary runtime file, not the
 // repository. Its directory must be backed by ephemeral storage in production.
+// The executable is selected by trusted code, not a config option: production
+// always passes /usr/sbin/openvpn. Test callers can inject a canonical absolute path.
 func CommandStarter(binary, secretDir, runtimeDir string) Starter {
 	return func(ctx context.Context) (Process, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if !filepath.IsAbs(binary) || filepath.Clean(binary) != binary {
+			return nil, errors.New("OpenVPN executable must be a canonical absolute path")
 		}
 		if !filepath.IsAbs(secretDir) || !filepath.IsAbs(runtimeDir) {
 			return nil, ConfigError()
@@ -103,7 +108,7 @@ func CommandStarter(binary, secretDir, runtimeDir string) Starter {
 		if err := ValidateFiles([]byte("ca client.ovpn\n"), secretDir); err != nil {
 			return nil, ConfigError()
 		}
-		f, err := os.Open(filepath.Join(secretDir, "client.ovpn"))
+		f, err := os.Open(filepath.Join(secretDir, "client.ovpn")) // #nosec G304 -- ValidateFiles above verifies canonical containment and a regular file in the immutable read-only Secret mount.
 		if err != nil {
 			return nil, ConfigError()
 		}
@@ -137,7 +142,13 @@ func CommandStarter(binary, secretDir, runtimeDir string) Starter {
 			cleanup()
 			return nil, errors.New("cannot close runtime config")
 		}
-		cmd := exec.Command(binary, Arguments(tmp.Name())...)
+		// Check the trusted, canonical absolute executable before launch as well.
+		executable, err := os.Stat(binary)
+		if err != nil || !executable.Mode().IsRegular() || executable.Mode().Perm()&0111 == 0 {
+			cleanup()
+			return nil, errors.New("OpenVPN executable unavailable")
+		}
+		cmd := exec.Command(binary, Arguments(tmp.Name())...) // #nosec G204 -- Trusted canonical absolute regular executable (fixed /usr/sbin/openvpn in production), no shell, sanitized config and forced argv; providers cannot choose it.
 		cmd.Dir = secretDir
 		cmd.Stdin = nil
 		cmd.Stdout = io.Discard
@@ -204,7 +215,7 @@ func validProbeHostname(host string) bool {
 			return false
 		}
 		for _, ch := range label {
-			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-') {
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9') && ch != '-' {
 				return false
 			}
 		}

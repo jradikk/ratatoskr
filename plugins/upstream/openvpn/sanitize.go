@@ -117,7 +117,7 @@ func Sanitize(r io.Reader, hasAuth bool) ([]byte, error) {
 			if len(args) < 2 || len(args) > 3 || (len(args) == 3 && name != "tls-auth") {
 				return nil, ErrConfig
 			}
-			if args[1] != "[inline]" && !(name == "dh" && args[1] == "none") && !safeRelative(args[1]) {
+			if args[1] != "[inline]" && (name != "dh" || args[1] != "none") && !safeRelative(args[1]) {
 				return nil, ErrConfig
 			}
 			if len(args) == 3 && args[2] != "0" && args[2] != "1" {
