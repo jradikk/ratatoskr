@@ -1,0 +1,19 @@
+# Agent-mode local k3d component validation; full e2e is deferred to final gate.
+image:
+  registry: ghcr.io/skaldhall
+  tag: dev
+  pullPolicy: Never
+driver: agent
+datapath: iproute
+agent:
+  criSocket: /run/k3s/containerd/containerd.sock
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+exclusions:
+  serviceCIDRs:
+    - 10.43.0.0/16
+  podCIDRs:
+    - 10.42.0.0/16
+  extraCIDRs: []

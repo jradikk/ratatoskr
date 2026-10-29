@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wait-agent-smoke
+  namespace: ratatoskr-m5-check
+  labels:
+    ratatoskr.skaldhall.io/gateway: berlin
+spec:
+  # Preserve the ordinary workload ServiceAccount behavior; only wait-init
+  # shadows the default token path without receiving API credentials.
+  automountServiceAccountToken: true
+  restartPolicy: Never
+  containers:
+    - name: workload
+      image: ratatoskr-tools:m1-local
+      imagePullPolicy: Never
+      command:
+        - /bin/sleep
+        - "120"
+      securityContext:
+        runAsUser: 65532
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

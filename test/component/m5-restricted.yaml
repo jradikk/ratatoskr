@@ -1,0 +1,34 @@
+# M5 component-only restricted PSA smoke. No VPN Secret, tunnel traffic, or
+# external network request is created. The missing upstream stays fail-closed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ratatoskr-m5-check
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    ratatoskr.skaldhall.io/allow-berlin: "true"
+---
+apiVersion: ratatoskr.skaldhall.io/v1alpha1
+kind: EgressGateway
+metadata:
+  name: berlin
+  namespace: ratatoskr-system
+spec:
+  replicas: 1
+  encryption: none
+  affinity: per-pod
+  upstream:
+    type: openvpn
+    secretRef:
+      name: missing-m5-test-upstream
+  dns:
+    mode: cluster
+  failMode: closed
+  allowedNamespaces:
+    namespaceSelector:
+      matchLabels:
+        ratatoskr.skaldhall.io/allow-berlin: "true"
+  exclusions:
+    autoDetect: true
+    allowCloudMetadata: false

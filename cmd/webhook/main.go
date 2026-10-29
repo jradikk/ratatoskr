@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	server "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -44,7 +45,7 @@ func run(ctx context.Context, bootstrap bool, dir string) error {
 	if err = v1alpha1.AddToScheme(scheme); err != nil {
 		return err
 	}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", WebhookServer: server.NewServer(server.Options{Port: 9443, CertDir: dir, CertName: "tls.crt", KeyName: "tls.key"})})
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", WebhookServer: server.NewServer(server.Options{Port: 9443, CertDir: dir, CertName: "tls.crt", KeyName: "tls.key"}), Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Namespace{}, &corev1.Service{}, &corev1.Pod{}}}}})
 	if err != nil {
 		return fmt.Errorf("configure webhook manager: %w", err)
 	}

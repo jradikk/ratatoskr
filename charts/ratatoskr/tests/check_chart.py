@@ -227,6 +227,7 @@ def check(docs, driver, socket="/run/containerd/containerd.sock"):
     }
     webhook_role = docs["ClusterRole", "ratatoskr-webhook"]
     assert rule(webhook_role, "services")["verbs"] == ["get"]
+    assert rule(webhook_role, "pods")["verbs"] == ["list"]
     for resource, name in (
         ("mutatingwebhookconfigurations", "ratatoskr-pods"),
         ("validatingwebhookconfigurations", "ratatoskr-validation"),
