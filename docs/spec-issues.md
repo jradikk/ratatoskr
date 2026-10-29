@@ -17,3 +17,9 @@ clarifications. Do not treat unimplemented checks or skipped tests as passing.
 | S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) may not fit the dev VM (3.8 GiB RAM, no swap). | Assess available resources before each variant and stop if insufficient. Do not bypass the VM limits. |
 | S12 | The previous `FORCE=1` option to bypass the k3d memory/CPU preflight conflicted with the instruction to stop on missing VM resources. | Removed the option; resource checks are mandatory before creating a cluster. |
 | S11 | The original working rules required a full live e2e suite at every milestone, although early milestones do not implement all test steps. | The user clarified on 2026-10-29 that **e2e testing is required at the end only**. Keep unit, lint, build and targeted component checks green while implementing milestones; perform the final CI and live e2e validation after implementation. If live credentials are unavailable, explicitly report the skipped tier; never count a skip as a pass. |
+
+## Unresolved M2 acceptance conflict
+
+| # | Conflict | Proposed choices (neither adopted) |
+|---|---|---|
+| S13 | M2 demands gateway PodIP change recovery **without restarting client pods**, but its `init` driver configures the pod's fixed-remote GENEVE device once. Repointing to a stable ClusterIP Service cannot work: the Linux GENEVE receive lookup rejects return packets whose actual gateway PodIP source differs from the configured Service VIP (`drivers/net/geneve.c`, `geneve_lookup`, upstream v7.0). | (A) Keep M2 init-only and defer no-client-restart recovery to the M5 agent driver, allowing a client rollout after an M2 gateway replacement; this changes M2 acceptance. (B) Bring a netns-capable endpoint updater (agent or restartable NET_ADMIN init sidecar) forward into M2; this changes the milestone split/capability lifecycle. See rejected ADR-0012. |
