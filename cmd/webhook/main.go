@@ -9,9 +9,6 @@ import (
 	"os"
 
 	"github.com/go-logr/logr"
-	"github.com/skaldhall/ratatoskr/api/v1alpha1"
-	"github.com/skaldhall/ratatoskr/pkg/version"
-	ratatoskr "github.com/skaldhall/ratatoskr/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -19,6 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	server "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/version"
+	ratatoskr "github.com/skaldhall/ratatoskr/pkg/webhook"
 )
 
 func run(ctx context.Context, bootstrap bool, dir string) error {

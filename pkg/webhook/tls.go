@@ -96,7 +96,7 @@ func BootstrapTLS(ctx context.Context, k kubernetes.Interface, namespace, servic
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("prepare TLS directory: %w", err)
 	}
-	if err = os.Chmod(dir, 0700); err != nil {
+	if err = os.Chmod(dir, 0700); err != nil { // #nosec G302 -- private TLS directory must be traversable by its owner only.
 		return fmt.Errorf("secure TLS directory: %w", err)
 	}
 	if err = writePrivate(dir, "tls.crt", cert); err != nil {
@@ -174,7 +174,7 @@ func writePrivate(dir, name string, data []byte) error {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) // #nosec G304 -- dir is the private bootstrapped TLS directory; name is one of three fixed filenames.
 	if err != nil {
 		return fmt.Errorf("write TLS file %s: %w", name, err)
 	}

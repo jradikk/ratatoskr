@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/skaldhall/ratatoskr/api/v1alpha1"
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 const (
