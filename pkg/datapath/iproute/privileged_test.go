@@ -553,3 +553,111 @@ func TestPrivilegedWireGuardGatewayPeers(t *testing.T) {
 		}
 	})
 }
+
+func TestPrivilegedClearGatewayPeersAfterRestart(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.2.4/24")
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Gw: net.ParseIP("10.42.2.1")}); err != nil {
+			t.Fatal(err)
+		}
+		cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320, Encryption: "wireguard", Clients: []netip.Addr{netip.MustParseAddr("10.42.1.8"), netip.MustParseAddr("10.42.1.9")}}
+		if err := b.ApplyGateway(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		publicBefore, err := b.WireGuardPublicKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mainBefore := mainRoutes(t, b)
+		foreignDst := netip.MustParsePrefix("198.51.100.0/24")
+		foreign := netlink.Route{Family: unix.AF_INET, Table: datapath.WireGuardTable, Dst: prefix(foreignDst), LinkIndex: eth.Attrs().Index, Scope: netlink.SCOPE_LINK, Protocol: 99}
+		if err := b.h.RouteAdd(&foreign); err != nil {
+			t.Fatal(err)
+		}
+		foreignRule := netlink.NewRule()
+		foreignRule.Family = unix.AF_INET
+		foreignRule.Priority = wgRoutePriority
+		foreignRule.Protocol = 99
+		foreignRule.Table = 200
+		foreignRule.Dst = prefix(foreignDst)
+		if err := b.h.RuleAdd(foreignRule); err != nil {
+			t.Fatal(err)
+		}
+		for _, addr := range []string{"10.42.1.8", "10.42.1.9"} {
+			key, err := wgtypes.GeneratePrivateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.RegisterPeer(context.Background(), cfg.PodIP, netip.MustParseAddr(addr), key.PublicKey().String()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wg, err := wgctrl.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer wg.Close()
+		device, err := wg.Device(datapath.WireGuardDevice)
+		if err != nil || len(device.Peers) != 2 {
+			t.Fatalf("expected two previously authenticated peers: %v %v", device, err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := b.ClearGatewayPeers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			device, err = wg.Device(datapath.WireGuardDevice)
+			if err != nil || len(device.Peers) != 0 {
+				t.Fatalf("peer survived gateway restart reset %d: %v %v", i, device, err)
+			}
+			if got, err := b.WireGuardPublicKey(); err != nil || got != publicBefore {
+				t.Fatalf("kernel gateway identity changed on reset: %v", err)
+			}
+		}
+		routes, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: datapath.WireGuardTable}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundForeign, foundFallback := false, false
+		for _, route := range routes {
+			if route.Dst != nil && route.Dst.String() == foreignDst.String() && int(route.Protocol) == 99 {
+				foundForeign = true
+			}
+			if route.Type == unix.RTN_UNREACHABLE && int(route.Protocol) == datapath.RouteProtocol {
+				foundFallback = true
+			}
+			for _, addr := range []string{"10.42.1.8/32", "10.42.1.9/32"} {
+				if route.Dst != nil && route.Dst.String() == addr && int(route.Protocol) == datapath.RouteProtocol {
+					t.Fatalf("stale registered client route: %s", route.Dst)
+				}
+			}
+		}
+		if !foundForeign || !foundFallback {
+			t.Fatal("reset removed foreign route or unreachable fallback")
+		}
+		rules, err := b.h.RuleList(unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundForeignRule, foundBypass := false, false
+		for _, rule := range rules {
+			if rule.Priority == wgRoutePriority && rule.Protocol == 99 && rule.Table == 200 && rule.Dst != nil && rule.Dst.String() == foreignDst.String() {
+				foundForeignRule = true
+			}
+			if rule.Priority == wgBypassPriority && rule.Protocol == datapath.RouteProtocol && rule.Table == unix.RT_TABLE_MAIN {
+				foundBypass = true
+			}
+			if rule.Priority == wgRoutePriority && rule.Protocol == datapath.RouteProtocol && rule.Table == datapath.WireGuardTable {
+				t.Fatalf("stale peer lookup rule: %s", rule)
+			}
+		}
+		if !foundForeignRule || !foundBypass {
+			t.Fatal("reset removed foreign rule or transport bypass")
+		}
+		if !reflect.DeepEqual(mainBefore, mainRoutes(t, b)) {
+			t.Fatal("reset modified gateway main routes")
+		}
+		if _, err := b.h.LinkByName(datapath.GatewayDevice); err != nil {
+			t.Fatal("reset removed GENEVE link")
+		}
+	})
+}

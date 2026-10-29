@@ -225,6 +225,56 @@ func (b *Backend) UnregisterPeer(ctx context.Context, clientIP netip.Addr) error
 	return ctx.Err()
 }
 
+// ClearGatewayPeers invalidates every peer retained by a prior gateway
+// process in the same pod network namespace. The gateway's private kernel key,
+// transport bypass rule and unreachable fallback remain intact; only freshly
+// authenticated registration may subsequently restore a client route/peer.
+func (b *Backend) ClearGatewayPeers(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	link, err := b.h.LinkByName(datapath.WireGuardDevice)
+	if err != nil && !isMissing(err) {
+		return err
+	}
+	if isMissing(err) {
+		link = nil
+	}
+	// Revoke cryptographic ingress first. If a later netlink deletion fails,
+	// stale routes lead to a device without authorized peers, not to an old key.
+	if err == nil {
+		if link.Type() != "wireguard" {
+			return fmt.Errorf("%s is not a WireGuard link", datapath.WireGuardDevice)
+		}
+		if err := wireguard.ClearPeers(datapath.WireGuardDevice); err != nil {
+			return fmt.Errorf("revoke gateway WireGuard peers: %w", err)
+		}
+	}
+	routes, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: datapath.WireGuardTable}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return err
+	}
+	for _, r := range routes {
+		if r.Dst != nil && r.Type == unix.RTN_UNICAST && int(r.Protocol) == datapath.RouteProtocol && link != nil && r.LinkIndex == link.Attrs().Index {
+			if err := b.h.RouteDel(&r); err != nil {
+				return err
+			}
+		}
+	}
+	rules, err := b.h.RuleList(unix.AF_INET)
+	if err != nil {
+		return err
+	}
+	for _, r := range rules {
+		if r.Priority == wgRoutePriority && r.Protocol == datapath.RouteProtocol && r.Table == datapath.WireGuardTable && r.Dst != nil && r.Mark == 0 && r.IifName == "" && r.OifName == "" {
+			if err := b.h.RuleDel(&r); err != nil {
+				return err
+			}
+		}
+	}
+	return ctx.Err()
+}
+
 func (b *Backend) wireguardGatewayBase() error {
 	fr := fallback(datapath.WireGuardTable)
 	if err := b.h.RouteReplace(&fr); err != nil {

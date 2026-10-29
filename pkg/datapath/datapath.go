@@ -45,6 +45,9 @@ type WireGuardManager interface {
 	WireGuardPublicKey() (string, error)
 	RegisterPeer(context.Context, netip.Addr, netip.Addr, string) error
 	UnregisterPeer(context.Context, netip.Addr) error
+	// ClearGatewayPeers revokes kernel peers after a gateway process restart,
+	// before new authenticated registrations can be served.
+	ClearGatewayPeers(context.Context) error
 }
 
 type Port struct {
