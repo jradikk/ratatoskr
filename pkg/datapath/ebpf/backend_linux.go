@@ -94,6 +94,17 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if err != nil {
 		return fmt.Errorf("client eth0: %w", err)
 	}
+	// Refuse any earlier clsact egress action (including terminal pass)
+	// before creating tunnel/maps. Such a filter could bypass our drop.
+	if err := b.checkEgressFilters(eth); err != nil {
+		return err
+	}
+	// Revoke a previous healthy selector before any route, GENEVE or program
+	// load can fail during an endpoint update. The old tc program continues
+	// to enforce its exclusions and drops all previously steered traffic.
+	if err := b.revokeOldEndpoint(eth); err != nil {
+		return err
+	}
 	addrs, err := b.h.AddrList(eth, unix.AF_INET6)
 	if err != nil {
 		return err
@@ -222,23 +233,30 @@ func (b *Backend) ensureGeneve(mtu int) (netlink.Link, error) {
 	}
 	return link, nil
 }
+func (b *Backend) checkEgressFilters(eth netlink.Link) error {
+	filters, err := b.h.FilterList(eth, netlink.HANDLE_MIN_EGRESS)
+	if err != nil {
+		return err
+	}
+	for _, f := range filters {
+		if f.Attrs().Priority > filterPriority {
+			continue
+		}
+		bf, ok := f.(*netlink.BpfFilter)
+		if f.Attrs().Priority != filterPriority || !ok || f.Attrs().Handle != filterHandle || bf.Name != "ratatoskr_ebpf" || !bf.DirectAction || f.Attrs().Protocol != unix.ETH_P_ALL {
+			return fmt.Errorf("tc egress filter at priority %d could bypass Ratatoskr selector", f.Attrs().Priority)
+		}
+	}
+	return nil
+}
 func (b *Backend) attach(eth netlink.Link, objects *clientObjects) error {
 	q := &netlink.Clsact{QdiscAttrs: netlink.QdiscAttrs{LinkIndex: eth.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}}
 	if err := b.h.QdiscAdd(q); err != nil && !errors.Is(err, unix.EEXIST) {
 		return err
 	}
-	old, err := b.h.FilterList(eth, netlink.HANDLE_MIN_EGRESS)
-	if err != nil {
+	// Recheck immediately before FilterReplace, including on agent updates.
+	if err := b.checkEgressFilters(eth); err != nil {
 		return err
-	}
-	for _, f := range old {
-		if f.Attrs().Priority != filterPriority {
-			continue
-		}
-		bf, ok := f.(*netlink.BpfFilter)
-		if !ok || f.Attrs().Handle != filterHandle || bf.Name != "ratatoskr_ebpf" {
-			return fmt.Errorf("tc egress priority %d occupied by foreign filter", filterPriority)
-		}
 	}
 	filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: eth.Attrs().Index, Parent: netlink.HANDLE_MIN_EGRESS, Priority: filterPriority, Handle: filterHandle, Protocol: unix.ETH_P_ALL}, Fd: objects.Steer.FD(), Name: "ratatoskr_ebpf", DirectAction: true}
 	if err := b.h.FilterReplace(filter); err != nil {

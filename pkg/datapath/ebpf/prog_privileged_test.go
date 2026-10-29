@@ -12,6 +12,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
@@ -291,6 +292,126 @@ func TestPrivilegedRefuseWrongOuterSource(t *testing.T) {
 		}
 		if _, err := b.h.LinkByName(datapath.GatewayDevice); err == nil {
 			t.Fatal("unsafe source configuration created Geneve device")
+		}
+	})
+}
+
+func TestPrivilegedEarlierPassBypassesNoEndpointDrop(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		dummy(t, b)
+		eth, err := b.h.LinkByName("eth0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := &netlink.Clsact{QdiscAttrs: netlink.QdiscAttrs{LinkIndex: eth.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}}
+		if err := b.h.QdiscAdd(q); err != nil {
+			t.Fatal(err)
+		}
+		foreign := &netlink.MatchAll{FilterAttrs: netlink.FilterAttrs{LinkIndex: eth.Attrs().Index, Parent: netlink.HANDLE_MIN_EGRESS, Priority: 100, Protocol: unix.ETH_P_ALL}, Actions: []netlink.Action{&netlink.GenericAction{ActionAttrs: netlink.ActionAttrs{Action: netlink.TC_ACT_OK}}}}
+		if err := b.h.FilterAdd(foreign); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400}
+		if err := b.ApplyClient(context.Background(), c); err == nil {
+			t.Fatal("unsafe earlier clsact egress action bypassed Ratatoskr no-endpoint drop")
+		}
+		// Preserve foreign filter and refuse before installing our own program.
+		filters, err := b.h.FilterList(eth, netlink.HANDLE_MIN_EGRESS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundForeign, foundRatatoskr := false, false
+		for _, f := range filters {
+			if f.Attrs().Priority == 100 {
+				foundForeign = true
+			}
+			if f.Attrs().Priority == filterPriority {
+				foundRatatoskr = true
+			}
+		}
+		if !foundForeign || foundRatatoskr {
+			t.Fatalf("unexpected tc mutation: foreign=%t ratatoskr=%t", foundForeign, foundRatatoskr)
+		}
+	})
+}
+
+func TestPrivilegedVerifyAttachedProgramAndPolicyAfterRestart(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		dummy(t, b)
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Exclusions: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}, Policy: datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, Ports: []datapath.Port{{Protocol: "UDP", Port: 443}}}}}}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.VerifyClient(context.Background(), c); err != nil {
+			t.Fatalf("healthy attached tc verification failed: %v", err)
+		}
+		restarted, err := New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer restarted.Close()
+		if err := restarted.VerifyClient(context.Background(), c); err != nil {
+			t.Fatalf("restarted backend failed to verify tc program/maps: %v", err)
+		}
+		modified := c
+		modified.Policy.Mode = "exclude"
+		if err := restarted.VerifyClient(context.Background(), modified); err == nil {
+			t.Fatal("policy mismatch accepted on restart")
+		}
+		c.Endpoint = netip.Addr{}
+		if err := restarted.VerifyClient(context.Background(), c); err != nil {
+			t.Fatalf("no endpoint policy verification failed: %v", err)
+		}
+		if err := b.objects.Config.Put(uint32(0), clientClientConfig{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := restarted.VerifyClient(context.Background(), c); err == nil {
+			t.Fatal("tampered tc config accepted")
+		}
+	})
+}
+
+func TestPrivilegedFailedEndpointUpdateRevokesOldKernelSelector(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		dummy(t, b)
+		eth, err := b.h.LinkByName("eth0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Dst: &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}}); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Endpoint: netip.MustParseAddr("10.42.1.9")}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		changed := c
+		changed.Endpoint = netip.MustParseAddr("198.18.0.8")
+		// Force a failure *after* revocation by causing the next GENEVE lookup to
+		// see an unrelated non-GENEVE device with the reserved name.
+		if dev, err := b.h.LinkByName(datapath.GatewayDevice); err == nil {
+			if err := b.h.LinkDel(dev); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			t.Fatal(err)
+		}
+		fake := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: datapath.GatewayDevice}}
+		if err := b.h.LinkAdd(fake); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ApplyClient(context.Background(), changed); err == nil {
+			t.Fatal("unexpectedly accepted bad GENEVE device")
+		}
+		config := clientClientConfig{}
+		if err := b.objects.Config.Lookup(uint32(0), &config); err != nil {
+			t.Fatal(err)
+		}
+		if config.Healthy != 0 || config.Endpoint != 0 || config.Ifindex != 0 {
+			t.Fatalf("failed update left old healthy selector: %+v", config)
+		}
+		if err := b.VerifyClient(context.Background(), c); err == nil {
+			t.Fatal("restart verifier accepted revoked old selector")
 		}
 	})
 }
