@@ -26,6 +26,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	gatewaydns "github.com/skaldhall/ratatoskr/pkg/dns"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
+	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 
 	mdns "github.com/miekg/dns"
@@ -40,6 +41,7 @@ type state struct {
 	upstreamIndex int
 	podMTU        int
 	geneveMTU     int
+	wireguardMTU  int
 	upstreamMTU   int
 	effectiveMTU  int
 	mss           int
@@ -49,7 +51,7 @@ type upstreamInfo struct {
 	MTU    int    `json:"mtu"`
 }
 
-func probe(client *http.Client) (state, error) {
+func probe(client *http.Client, encryption string) (state, error) {
 	var s state
 	resp, err := client.Get("http://127.0.0.1:9901/healthz")
 	if err != nil {
@@ -94,7 +96,19 @@ func probe(client *http.Client) (state, error) {
 	s.podMTU = eth.Attrs().MTU
 	s.geneveMTU = gnv.Attrs().MTU
 	s.upstreamMTU = link.Attrs().MTU
-	maxGeneve := s.podMTU - mtu.GeneveOverhead(mtu.IPv4, 0)
+	carrierMTU := s.podMTU
+	if encryption == "wireguard" {
+		wg, e := netlink.LinkByName("rtkwg0")
+		if e != nil {
+			return state{}, errors.New("WireGuard underlay unavailable")
+		}
+		s.wireguardMTU = wg.Attrs().MTU
+		if s.wireguardMTU > s.podMTU-mtu.WireGuardOverhead(mtu.IPv4) {
+			return state{}, errors.New("WireGuard MTU exceeds pod carrier")
+		}
+		carrierMTU = s.wireguardMTU
+	}
+	maxGeneve := carrierMTU - mtu.GeneveOverhead(mtu.IPv4, 0)
 	if s.geneveMTU > maxGeneve {
 		return state{}, errors.New("GENEVE MTU exceeds pod carrier MTU")
 	}
@@ -113,7 +127,10 @@ func probe(client *http.Client) (state, error) {
 }
 
 func gatewayInnerMTU(configMTU, podMTU int) (int, error) {
-	computed, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: mtu.EncryptionNone})
+	return gatewayInnerMTUForMode(configMTU, podMTU, mtu.EncryptionNone)
+}
+func gatewayInnerMTUForMode(configMTU, podMTU int, encryption mtu.Encryption) (int, error) {
+	computed, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: encryption})
 	if err != nil {
 		return 0, err
 	}
@@ -130,7 +147,7 @@ func clampGatewayMTU(cfg *datapath.GatewayConfig) error {
 	if err != nil {
 		return fmt.Errorf("look up gateway eth0: %w", err)
 	}
-	cfg.MTU, err = gatewayInnerMTU(cfg.MTU, eth.Attrs().MTU)
+	cfg.MTU, err = gatewayInnerMTUForMode(cfg.MTU, eth.Attrs().MTU, mtu.Encryption(cfg.Encryption))
 	return err
 }
 
@@ -228,6 +245,9 @@ func readGatewayConfig(configPath string) (datapath.GatewayConfig, error) {
 }
 
 func run(ctx context.Context, configPath string) error {
+	if err := platform.CheckKernel(); err != nil {
+		return err
+	}
 	if configPath == "" {
 		return errors.New("-config is required")
 	}
@@ -267,10 +287,11 @@ func run(ctx context.Context, configPath string) error {
 			Ready        bool   `json:"ready"`
 			PodMTU       int    `json:"podMTU"`
 			GeneveMTU    int    `json:"geneveMTU"`
+			WireguardMTU int    `json:"wireguardMTU"`
 			UpstreamMTU  int    `json:"upstreamMTU"`
 			EffectiveMTU int    `json:"effectiveMTU"`
 			MSS          int    `json:"mss"`
-		}{s.exitIP, s.ready, s.podMTU, s.geneveMTU, s.upstreamMTU, s.effectiveMTU, s.mss})
+		}{s.exitIP, s.ready, s.podMTU, s.geneveMTU, s.wireguardMTU, s.upstreamMTU, s.effectiveMTU, s.mss})
 	})
 	server.Handler = mux
 	listener, err := net.Listen("tcp", server.Addr)
@@ -327,7 +348,7 @@ func run(ctx context.Context, configPath string) error {
 		next.UpstreamHealthy = cfg.UpstreamHealthy
 		changed := !reflect.DeepEqual(cfg, next)
 		cfg = next
-		s, err := probe(client)
+		s, err := probe(client, cfg.Encryption)
 		if err != nil {
 			s = state{}
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
+	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 )
 
@@ -51,6 +52,9 @@ func completeConfig(cfg *datapath.ClientConfig, podIP string, podMTU int) error 
 }
 
 func run(configPath string, remove bool) error {
+	if err := platform.CheckKernel(); err != nil {
+		return err
+	}
 	if configPath == "" {
 		return errors.New("-config is required")
 	}

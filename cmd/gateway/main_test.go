@@ -22,6 +22,21 @@ func TestGatewayInnerMTUUsesObservedPodCarrier(t *testing.T) {
 	}
 }
 
+func TestEncryptedGatewayMTUBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		config, pod, want int
+		fail              bool
+	}{{"flannel encrypted", 1400, 1450, 1340, false}, {"smaller carrier", 1400, 1360, 1250, false}, {"too small", 1400, 680, 0, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := gatewayInnerMTUForMode(tc.config, tc.pod, "wireguard")
+			if (err != nil) != tc.fail || (!tc.fail && got != tc.want) {
+				t.Fatalf("got=%d err=%v want=%d", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadGatewayConfigReload(t *testing.T) {
 	t.Setenv("POD_IP", "10.42.2.4")
 	path := filepath.Join(t.TempDir(), "gateway.json")

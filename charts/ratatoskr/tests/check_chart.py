@@ -38,14 +38,19 @@ def check(docs):
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
         ("ServiceAccount", "ratatoskr-webhook"),
+        ("ServiceAccount", "ratatoskr-gateway"),
+        ("Role", "ratatoskr-gateway-publish"),
+        ("RoleBinding", "ratatoskr-gateway-publish"),
         ("Deployment", "ratatoskr-controller"),
         ("Deployment", "ratatoskr-webhook"),
         ("Service", "ratatoskr-controller"),
         ("Service", "ratatoskr-webhook"),
         ("ClusterRole", "ratatoskr-controller"),
         ("ClusterRole", "ratatoskr-webhook"),
+        ("ClusterRole", "ratatoskr-gateway"),
         ("ClusterRoleBinding", "ratatoskr-controller"),
         ("ClusterRoleBinding", "ratatoskr-webhook"),
+        ("ClusterRoleBinding", "ratatoskr-gateway"),
         ("Role", "ratatoskr-webhook-tls"),
         ("RoleBinding", "ratatoskr-webhook-tls"),
         ("NetworkPolicy", "ratatoskr-webhook-ingress"),
@@ -53,6 +58,19 @@ def check(docs):
         ("ValidatingWebhookConfiguration", "ratatoskr-validation"),
     }, set(docs)
     assert not any(kind == "Secret" for kind, _ in docs)
+    gateway_sa = docs["ServiceAccount", "ratatoskr-gateway"]
+    assert gateway_sa["automountServiceAccountToken"] is False
+    gateway_role = docs["ClusterRole", "ratatoskr-gateway"]
+    assert rule(gateway_role, "tokenreviews")["verbs"] == ["create"]
+    assert rule(gateway_role, "pods")["verbs"] == ["get", "list", "watch"]
+    publish_role = docs["Role", "ratatoskr-gateway-publish"]
+    assert publish_role["metadata"]["namespace"] == NAMESPACE
+    assert rule(publish_role, "pods")["verbs"] == ["patch"]
+    assert rule(gateway_role, "namespaces")["verbs"] == ["get"]
+    assert rule(gateway_role, "egressgateways")["verbs"] == ["get"]
+    assert docs["ClusterRoleBinding", "ratatoskr-gateway"]["subjects"] == [
+        {"kind": "ServiceAccount", "name": "ratatoskr-gateway", "namespace": NAMESPACE}
+    ]
     for component in ("controller", "webhook"):
         deployment = docs["Deployment", "ratatoskr-" + component]["spec"]
         pod = deployment["template"]

@@ -1,0 +1,75 @@
+# Bound tokens are mounted only into gateway containers in wireguard mode.
+# The upstream sidecar never sees this ServiceAccount token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratatoskr-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ratatoskr-gateway
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egressgateways]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ratatoskr-gateway
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ratatoskr-gateway
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-gateway
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ratatoskr-gateway-publish
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  # Kubernetes RBAC cannot bind a Deployment-generated Pod name in advance.
+  # Gateway code patches only its own Pod after verifying UID/owner labels.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ratatoskr-gateway-publish
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ratatoskr-gateway-publish
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-gateway
+    namespace: {{ .Release.Namespace }}
