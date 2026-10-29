@@ -18,6 +18,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
+	"github.com/skaldhall/ratatoskr/pkg/registration"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 )
 
@@ -33,7 +34,7 @@ func completeConfig(cfg *datapath.ClientConfig, podIP string, podMTU int) error 
 		cfg.PodIP = addr
 	}
 	if cfg.MTU == 0 {
-		result, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: mtu.EncryptionNone})
+		result, err := mtu.Compute(mtu.Params{PodMTU: podMTU, Underlay: mtu.IPv4, Encryption: mtu.Encryption(cfg.Encryption)})
 		if err != nil {
 			return fmt.Errorf("compute client MTU: %w", err)
 		}
@@ -87,6 +88,19 @@ func run(configPath string, remove bool) error {
 	defer backend.Close()
 	if remove {
 		return backend.RemoveClient(context.Background(), cfg)
+	}
+	if cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() {
+		pub, err := backend.PrepareClientWireGuard(context.Background(), cfg)
+		if err != nil {
+			return fmt.Errorf("prepare WireGuard client: %w", err)
+		}
+		if err := registration.RegisterClient(context.Background(), registration.ClientRequest{
+			GatewayPodIP: cfg.Endpoint, RegistrationCACert: []byte(cfg.RegistrationCACert), ClientPublicKey: pub,
+			ProjectedTokenPath: "/var/run/ratatoskr/wg-token/token", // #nosec G101 -- fixed projected volume path, not token contents.
+			BypassMark:         datapath.WireGuardMark,
+		}); err != nil {
+			return fmt.Errorf("authenticate gateway peer: %w", err)
+		}
 	}
 	return backend.ApplyClient(context.Background(), cfg)
 }
