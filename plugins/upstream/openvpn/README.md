@@ -62,18 +62,27 @@ Entrypoint flags (directory paths must be absolute):
 ```text
 --secret-dir /etc/ratatoskr/upstream
 --runtime-dir /run/ratatoskr
---probe-url https://<literal-IPv4>/exit
+--probe-url https://ipinfo.io/ip
 ```
 
-`--probe-url` is required: provision an operator-controlled endpoint returning a
-plain-text exit IPv4 address (at most 64 bytes) with HTTP 200. HTTP is supported,
-but HTTPS is recommended to authenticate the responder; a literal IPv4 HTTPS
-endpoint needs a certificate with that IP SAN. No environment proxy, redirects,
-keepalive connection reuse or DNS lookup is used by the probe. This avoids
-leaking probe DNS traffic over eth0. Endpoint credentials are not supported;
-prefer a public/no-auth IP reporting endpoint. Do not put tokens in URLs or
-command-line flags. OpenVPN's own provider hostname resolution can still use
-existing pod DNS; the plugin never modifies it.
+`--probe-url` is **optional**, defaulting to `https://ipinfo.io/ip` for the
+plain-text exit IPv4 address (at most 64 bytes) with HTTP 200. No custom operator
+endpoint is required. Override it for a fake upstream test endpoint or another
+IP-reporting service. The default service is an external availability dependency;
+its errors/rate limits make health fail closed like any other probe failure.
+
+DNS hostnames and literal IPv4 addresses are accepted. **Hostname lookup alone**
+uses the normal pod/cluster resolver, consistent with cluster DNS mode; the
+plugin does not modify pod DNS. Every IPv4 TCP connection, including all
+resolved candidates, remains `SO_MARK`-selected and `SO_BINDTODEVICE`-bound to
+`upstream0`. No unbound TCP fallback, environment proxy, redirects or keepalive
+connection reuse is allowed. Resolution may use existing pod egress for DNS,
+not for the HTTP(S) exit-IP request itself. IPv6 probe connections are disabled.
+
+HTTPS uses normal hostname/certificate verification and is recommended; a
+literal IPv4 HTTPS endpoint needs a certificate with that IP SAN. Endpoint
+credentials are not supported. Do not put tokens in URLs or command-line flags.
+OpenVPN's own provider hostname resolution also uses existing pod DNS.
 
 `/healthz` returns 200 only while the child is running and an up-interface,
 marked/bound exit-IP probe succeeded within 20 seconds. Before the first
@@ -146,7 +155,9 @@ Never use this source directory as the Secret mount/runtime directory.
 ## Verification scope and primary references
 
 Unit tests use synthetic placeholders, temporary directories, fake processes,
-fake HTTP transports and fake socket controls. They cover deterministic parsing,
+fake HTTP transports/dialers and fake socket controls. Hostname/default URL
+acceptance and tunnel-dial failure without an alternate/unbound fallback are
+tested without DNS queries or external connections. They cover deterministic parsing,
 inline blocks, traversal/symlinks, forced argv, health freshness, failure and
 exit invalidation, timeout/cancellation, capped/resetting backoff, and refusal to
 overlap an unreaped process. They do **not** verify a real VPN, actual TUN device

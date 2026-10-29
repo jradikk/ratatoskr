@@ -126,17 +126,62 @@ func TestHTTPProbeWithoutNetwork(t *testing.T) {
 	}
 }
 func TestProbeURLValidation(t *testing.T) {
-	for _, endpoint := range []string{"", "ftp://192.0.2.1", "http://example.invalid/exit", "http://127.0.0.1", "http://0.0.0.0", "http://224.0.0.1", "http://[2001:db8::1]", "http://user:placeholder@192.0.2.1", "http://192.0.2.1/#fragment"} {
+	for _, endpoint := range []string{"", "ftp://192.0.2.1", "http://127.0.0.1", "http://0.0.0.0", "http://224.0.0.1", "http://[2001:db8::1]", "http://user:placeholder@192.0.2.1", "http://192.0.2.1/#fragment", "http:///exit", "http://bad_host/exit", "http://-invalid.example/exit", "http://a..example/exit", "http://[example.invalid]/exit"} {
 		if _, err := NewHTTPProbe(endpoint); err == nil {
 			t.Fatal("unsafe endpoint accepted")
 		}
 	}
-	for _, endpoint := range []string{"http://192.0.2.1/exit", "https://192.0.2.1:8443/exit"} {
+	for _, endpoint := range []string{DefaultProbeURL, "http://example.invalid/exit", "https://probe.example.invalid:8443/exit", "http://192.0.2.1/exit", "https://192.0.2.1:8443/exit"} {
 		if _, err := NewHTTPProbe(endpoint); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
+func TestDefaultHostnameProbeWithoutNetwork(t *testing.T) {
+	if DefaultProbeURL != "https://ipinfo.io/ip" {
+		t.Fatal("default endpoint changed")
+	}
+	calls := 0
+	probe, err := newHTTPProbe(DefaultProbeURL, upInterface, roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Hostname() != "ipinfo.io" || r.URL.Path != "/ip" || r.URL.Scheme != "https" {
+			t.Fatal("unexpected default hostname request")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("203.0.113.42\n")), Header: make(http.Header)}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := probe(context.Background())
+	if err != nil || result.ExitIP != "203.0.113.42" || calls != 1 {
+		t.Fatal("default hostname probe failed")
+	}
+}
+
+func TestProbeTransportNoUnboundFallback(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.example.invalid:8080")
+	for _, cause := range []string{"bind denied", "mark denied", "tunnel route missing"} {
+		t.Run(cause, func(t *testing.T) {
+			failure := errors.New(cause)
+			calls := 0
+			transport := probeTransport(func(ctx context.Context, network, address string) (net.Conn, error) {
+				calls++
+				if network != "tcp4" || address != "probe.example.invalid:443" {
+					t.Fatal("unexpected tunnel dial")
+				}
+				return nil, failure
+			})
+			if transport.Proxy != nil || !transport.DisableKeepAlives {
+				t.Fatal("probe proxy/keepalive isolation changed")
+			}
+			conn, err := transport.DialContext(context.Background(), "tcp", "probe.example.invalid:443")
+			if conn != nil || !errors.Is(err, failure) || calls != 1 {
+				t.Fatal("tunnel failure attempted an alternate dial")
+			}
+		})
+	}
+}
+
 func TestCommandStarterRejectsAndCleansRuntimeCopy(t *testing.T) {
 	secret := t.TempDir()
 	runtime := t.TempDir()

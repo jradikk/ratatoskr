@@ -20,6 +20,8 @@ import (
 
 const (
 	Interface = "upstream0"
+	// DefaultProbeURL reports the tunnel exit IPv4 without operator provisioning.
+	DefaultProbeURL = "https://ipinfo.io/ip"
 	// Gateway contract: this mark/mask selects table 100 even when the main
 	// default stays on eth0. The gateway keeps the route during unhealthy periods
 	// and gates FORWARD only, permitting this locally originated recovery probe.
@@ -155,9 +157,10 @@ func CommandStarter(binary, secretDir, runtimeDir string) Starter {
 
 // NewHTTPProbe marks every TCP connection for table 100 and binds it to
 // upstream0. Redirects are refused. It never uses environment proxies, HTTP
-// keepalives or pod DNS: the URL must contain a literal IPv4 address. A hostname
-// is deliberately not resolved through eth0. HTTPS uses normal certificate
-// verification, so a literal address endpoint needs an IP SAN certificate.
+// keepalives. Hostname lookup uses the normal pod/cluster resolver, but only
+// the marked, interface-bound dialer may establish the IPv4 TCP connection.
+// DNS lookup is the deliberate exception to tunnel-only probe traffic. HTTPS
+// uses normal certificate verification; no unbound TCP fallback is allowed.
 func NewHTTPProbe(endpoint string) (Probe, error) {
 	return newHTTPProbe(endpoint, net.InterfaceByName, nil)
 }
@@ -176,6 +179,39 @@ func socketControl(raw syscall.RawConn, bind, mark func(int) error) error {
 	return sockErr
 }
 
+// probeTransport forces IPv4 for hostname endpoints as well as literals. DNS
+// lookup inside the supplied net.Dialer uses the ordinary pod resolver; every
+// TCP candidate still runs its socket controls. There is no alternate dialer.
+func probeTransport(dial func(context.Context, string, string) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, _ string, address string) (net.Conn, error) {
+			return dial(ctx, "tcp4", address)
+		},
+		DisableKeepAlives:      true,
+		MaxResponseHeaderBytes: 8192,
+		ResponseHeaderTimeout:  5 * time.Second,
+	}
+}
+
+func validProbeHostname(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, ch := range label {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Test dependencies avoid real sockets and external networks.
 func newHTTPProbe(endpoint string, lookup func(string) (*net.Interface, error), roundTripper http.RoundTripper) (Probe, error) {
 	u, err := url.Parse(endpoint)
@@ -183,17 +219,21 @@ func newHTTPProbe(endpoint string, lookup func(string) (*net.Interface, error), 
 		return nil, errors.New("invalid probe URL")
 	}
 	ip, err := netip.ParseAddr(u.Hostname())
-	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
-		return nil, errors.New("probe URL requires a unicast IPv4 literal")
+	if err == nil {
+		if !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+			return nil, errors.New("probe URL requires a hostname or unicast IPv4")
+		}
+	} else if !validProbeHostname(u.Hostname()) || strings.ContainsAny(u.Host, "[]") {
+		return nil, errors.New("probe URL requires a hostname or unicast IPv4")
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second, Control: func(network, address string, raw syscall.RawConn) error {
+	dialer := &net.Dialer{Timeout: 5 * time.Second, Resolver: net.DefaultResolver, Control: func(network, address string, raw syscall.RawConn) error {
 		return socketControl(raw,
 			func(fd int) error {
 				return syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, Interface)
 			},
 			func(fd int) error { return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_MARK, ProbeMark) })
 	}}
-	transport := &http.Transport{Proxy: nil, DialContext: dialer.DialContext, DisableKeepAlives: true, MaxResponseHeaderBytes: 8192, ResponseHeaderTimeout: 5 * time.Second}
+	transport := probeTransport(dialer.DialContext)
 	if roundTripper == nil {
 		roundTripper = transport
 	}

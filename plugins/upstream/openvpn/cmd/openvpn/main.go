@@ -30,7 +30,7 @@ func run() error {
 	flags.SetOutput(io.Discard)
 	secrets := flags.String("secret-dir", "/etc/ratatoskr/upstream", "read-only Secret mount")
 	runtimeDir := flags.String("runtime-dir", "/run/ratatoskr", "private ephemeral runtime directory")
-	endpoint := flags.String("probe-url", "", "required literal IPv4 HTTP(S) endpoint returning plain exit IPv4")
+	endpoint := flags.String("probe-url", openvpn.DefaultProbeURL, "optional HTTP(S) endpoint override returning plain exit IPv4")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
 	}
