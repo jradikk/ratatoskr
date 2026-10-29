@@ -2,13 +2,91 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
+	"sync/atomic"
+	"time"
 
+	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/agent"
+	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+func run(ctx context.Context) error {
+	if err := platform.CheckKernel(); err != nil {
+		return err
+	}
+	node, socket := os.Getenv("NODE_NAME"), os.Getenv("CRI_SOCKET")
+	if node == "" || socket == "" {
+		return errors.New("NODE_NAME and CRI_SOCKET are required")
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return err
+	}
+	if err := api.AddToScheme(scheme); err != nil {
+		return err
+	}
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	k, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(dialCtx, "unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		return fmt.Errorf("connect CRI: %w", err)
+	}
+	defer conn.Close()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ready := &atomic.Bool{}
+	reconciler := &agent.Reconciler{Ready: ready, Client: k, CRI: cri.NewRuntimeServiceClient(conn), Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Log: logger}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"not-ready"}`)
+			return
+		}
+		fmt.Fprint(w, `{"status":"ok"}`)
+	})
+	listener, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("health server failed", "error", err)
+		}
+	}()
+	defer server.Shutdown(context.Background())
+	return reconciler.Run(ctx)
+}
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -16,6 +94,8 @@ func main() {
 		fmt.Println("ratatoskr-agent", version.String())
 		return
 	}
-	fmt.Fprintln(os.Stderr, "ratatoskr-agent: not implemented yet")
-	os.Exit(1)
+	if err := run(ctrl.SetupSignalHandler()); err != nil {
+		fmt.Fprintln(os.Stderr, "ratatoskr-agent:", err)
+		os.Exit(1)
+	}
 }
