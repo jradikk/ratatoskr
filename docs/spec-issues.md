@@ -1,8 +1,7 @@
 # Spec issues and resolutions
 
-Problems found in the build specification. Resolved issues have a documented
-approach; unresolved acceptance criteria below need explicit agreement before
-later milestones are treated as complete.
+Problems found in the build specification, with documented approaches and user
+clarifications. Do not treat unimplemented checks or skipped tests as passing.
 
 | # | Issue | Resolution |
 |---|---|---|
@@ -17,9 +16,4 @@ later milestones are treated as complete.
 | S9 | `allowCloudMetadata` is listed under "exclusions (never steered)", which makes `false` vs `true` ambiguous. | `false` (default): `169.254.169.254` is **blocked** in labeled pods (`prohibit` route). `true`: it is reachable via the normal node path. It is never steered in either case. |
 | S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) may not fit the dev VM (3.8 GiB RAM, no swap). | Assess available resources before each variant and stop if insufficient. Do not bypass the VM limits. |
 | S12 | The previous `FORCE=1` option to bypass the k3d memory/CPU preflight conflicted with the instruction to stop on missing VM resources. | Removed the option; resource checks are mandatory before creating a cluster. |
-
-## Unresolved acceptance conflicts
-
-| # | Conflict | Proposed clarification (not yet adopted) |
-|---|---|---|
-| S11 | The working rules require the **full live e2e suite at the end of every milestone**, but M0 contains no datapath and M1's acceptance explicitly requires only hand-run live steps 4–6 and 9. A full suite also requires an OpenVPN config that may not be provided. | Gate each milestone on its stated acceptance tests and on only the live steps it implements; require the full live suite once all steps exist (M5 onward), skipping the credential-dependent tier with a clear message if `RATATOSKR_E2E_OVPN` is unset. Do not count an unimplemented or skipped tier as passing. |
+| S11 | The original working rules required a full live e2e suite at every milestone, although early milestones do not implement all test steps. | The user clarified on 2026-10-29 that **e2e testing is required at the end only**. Keep unit, lint, build and targeted component checks green while implementing milestones; perform the final CI and live e2e validation after implementation. If live credentials are unavailable, explicitly report the skipped tier; never count a skip as a pass. |

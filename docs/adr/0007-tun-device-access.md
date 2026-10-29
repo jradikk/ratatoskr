@@ -18,4 +18,5 @@ Default `mknod`: the plugin entrypoint creates `/dev/net/tun` (`c 10 200`) with 
 
 ## Consequences
 
-Works on k3d (containerd) — verified in M1. The ADR is revisited if a target runtime denies 10:200 by default.
+This access path must be verified on k3d (containerd) during M1; it has not yet
+been tested. Revisit the ADR if a target runtime denies 10:200 by default.

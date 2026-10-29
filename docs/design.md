@@ -364,6 +364,12 @@ deleting throwaway devices in their own netns.
 
 ## 14. Testing
 
+The user clarified on 2026-10-29 that e2e validation is required **at the end
+only**, not after each milestone. During implementation, keep unit, lint, build
+and targeted component checks green and commit milestone changes. Run the CI and
+live e2e suites as the final validation gate; explicitly report missing live
+credentials and any incomplete or inconclusive cases rather than claiming a pass.
+
 - Unit: controller logic, policy compilation, exclusion detection, MTU math,
   OpenVPN sanitizer, affinity hashing.
 - Privileged (`-tags privileged`, run as root in CI): datapath programming in
