@@ -11,6 +11,7 @@ import (
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/datapath/affinity"
 	"github.com/skaldhall/ratatoskr/pkg/policy"
 
 	corev1 "k8s.io/api/core/v1"
@@ -95,21 +96,43 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 		}
 		c.Identity.Policy = pol.Name
 	}
+	// Only controller-reported healthy PodIP endpoints participate. Never use a
+	// Service ClusterIP or accept a malformed healthy status as a bypass.
+	healthy := make([]netip.Addr, 0, len(gw.Status.Endpoints))
+	identities := make(map[netip.Addr]api.GatewayEndpoint, len(gw.Status.Endpoints))
 	for _, e := range gw.Status.Endpoints {
-		v, err := netip.ParseAddr(e.PodIP)
-		if e.UpstreamHealthy && err == nil && v.Is4() && !v.IsUnspecified() && !v.IsMulticast() && v != ip {
-			if c.Encryption == "wireguard" {
-				if e.WireguardPublicKey == "" || e.RegistrationCACert == "" {
-					return c, errors.New("healthy WireGuard endpoint missing authenticated public identity")
-				}
-				c.GatewayPublicKey = e.WireguardPublicKey
-				c.RegistrationCACert = e.RegistrationCACert
-				c.WireGuardPort = datapath.WireGuardPortDefault
+		if !e.UpstreamHealthy {
+			continue
+		}
+		v, parseErr := netip.ParseAddr(e.PodIP)
+		if parseErr != nil || !v.Is4() || v.IsUnspecified() || v.IsMulticast() || v.IsLoopback() || v.IsLinkLocalUnicast() || v == ip {
+			return c, fmt.Errorf("invalid healthy gateway PodIP %q", e.PodIP)
+		}
+		if previous, exists := identities[v]; exists {
+			if c.Encryption == "wireguard" && (previous.WireguardPublicKey != e.WireguardPublicKey || previous.RegistrationCACert != e.RegistrationCACert) {
+				return c, fmt.Errorf("conflicting WireGuard identity for gateway PodIP %s", v)
 			}
-			c.Endpoint = v
-			break
+			continue
+		}
+		if c.Encryption == "wireguard" && (e.WireguardPublicKey == "" || e.RegistrationCACert == "") {
+			return c, errors.New("healthy WireGuard endpoint missing authenticated public identity")
+		}
+		healthy = append(healthy, v)
+		identities[v] = e
+	}
+	if len(healthy) > 0 {
+		c.Endpoint, err = affinity.Select(string(p.UID), healthy)
+		if err != nil {
+			return c, fmt.Errorf("select healthy gateway PodIP: %w", err)
+		}
+		if c.Encryption == "wireguard" {
+			selected := identities[c.Endpoint]
+			c.GatewayPublicKey = selected.WireguardPublicKey
+			c.RegistrationCACert = selected.RegistrationCACert
+			c.WireGuardPort = datapath.WireGuardPortDefault
 		}
 	}
+
 	return c, c.Validate()
 }
 func Hash(c datapath.ClientConfig) string {

@@ -198,6 +198,72 @@ func TestPathRequiresSandboxPID(t *testing.T) {
 	}
 }
 
+func TestStickyHealthyGatewayEndpoints(t *testing.T) {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client", Namespace: "ns", UID: types.UID("sticky-uid"), Labels: map[string]string{GatewayLabel: "g"}}, Spec: corev1.PodSpec{NodeName: "n"}, Status: corev1.PodStatus{PodIP: "10.1.0.2"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
+	gw := &api.EgressGateway{ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "operator", Generation: 1}, Spec: api.EgressGatewaySpec{AllowedNamespaces: api.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{}}}, Status: api.EgressGatewayStatus{ObservedGeneration: 1, GatewayID: 10, MTU: api.GatewayMTUStatus{EffectiveMTU: 1400}}}
+	a := api.GatewayEndpoint{PodIP: "10.2.0.3", UpstreamHealthy: true}
+	b := api.GatewayEndpoint{PodIP: "10.2.0.4", UpstreamHealthy: true}
+	c := api.GatewayEndpoint{PodIP: "10.2.0.5", UpstreamHealthy: true}
+	gw.Status.Endpoints = []api.GatewayEndpoint{a, b, c}
+	initial, err := Config(p, ns, gw, nil, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHash := Hash(initial)
+	gw.Status.Endpoints = []api.GatewayEndpoint{c, b, a}
+	reordered, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || reordered.Endpoint != initial.Endpoint || Hash(reordered) != initialHash {
+		t.Fatalf("endpoint reorder changed chosen client: %v, %s", err, reordered.Endpoint)
+	}
+	remaining := []api.GatewayEndpoint{}
+	for _, endpoint := range gw.Status.Endpoints {
+		if endpoint.PodIP != initial.Endpoint.String() {
+			remaining = append(remaining, endpoint)
+		}
+	}
+	gw.Status.Endpoints = remaining
+	replaced, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || !replaced.Endpoint.IsValid() || replaced.Endpoint == initial.Endpoint || Hash(replaced) == initialHash {
+		t.Fatalf("removed endpoint did not rehash: %v, %s", err, replaced.Endpoint)
+	}
+	gw.Status.Endpoints = []api.GatewayEndpoint{a, b, c}
+	restored, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || restored.Endpoint != initial.Endpoint {
+		t.Fatalf("adding endpoint did not restore deterministic choice: %v, %s", err, restored.Endpoint)
+	}
+	for i := range gw.Status.Endpoints {
+		gw.Status.Endpoints[i].UpstreamHealthy = false
+	}
+	closed, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || closed.Endpoint.IsValid() {
+		t.Fatalf("no healthy endpoint must fail closed: %v, %s", err, closed.Endpoint)
+	}
+}
+
+func TestStickyWireGuardIdentityBoundToSelectedPodIP(t *testing.T) {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client", Namespace: "ns", UID: types.UID("uid-wg"), Labels: map[string]string{GatewayLabel: "g"}}, Spec: corev1.PodSpec{NodeName: "n"}, Status: corev1.PodStatus{PodIP: "10.1.0.2"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
+	gw := &api.EgressGateway{ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "operator", Generation: 1}, Spec: api.EgressGatewaySpec{Encryption: "wireguard", AllowedNamespaces: api.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{}}}, Status: api.EgressGatewayStatus{ObservedGeneration: 1, GatewayID: 10, MTU: api.GatewayMTUStatus{EffectiveMTU: 1400}, Endpoints: []api.GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamHealthy: true, WireguardPublicKey: "key-a", RegistrationCACert: "ca-a"}, {PodIP: "10.2.0.4", UpstreamHealthy: true, WireguardPublicKey: "key-b", RegistrationCACert: "ca-b"}}}}
+	selected, err := Config(p, ns, gw, nil, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := map[netip.Addr][2]string{netip.MustParseAddr("10.2.0.3"): {"key-a", "ca-a"}, netip.MustParseAddr("10.2.0.4"): {"key-b", "ca-b"}}
+	if want := identity[selected.Endpoint]; selected.GatewayPublicKey != want[0] || selected.RegistrationCACert != want[1] {
+		t.Fatal("selected WireGuard identity belongs to different endpoint")
+	}
+	gw.Status.Endpoints[1].WireguardPublicKey = ""
+	if _, err := Config(p, ns, gw, nil, "operator"); err == nil {
+		t.Fatal("unsupported healthy WireGuard identity ignored")
+	}
+	gw.Status.Endpoints[1].WireguardPublicKey = "key-b"
+	gw.Status.Endpoints = append(gw.Status.Endpoints, api.GatewayEndpoint{PodIP: "10.2.0.3", UpstreamHealthy: true, WireguardPublicKey: "other", RegistrationCACert: "ca-a"})
+	if _, err := Config(p, ns, gw, nil, "operator"); err == nil {
+		t.Fatal("conflicting duplicated WireGuard identity accepted")
+	}
+}
+
 type captureIssuer struct {
 	request *authv1.TokenRequest
 	ns, sa  string
