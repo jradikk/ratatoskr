@@ -358,6 +358,26 @@ an intervening Pod replacement; there is no TLS session provenance or safe
 server-interruption collector. The matrix stays INCOMPLETE, and no new cluster,
 PKI, synthetic workload or traffic was executed for these assertions.
 
+Further **unwired, cluster-free** fixture contracts (`12b2e35`, `35fa185`,
+`08df89e`, `9d0ae4c`) added bounded Gateway/agent/GENEVE collection, a
+sanitized OpenVPN 2.6 server status-v3 reader backed by a private Pod-local
+memory volume, and a public-CA-verified anonymous Kubernetes API TLS/direct
+route check from the restricted client. The status parser's certificate-only
+username and Client ID fields were checked against upstream OpenVPN 2.6 source;
+**47 fake-only unit tests passed**, but the actual server image/status output,
+TLS session, public CA/anonymous policy and traffic remain unverified on this
+cluster. `run.py` remains read-only and always reports INCOMPLETE.
+
+A read-only outage-design audit found that deleting the sole VPN server Pod
+also removes its sole marker listener, so a failed selected request would not
+by itself prove fail-closed steering. An independent echo PodIP would be
+covered by mandatory node PodCIDR exclusions and bypass the VPN even while
+healthy; routing VPN traffic to it also needs forwarding and return NAT inside
+the synthetic server Pod. No server interruption/recovery API or direct-route
+exception was added, no Pod/Secret/PKI was created, and **no negative-path or
+recovery pass is claimed**. The full runtime gate and M8/M9 release remain
+blocked until a reachable same-destination outage proof and bounded verified
+orchestration can be designed and executed.
 
 ## Release blockers / next gate
 
