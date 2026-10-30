@@ -1,5 +1,26 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Bounded fixture adapter (not wired into execution)
+
+`adapter.py` is a **building block only**, not a runner and not an e2e PASS
+path. It accepts only a currently active `Lifecycle`, re-reads its exact
+namespace UID/ownership before each request, rejects other namespaces,
+resource names, container names and arbitrary commands, and uses fixed
+`kubectl --context k3d-ratatoskr-flannel` argv. Complete allowlisted fixture
+JSON objects (including Secrets) travel only by stdin; nothing is written to
+a manifest file, shell, Pod logs or user-visible stdout. The local process
+transport caps output and time (including blocked stdin), discards stderr,
+kills its process group on failure, and sanitizes exceptions. Pod runtime image
+lookup requires the caller's verified Pod UID; client exec additionally
+requires an explicit expected immutable runtime image ID and fixed command ID,
+checks the UID before and after, and refuses to exec the server Pod holding PKI.
+An API read, CREATE, or exec may still race a deletion/replacement between
+operations: the adapter fails closed on a changed observed UID, while *true*
+server-side compare-and-exec is unavailable through kubectl. Before any live
+fixture use, the operator must also validate Secret retention/cleanup,
+EndpointSlice/owner graph, TLS and tunnel proofs, and server fail-close/recovery.
+This adapter is not imported by `run.py` and cannot award traffic coverage.
+
 ## Pure traffic evidence contracts (not an execution path)
 
 `evidence.py` contains cluster-free, unit-tested **assertions only** for the
