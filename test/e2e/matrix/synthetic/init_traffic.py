@@ -45,13 +45,32 @@ def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic
     # remains an incomplete/failed partial smoke, never a reason to retry POST.
     deadline = min(owner.deadline, clock() + 115)
     stage = "init-selected-pod"
+    phase_detail = "pending"
     while clock() < deadline:
         try:
             if owner.closed or owner.clock() >= owner.deadline:
                 raise Blocked("Init selected Lifecycle deadline expired.")
             pod = api.get("pod", "synthetic-probe-healthy", apps)
-            if pod["metadata"].get("uid") != uid or pod.get("status", {}).get("phase") != "Succeeded":
-                raise Blocked("Init selected Pod UID/success status not converged.")
+            if pod["metadata"].get("uid") != uid:
+                raise Blocked("Init selected Pod UID changed.")
+            current = pod.get("status", {})
+            if current.get("phase") != "Succeeded":
+                init_statuses = [s for s in current.get("initContainerStatuses", [])
+                                 if s.get("name") == "ratatoskr-init"]
+                if init_statuses:
+                    state = init_statuses[0].get("state", {})
+                    waiting = state.get("waiting", {}).get("reason")
+                    phase_detail = ("init-exited-nonzero" if state.get("terminated", {}).get("exitCode") not in (None, 0)
+                                    else "init-waiting" if waiting in ("CrashLoopBackOff", "CreateContainerError",
+                                                                        "CreateContainerConfigError", "ErrImagePull", "ImagePullBackOff")
+                                    else "init-running" if state.get("running") is not None
+                                    else "init-pending")
+                else:
+                    phase_detail = "init-not-started"
+                if current.get("phase") == "Failed":
+                    phase_detail = "pod-failed"
+                raise Blocked("Init selected Pod status not converged.")
+            stage = "init-evidence"
             init_evidence.assert_init_pod(pod, namespace=apps, name="synthetic-probe-healthy", uid=uid,
                                           init_image="ghcr.io/skaldhall/ratatoskr-init:dev",
                                           init_image_id=ids["init"], app_image=ids["selected"],
@@ -87,7 +106,8 @@ def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic
             remaining = deadline - clock()
             if remaining > 0:
                 sleep(min(2, remaining))
-    raise Blocked("Init-driver partial traffic timed out at " + stage + ".")
+    label = stage + ("-" + phase_detail if stage == "init-selected-pod" else "")
+    raise Blocked("Init-driver partial traffic timed out at " + label + ".")
 
 
 def api_service_ip(api):
