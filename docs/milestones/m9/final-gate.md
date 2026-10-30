@@ -78,12 +78,17 @@ metric checks passed, but the fake tunneled request timed out. A bounded
 isolated two-netns eBPF-client → iproute-gateway reproduction showed client
 external `gnv0` transmit drops with no gateway `gnv0` receive packets or TC
 flower hits; the client underlay route and BPF helper return counters were
-healthy. A `geneve_xmit` probe observed a transmit attempt without
-`DST_METADATA` tunnel information (`dst.flags=0`, mode/remote zero), so the
-collect_md GENEVE device discarded it before emitting outer UDP. Linux 5.10
-source confirms that the tunnel-key helper installs skb metadata and the
-GENEVE driver requires it, but **does not prove where it is lost** between the
-helpers and transmit on this kernel. Removing the TLV helper and MAC rewrite
+healthy. A `geneve_xmit` probe recorded a transmit attempt where the observed skb
+had `dst.flags=0`, mode/remote zero; the collect-md GENEVE device dropped
+traffic before outer UDP was observed. **That skb was not conclusively
+correlated to the selected IPv4 flow** and may have been unrelated ARP/IPv6
+noise. In a newer minimal disposable-netns test, tc **egress** with the same
+24-byte tunnel-key ABI, option helper, MAC rewrite and redirect *did* emit
+outer UDP/VNI/TLV; `geneve_xmit` saw DST_METADATA for that packet. Therefore
+metadata loss is **not proven to be intrinsic to tc egress**. Linux 5.10 source
+confirms the helper installs skb metadata and the GENEVE driver requires it,
+but neither source nor the minimal test explains why the full production
+program/map path failed. Removing the TLV helper and MAC rewrite
 or trying clone redirect in disposable diagnostic builds did not repair this.
 Those diagnostic changes were discarded; there is **no verified production
 fix**, and the earlier isolated `gnv0` counter check
@@ -92,8 +97,10 @@ passing second datapath.
 
 A follow-up **disposable-netns tc-ingress experiment** on kernel 7.0 used the
 same BPF program and successfully emitted outer UDP/6081 with expected VNI
-and identity TLV; the gateway received it. That contrast narrows the problem
-to the current tc-egress attachment path, but is **not a production fix**:
+and identity TLV; the gateway received it. An additional minimal tc-egress
+packet test also emitted valid outer GENEVE, so the earlier inference that
+tc-egress attachment itself was the cause was **too broad**. Neither isolated
+proof is a production fix:
 locally generated Pod traffic does not traverse the proposed eth0 ingress
 hook. Any change needs a reviewed routing/attachment topology that preserves
 local OUTPUT policy and fail-close, plus real multi-pod and Linux 5.10 packet
