@@ -82,7 +82,6 @@ def write_report(directory, report):
 CHECKPOINTS = {
     "direct-cluster-baseline": ["direct-baseline", "cluster-preservation"],
     "selective-cidr-port": ["m8-selective-policy"],
-    "no-endpoint-revocation": ["m8-no-endpoint"],
     "payload-integrity": ["m8-payload-integrity"],
     "measured-mtu-mss": ["m8-measured-mtu"],
     "ebpf-tunnel": ["client-steering", "fake-tunnel-echo"],

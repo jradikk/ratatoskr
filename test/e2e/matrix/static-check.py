@@ -52,8 +52,11 @@ def main():
     for mode in config.MODES:
         rendered = config.build(original, str(remote), "10.42.0.0/16", mode)
         exclusions = [ipaddress.IPv4Network(p) for p in rendered["exclusions"]]
-        require(not any(remote in p for p in exclusions), "remote selector fixture must be reachable on both paths")
+        require(any(remote in p for p in exclusions), "IPIP outer peer must remain excluded from steering")
         require(any(ipaddress.IPv4Address("10.42.2.10") in p for p in exclusions), "other pod paths must stay excluded")
+        rule = rendered["policy"]["rules"][0]
+        require(rule["cidrs"] == ([str(remote) + "/32"] if mode == "wrong-cidr" else ["198.19.0.1/32"]), "selector must target the inner service except mismatched CIDR")
+        require(rule["ports"][0]["port"] == (8081 if mode == "wrong-port" else 8080), "port selector mismatch")
         require(any(ipaddress.IPv4Address("10.43.0.1") in p for p in exclusions), "service exclusion preserved")
         require(("endpoint" not in rendered) == (mode == "no-endpoint"), "endpoint revocation config contract")
         require(original["exclusions"][0] == "10.42.0.0/16", "render must not mutate original")

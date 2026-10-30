@@ -58,7 +58,7 @@
     {
       "id": "no-endpoint-revocation",
       "milestone": "M3",
-      "implementation": "fake-extended",
+      "implementation": "unimplemented",
       "mode": "fake",
       "assertion": "Remove healthy endpoint and prove selected requests fail while ordinary paths survive"
     },

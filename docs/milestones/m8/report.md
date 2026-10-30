@@ -38,12 +38,16 @@ traffic evidence for M8.
   CNI installation are attempted by these new scenarios. No resource preflight
   is bypassed or duplicated on cluster reuse.
 - Final-gate extended fake scenarios test include/exclude CIDR and TCP-port
-  selectors against the **same reachable** remote service, withdraw the healthy
-  endpoint and require selected requests to fail while API/DNS remain usable,
-  then restore the original steering. Removing only that remote /32 from pod
-  exclusions prevents a negative test from passing simply because its destination
-  was always unreachable. These are direct datapath checks, **not CRD compiler,
-  admission or endpoint-reconciliation proofs**.
+  selectors against the **inner** IPIP service `198.19.0.1` and compare tunnel
+  transmit counters with direct access to the separately reachable outer PodIP.
+  The original fixture steered the outer IPIP peer PodIP through its own tunnel;
+  its SYN-ACK was rejected by the client reverse-path check and it was not a
+  valid selective policy proof. The corrected fixture retains cluster PodIP
+  exclusions and does not relax `rp_filter`. Endpoint-withdrawal failure for
+  the inner-only service alone is **not** proof that an ordinary path would
+  have been available; that requires a separate controlled reachable fixture.
+  These are direct datapath checks, **not CRD compiler, admission or endpoint-
+  reconciliation proofs**.
 - A 4.5 MiB deterministic fake payload is checked for exact length and SHA256
   (the existing fixture repeats the nine-byte `ratatoskr` 512×1024 times, exactly
   4,718,592 bytes; the older 4 MiB task description was inaccurate);

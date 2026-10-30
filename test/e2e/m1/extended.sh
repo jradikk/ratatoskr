@@ -33,42 +33,58 @@ m8_apply_config() {
 }
 
 m8_make_config() {
-  # Remove only remote /32 from cluster exclusions so both steered and ordinary
-  # paths to the SAME reachable HTTP service can distinguish selector behavior.
+  # The fake remote PodIP is the IPIP outer peer, not a safe inner target.
+  # Keep PodIP exclusions intact; select its distinct inner HTTP address.
   python3 "$ROOT/test/e2e/matrix/client-config.py" "$PRIVATE/client.json" "$REMOTE_IP" "$POD_CIDR" "$1" \
     > "$PRIVATE/m8-client.json"
 }
 
+m8_tunnel_tx() {
+  local device=rtk0
+  [[ "$DATAPATH_MODE" != ebpf ]] || device=gnv0
+  client ip -s link show dev "$device" | awk '/TX:/{getline; print $2; exit}'
+}
+
 m8_fake_selectors() {
   STAGE=m8-selective-policy
+  # The inner service 198.19.0.1 is reachable only through the fake IPIP
+  # upstream; the remote PodIP is the *outer* IPIP peer. It is not a valid
+  # selected inner target with rp_filter enabled. Keep the pod CIDR excluded.
   for policy in include wrong-port wrong-cidr exclude; do
     m8_make_config "$policy"
     m8_apply_config "$PRIVATE/m8-client.json"
-    expected=$CLIENT_IP
-    [[ "$policy" != include ]] || expected=198.19.0.2
-    client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$expected" '.ip==$ip' >/dev/null
-    if [[ "$policy" == exclude ]]; then
+    before=$(m8_tunnel_tx)
+    if [[ "$policy" == include ]]; then
       client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
+      after=$(m8_tunnel_tx)
+      (( after > before )) || { record m8-selective-policy failed 'Included inner service did not traverse the selected tunnel.'; exit 1; }
+    else
+      if client_curl http://198.19.0.1:8080/echo >/dev/null; then
+        record m8-selective-policy failed 'Nonmatching inner service unexpectedly reached fake upstream.'; exit 1
+      fi
+      after=$(m8_tunnel_tx)
+      (( after == before )) || { record m8-selective-policy failed 'Nonmatching destination used the selected tunnel.'; exit 1; }
     fi
+    client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
   done
-  record m8-selective-policy passed 'Same reachable remote HTTP endpoint distinguishes include CIDR+TCP port, mismatching port/CIDR and exclude; CRD compiler/admission not covered.'
+  record m8-selective-policy passed 'Inner service include uses tunnel; wrong port/CIDR and exclude do not; ordinary PodIP remains direct. CRD compiler/admission not covered.'
   STAGE=m8-no-endpoint
   m8_make_config no-endpoint
   m8_apply_config "$PRIVATE/m8-client.json"
-  if client_curl "http://$REMOTE_IP:8080/echo" >/dev/null; then
-    record m8-no-endpoint failed 'Selected reachable remote unexpectedly succeeded after endpoint withdrawal.'
+  if client_curl http://198.19.0.1:8080/echo >/dev/null; then
+    record m8-no-endpoint failed 'Selected inner service unexpectedly succeeded after endpoint withdrawal.'
     exit 1
   fi
-  # Deliberately selected remote /32 is no longer a pod exclusion. Do not claim
-  # its service VIP survives DNAT into that now-selected address on tc eBPF.
+  # No-endpoint drop has independent privileged BPF/route tests; a failed
+  # request to an inner-only address alone cannot prove no ordinary leak.
   client getent ahostsv4 kubernetes.default.svc.cluster.local >/dev/null
   api_code=$(client curl --ipv4 --noproxy '*' --silent --insecure --connect-timeout 3 --max-time 8 \
     --output /dev/null --write-out '%{http_code}' "https://$API_IP/version" 2>/dev/null)
   [[ "$api_code" == "$api_before" ]]
-  m8_apply_config "$PRIVATE/client.json"
   client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
+  m8_apply_config "$PRIVATE/client.json"
   client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
-  record m8-no-endpoint passed 'Endpoint withdrawal blocks selected otherwise-reachable remote, preserves API/DNS; original full steering restored.'
+  record m8-no-endpoint passed 'Inner-only service was unavailable after endpoint withdrawal; cluster paths survived and full tunnel recovered. Ordinary-leak prevention is NOT proven by this check.'
 }
 
 m8_fake_payload() {

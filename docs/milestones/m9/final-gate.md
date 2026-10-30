@@ -20,31 +20,52 @@ created. The checked-in chart intentionally remains `0.0.0-dev` / `dev`.
   live matrix returned exit 4 (`SKIPPED_MISSING_LIVE_PROFILE`, incomplete),
   with no provider Secret, token, external request or live VPN tunnel created.
   **This is a skip, not a pass.** Never print or copy live inputs into evidence.
-- The guarded fake flannel/no-mesh/init/iproute subset was executed at the
-  final gate and **FAILED**, not passed. The first attempt encountered a
-  kube-proxy Service VIP convergence race during baseline startup; `32f660e`
-  added a bounded 45-second wait, after which baseline, gateway readiness,
-  client programming, cluster-path preservation, measured MTU and private
-  health metric checks passed. The steered HTTP echo to fake upstream
-  `198.19.0.1:8080` then timed out. The matrix exited 1 and safely deleted
-  its ephemeral namespace; other 95 cells per mode were not executed.
+- The first guarded fake flannel/no-mesh/init/iproute subset **FAILED**. A
+  bounded kube-proxy VIP convergence wait (`32f660e`) resolved baseline timing;
+  the steered HTTP echo still timed out. Header-only capture and kernel
+  `skb:kfree_skb` trace showed return GENEVE packets left the gateway pod with
+  outer TTL **zero**; forwarding discarded them. `a6a1c4d` explicitly sets
+  LWT GENEVE return TTL 64. With the rebuilt/imported gateway image, the
+  direct-config M1 fake suite **PASSED**: cluster-path preservation, fake
+  tunneled echo, upstream fail-close and recovery. The extended fake matrix
+  then passed baseline, gateway readiness, client programming, MTU, private
+  metric, tunneled echo and **4.5 MiB payload integrity**, but **FAILED** at
+  selective CIDR/TCP-port policy. Thus the full matrix remains failed.
+- The original selective fixture selected the remote PodIP, which is also the
+  IPIP outer peer. That SYN-ACK reaches client `rtk0` but is discarded under
+  reverse-path validation. The fixture was corrected to keep pod-CIDR
+  exclusions and select the distinct IPIP *inner* HTTP address
+  `198.19.0.1/32`. The corrected selector still **FAILED** on selected TCP
+  return, exposing a separate production constraint detailed below. Wrong-port,
+  wrong-CIDR and exclude negatives use tunnel TX counters plus direct PodIP
+  probes rather than claiming the inner-only address is ordinarily reachable.
 
-## Evidence and unresolved root cause
+## Evidence and current hard blocker
 
-Disposable k3d diagnostics (no credentials, no raw application payload stored)
-showed client `rtk0` transmit packets but zero receive packets. Gateway `gnv0`
-received GENEVE from the client's PodIP; its source/VNI flower allowed selected
-packets. The gateway's nft forward accepted requests from `gnv0` to `upstream0`
-and established replies from `upstream0` toward `gnv0`, with default-drop count
-zero. Gateway `gnv0` TX-drop counter increased; a header-only node capture saw
-a return GENEVE UDP packet on the gateway pod veth and node `cni0`, but no
-return GENEVE packet at the client node capture point. The return's UDP source
-port differs from the request's source port by normal GENEVE behavior; this
-alone does not prove a conntrack drop. Node route and flannel neighbor were
-present. **The exact loss point is not proven.** A three-namespace cross-subnet
-TCP/UDP regression test (`b8553e1`) passes with gateway forwarding/SNAT and
-return encapsulation; it does not resolve the k3d failure. No speculative
-production route/firewall relaxation was applied.
+The original cross-node loss was diagnosed, not merely worked around. The
+kernel drop trace identified `SKB_DROP_REASON_IP_INHDR` in `ip_forward` for
+`gatewayPodIP → clientPodIP` with TTL=0. An isolated regression test had passed
+because it did not include a forwarding hop between the gateway and client.
+The return LWT tunnel now sets TTL=64, with attribute and privileged regression
+checks. A full-tunnel fake request and 4.5 MiB payload traversed flannel k3d
+after rebuilding the gateway image.
+
+**Selective port-qualified return remains blocked.** In a three-namespace
+reproduction, outbound nft route/output marks a TCP request for the gateway;
+its SYN-ACK returns unmarked on `rtk0`. With the default `src_valid_mark=0`,
+the client's loose `rp_filter=2` reverse FIB lookup follows the ordinary CNI
+route through `eth0` and discards that SYN-ACK before TCP can ACK. Marking
+incoming `rtk0` packets and setting `src_valid_mark=1` made an isolated test
+pass *without disabling rp_filter*, but a production init Pod has read-only
+`/proc/sys` even with NET_ADMIN: trying to set `src_valid_mark` failed with
+`read-only file system` and blocked **all** client programming. That attempted
+change (`e698c2b`) was reverted (`2fcb8fe`), and the rebuilt NET_ADMIN-only
+client image restored the direct full-tunnel fake pass. An `iif rtk0` RPDB
+rule did not rescue reverse lookup; a broad unmarked destination rule did,
+but improperly steered all ports, violating selective policy. No SYS_ADMIN,
+privileged init, global rp_filter disable, broad routing rule or host sysctl
+workaround was introduced. A reviewed alternative architecture/runtime
+permission model is needed; **M8 selective traffic still fails**.
 
 The current M8 matrix still implements only two direct-config flannel subsets;
 Cilium, Cilium-WireGuard, Calico, mesh, admission/CRD, restricted agent,
@@ -57,9 +78,11 @@ are prerequisites before live acceptance.
 
 ## Release blockers / next gate
 
-1. Identify and fix the flannel cross-node GENEVE return loss without weakening
-   fail-close, then rerun the fake traffic subset and verify packet-level echo,
-   payload, policy, loss/recovery, DNS/metadata and both datapaths.
+1. Resolve selective port-qualified return with a verified fail-closed design
+   that operates in restricted init Pods without weakening reverse-path
+   validation; rerun the extended fake subset, policy/metadata/DNS and both
+   datapaths. The basic full-tunnel return TTL problem is fixed and its direct
+   fake suite passed, but it does not imply selective or HA acceptance.
 2. Implement and run the missing CNI/mesh/agent/WireGuard/HA compatibility
    scenarios under the existing mandatory resource preflight. Skipped cells
    must never be represented as passed.

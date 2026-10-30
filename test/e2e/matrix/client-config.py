@@ -12,13 +12,16 @@ def build(config, remote_ip, pod_cidr, mode):
     if mode not in MODES:
         raise ValueError("unknown static selector scenario")
     cfg = json.loads(json.dumps(config))
-    remote = ipaddress.IPv4Network(remote_ip + "/32")
+    remote = ipaddress.IPv4Address(remote_ip)
     pods = ipaddress.IPv4Network(pod_cidr)
-    if not remote.subnet_of(pods) or str(pods) not in cfg["exclusions"]:
-        raise ValueError("remote must be inside an explicitly excluded pod CIDR")
-    cfg["exclusions"] = [p for p in cfg["exclusions"] if p != str(pods)]
-    cfg["exclusions"] += [str(p) for p in pods.address_exclude(remote)]
-    target = str(remote) if mode != "wrong-cidr" else "198.19.0.1/32"
+    if remote not in pods or str(pods) not in cfg["exclusions"]:
+        raise ValueError("outer fake peer must remain inside an excluded pod CIDR")
+    # The fake remote's PodIP is also the IPIP OUTER peer. Steering its own
+    # PodIP through IPIP produces asymmetric replies rejected by rp_filter.
+    # Exercise the distinct, actually reachable inner service instead and
+    # retain all cluster PodIP exclusions; never disable source validation.
+    inner = "198.19.0.1/32"
+    target = str(ipaddress.IPv4Network(str(remote) + "/32")) if mode == "wrong-cidr" else inner
     port = 8081 if mode == "wrong-port" else 8080
     cfg["policy"] = {"mode": "exclude" if mode == "exclude" else "include",
                      "rules": [{"cidrs": [target], "ports": [{"protocol": "TCP", "port": port}]}]}
