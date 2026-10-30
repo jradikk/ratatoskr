@@ -68,6 +68,10 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 	}
 	return InNamespace(target, func() error {
 		if !remove {
+			if err := guardWorkload(); err != nil {
+				return err
+			}
+
 			// Re-read the carrier immediately before ApplyClient; changing it
 			// after pre-registration requires a fresh reconciliation.
 			computed := *cfg
@@ -121,6 +125,11 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 			}
 		}
 		if err := backend.ApplyClient(ctx, *cfg); err != nil {
+			return err
+		}
+		// Recheck after programming: an IPv6 address may have arrived while
+		// ApplyClient was running. Never publish an UP readiness marker for it.
+		if err := guardWorkload(); err != nil {
 			return err
 		}
 		link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: Marker}}
@@ -232,8 +241,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	defer target.Close()
 	gatewayMTU := cfg.MTU
 	if !removing {
-		if err = InNamespace(target, func() error { return completeClientMTU(&cfg) }); err != nil {
-			return err
+		// Install the namespace-wide IPv6 guard before registration or
+		// steering. Inspect on every resync, including marker/hash adoption.
+		if err = InNamespace(target, func() error {
+			if e := guardWorkload(); e != nil {
+				return e
+			}
+			return completeClientMTU(&cfg)
+		}); err != nil {
+			return errors.Join(err, r.setPodError(ctx, pod))
 		}
 	}
 	if !removing && cfg.Encryption == "wireguard" && mode == "ebpf" {
@@ -287,6 +303,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		}
 	}
 	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
+		if errors.Is(err, errUnsupportedIPv6) {
+			return errors.Join(err, r.setPodError(ctx, pod))
+		}
 		return err
 	}
 	if removing {
