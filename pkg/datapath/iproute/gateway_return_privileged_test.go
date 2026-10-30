@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -318,84 +316,6 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 		t.Fatalf("unexpected TCP payload %q", buf[:n])
 	}
 	if err := <-serverDone; err != nil {
-		t.Fatal(err)
-	}
-	// Reapply with a port-qualified include, preserving loose rp_filter.
-	if err := netns.Set(clientNS); err != nil {
-		t.Fatal(err)
-	}
-	selected := cc
-	selected.Policy = datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("198.19.0.1/32")}, Ports: []datapath.Port{{Protocol: "TCP", Port: 8080}}}}}
-	if err := cl.ApplyClient(context.Background(), selected); err != nil {
-		t.Fatal(err)
-	}
-	clEth, err = cl.h.LinkByName("eth0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cl.h.RouteAdd(&netlink.Route{Dst: prefix(netip.MustParsePrefix("0.0.0.0/0")), LinkIndex: clEth.Attrs().Index}); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"all", datapath.ClientDevice} {
-		data, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + name + "/rp_filter")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.TrimSpace(string(data)) != "2" {
-			t.Fatalf("%s reverse path filtering was disabled", name)
-		}
-	}
-	if err := netns.Set(upstreamNS); err != nil {
-		t.Fatal(err)
-	}
-	selectedListener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("198.19.0.1"), Port: 8080})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer selectedListener.Close()
-	selectedDone := make(chan error, 1)
-	go func() {
-		conn, err := selectedListener.AcceptTCP()
-		if err != nil {
-			selectedDone <- err
-			return
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		data := make([]byte, 64)
-		n, err := conn.Read(data)
-		if err != nil {
-			selectedDone <- err
-			return
-		}
-		if string(data[:n]) != "selected" {
-			selectedDone <- fmt.Errorf("selected request %q", data[:n])
-			return
-		}
-		_, err = conn.Write([]byte("selected-response"))
-		selectedDone <- err
-	}()
-	if err := netns.Set(clientNS); err != nil {
-		t.Fatal(err)
-	}
-	streamSelected, err := net.DialTimeout("tcp4", "198.19.0.1:8080", 2*time.Second)
-	if err != nil {
-		showGatewayCounters(t, gw, gwNS)
-		t.Fatalf("selected TCP/8080 response blocked with rp_filter enabled: %v", err)
-	}
-	defer streamSelected.Close()
-	_ = streamSelected.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := streamSelected.Write([]byte("selected")); err != nil {
-		t.Fatal(err)
-	}
-	n, err = streamSelected.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "selected-response" {
-		t.Fatalf("selected response %q", buf[:n])
-	}
-	if err := <-selectedDone; err != nil {
 		t.Fatal(err)
 	}
 }

@@ -156,17 +156,6 @@ func (b *Backend) clientFirewall(c datapath.ClientConfig) error {
 	if c.Endpoint.IsValid() {
 		conn.AddRule(&nftables.Rule{Table: t, Chain: mss, Exprs: append(matchIface(expr.MetaKeyOIFNAME, datapath.ClientDevice), mssExprs(c.MTU-40)...)})
 	}
-	// Reverse-path validation of a reply from a selectively steered public
-	// destination needs to consult the same marked client route as the
-	// outbound packet. Mark only traffic that actually arrived on rtk0,
-	// preserving all unrelated CNI/mesh bits. The ingress mark is consumed by
-	// the kernel's source-validation FIB lookup (src_valid_mark=1), not DNAT.
-	prerouting := conn.AddChain(&nftables.Chain{Name: "reverse_mark", Table: t, Type: nftables.ChainTypeFilter, Hooknum: nftables.ChainHookPrerouting, Priority: nftables.ChainPriorityMangle})
-	x := append(matchIface(expr.MetaKeyIIFNAME, datapath.ClientDevice),
-		&expr.Meta{Key: expr.MetaKeyMARK, Register: 1},
-		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: native32(^datapath.MarkMask), Xor: native32(steeringMark)},
-		&expr.Meta{Key: expr.MetaKeyMARK, SourceRegister: true, Register: 1})
-	conn.AddRule(&nftables.Rule{Table: t, Chain: prerouting, Exprs: x})
 	// Postrouting sees the final tunnel OIF after route/output has rerouted.
 	// IPv4 route chains belong to the IP family (not the INet MSS table).
 	tables, err := conn.ListTables()
@@ -433,12 +422,6 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 		return err
 	}
 	if err := sysctl("conf/"+datapath.ClientDevice+"/rp_filter", 2); err != nil {
-		return err
-	}
-	// Include packet marks in reverse FIB lookup only on the GENEVE ingress
-	// device. The effective kernel setting is max(all,interface); enabling
-	// this interface avoids globally changing validation on eth0/CNI devices.
-	if err := sysctl("conf/"+datapath.ClientDevice+"/src_valid_mark", 1); err != nil {
 		return err
 	}
 	if err := b.h.LinkSetUp(link); err != nil {
