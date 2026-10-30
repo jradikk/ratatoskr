@@ -68,7 +68,14 @@ def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic
                 else:
                     phase_detail = "init-not-started"
                 if current.get("phase") == "Failed":
-                    phase_detail = "pod-failed"
+                    app_statuses = [s for s in current.get("containerStatuses", [])
+                                    if s.get("name") == "client"]
+                    init_exit = (init_statuses[0].get("state", {}).get("terminated", {}).get("exitCode")
+                                 if init_statuses else None)
+                    app_exit = (app_statuses[0].get("state", {}).get("terminated", {}).get("exitCode")
+                                if app_statuses else None)
+                    phase_detail = ("init-failed" if init_exit not in (None, 0) else
+                                    "app-failed" if app_exit not in (None, 0) else "pod-failed-unknown")
                 raise Blocked("Init selected Pod status not converged.")
             stage = "init-evidence"
             init_evidence.assert_init_pod(pod, namespace=apps, name="synthetic-probe-healthy", uid=uid,
