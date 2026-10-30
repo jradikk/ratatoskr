@@ -14,7 +14,7 @@ import sys
 import time
 
 STATUS = Path("/run/synthetic/openvpn.status")
-CN = "synthetic-client"
+CNS = ("synthetic-client", "synthetic-witness")
 MAX_SIZE = 16 * 1024
 HEADER = ("Common Name", "Real Address", "Virtual Address", "Virtual IPv6 Address",
           "Bytes Received", "Bytes Sent", "Connected Since", "Connected Since (time_t)",
@@ -36,37 +36,41 @@ def parse(raw):
             raise Invalid()
         header = [line.split("\t") for line in lines if line.startswith("HEADER\tCLIENT_LIST\t")]
         clients = [line.split("\t") for line in lines if line.startswith("CLIENT_LIST\t")]
-        if (len(header) != 1 or tuple(header[0][2:]) != HEADER or len(clients) != 1 or
+        if (len(header) != 1 or tuple(header[0][2:]) != HEADER or len(clients) not in (1, 2) or
                 not lines[0].startswith("TITLE\t") or lines[-1] != "END" or
                 any(line.startswith(("ERROR", "WARNING")) for line in lines)):
             raise Invalid()
-        row = clients[0]
-        if (len(row) != 1 + len(HEADER) or row[1] != CN or row[4] != "" or
-                row[9] != "UNDEF" or row[12] not in CIPHERS or
-                not (row[10] == "" or row[10].isascii() and row[10].isdecimal() and len(row[10]) <= 10)):
-            # OpenVPN 2.6 writes UNDEF when no username is authenticated.
-            # Client ID is empty without management support, decimal otherwise;
-            # neither field is emitted by this sanitized reader.
-            raise Invalid()
-        address = ipaddress.ip_address(row[3])
-        if (address.version != 4 or address not in ipaddress.ip_network("10.88.0.0/24") or
-                address == ipaddress.ip_address("10.88.0.1")):
-            raise Invalid()
-        received, sent, connected, peer = (int(row[5]), int(row[6]), int(row[8]), int(row[11]))
         timestamps = [line.split("\t") for line in lines if line.startswith("TIME\t")]
         if len(timestamps) != 1 or len(timestamps[0]) != 3:
             raise Invalid()
-        updated = int(timestamps[0][2])
-        now = int(time.time())
-        if (min(received, sent, connected, peer) < 0 or max(received, sent) > 2**64 - 1 or
-                connected == 0 or updated < connected or now - updated > 8 or updated > now + 2 or
-                not any(line == "END" for line in lines)):
+        updated, now = int(timestamps[0][2]), int(time.time())
+        if now - updated > 8 or updated > now + 2:
             raise Invalid()
-        # Fixed-key and fixed-identity JSON. Never return raw CN/address from
-        # the input; no credential or accidental OpenVPN field crosses exec.
-        return {"cn": CN, "virtualIPv4": str(address), "received": received,
-                "sent": sent, "connected": connected, "peer": peer,
-                "cipher": row[12]}
+        found = {}
+        used_addresses = set()
+        for client in clients:
+            row = client
+            if (len(row) != 1 + len(HEADER) or row[1] not in CNS or row[1] in found or
+                    row[4] != "" or row[9] != "UNDEF" or row[12] not in CIPHERS or
+                    not (row[10] == "" or row[10].isascii() and row[10].isdecimal() and len(row[10]) <= 10)):
+                raise Invalid()
+            address = ipaddress.ip_address(row[3])
+            if (address.version != 4 or address not in ipaddress.ip_network("10.88.0.0/24") or
+                    address == ipaddress.ip_address("10.88.0.1") or address in used_addresses):
+                raise Invalid()
+            used_addresses.add(address)
+            received, sent, connected, peer = (int(row[5]), int(row[6]), int(row[8]), int(row[11]))
+            if (min(received, sent, connected, peer) < 0 or max(received, sent) > 2**64 - 1 or
+                    connected == 0 or updated < connected):
+                raise Invalid()
+            # Fixed-key/known-CN sanitized JSON. Real addresses, usernames,
+            # Client ID, profiles, and credentials NEVER cross exec.
+            found[row[1]] = {"cn": row[1], "virtualIPv4": str(address),
+                             "received": received, "sent": sent, "connected": connected,
+                             "peer": peer, "cipher": row[12]}
+        if "synthetic-client" not in found or not any(line == "END" for line in lines):
+            raise Invalid()
+        return {"sessions": [found[cn] for cn in CNS if cn in found]}
     except (UnicodeError, ValueError, IndexError, TypeError, OverflowError):
         raise Invalid() from None
 

@@ -23,7 +23,9 @@ def server_config():
             "status /run/synthetic/openvpn.status 1\nstatus-version 3\n")
 
 
-def client_config(remote, ca, cert, key):
+def client_config(remote, ca, cert, key, *, role="client"):
+    if role not in ("client", "witness"):
+        raise ValueError("invalid synthetic VPN identity")
     # Only caller-chosen Kubernetes Service DNS is interpolated; no arbitrary
     # OpenVPN options, routes or executable scripts enter this profile.
     labels = remote.split(".")
@@ -52,7 +54,7 @@ def generate_pki(folder, deadline=None):
     # Ephemeral 2048-bit RSA keys; serial database and config stay private.
     run("req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1",
         "-subj", "/CN=synthetic-ca", "-keyout", "ca.key", "-out", "ca.crt")
-    for role, eku in (("server", "serverAuth"), ("client", "clientAuth")):
+    for role, eku in (("server", "serverAuth"), ("client", "clientAuth"), ("witness", "clientAuth")):
         run("req", "-newkey", "rsa:2048", "-sha256", "-nodes", "-subj",
             f"/CN=synthetic-{role}", "-keyout", f"{role}.key", "-out", f"{role}.csr")
         ext = folder / f"{role}.ext"
@@ -68,12 +70,16 @@ def secret(namespace, name, data):
             "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
 
 
-def manifests(namespace, image, contents, token):
+def manifests(namespace, image, contents, token, witness_image="ratatoskr-synthetic-witness:local"):
+    if witness_image != "ratatoskr-synthetic-witness:local":
+        raise ValueError("witness image must be locally built fixture")
     if (not isinstance(token, str) or len(token) != 32 or
             any(c not in "0123456789abcdef" for c in token) or
             namespace != "rtk-syn-" + token[:16]):
         raise ValueError("matching owned lifecycle namespace/token required")
-    ca, server_cert, server_key, client_cert, client_key = contents
+    if len(contents) != 7:
+        raise ValueError("distinct client and witness PKI required")
+    ca, server_cert, server_key, client_cert, client_key, witness_cert, witness_key = contents
     apps = namespace + "-apps"
     remote = f"synthetic-vpn.{namespace}.svc.cluster.local"
     return [
@@ -84,6 +90,7 @@ def manifests(namespace, image, contents, token):
         secret(namespace, "synthetic-server", {"ca.crt": ca, "server.crt": server_cert,
                "server.key": server_key, "server.conf": server_config()}),
         secret(namespace, "synthetic-client", {"client.ovpn": client_config(remote, ca, client_cert, client_key)}),
+        secret(namespace, "synthetic-witness", {"client.ovpn": client_config(remote, ca, witness_cert, witness_key, role="witness")}),
         # Non-secret, operator-owned probe-only switch; no HTTP control surface.
         {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "synthetic-exit-health",
             "namespace": namespace, "labels": {"ratatoskr.skaldhall.io/synthetic-lifecycle": token}},
@@ -101,6 +108,19 @@ def manifests(namespace, image, contents, token):
                         {"name": "status", "emptyDir": {"medium": "Memory"}},
                         {"name": "exit-health", "configMap": {"name": "synthetic-exit-health",
                             "items": [{"key": "exit-enabled", "path": "exit-enabled"}]}}]}},
+        # Independent witness: no gateway labels/policy, its own cert and TUN.
+        # Probe only through tunnel; no host mounts, SA token or log credentials.
+        {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "synthetic-witness", "namespace": namespace,
+            "labels": {"app": "synthetic-witness"}}, "spec": {"automountServiceAccountToken": False,
+            "restartPolicy": "Never", "containers": [{"name": "witness", "image": witness_image,
+                "imagePullPolicy": "Never", "securityContext": {"runAsUser": 0,
+                    "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}},
+                "volumeMounts": [{"name": "witness-pki", "mountPath": "/etc/synthetic", "readOnly": True},
+                                 {"name": "dev-net", "mountPath": "/dev/net"},
+                                 {"name": "run", "mountPath": "/run/witness"}]}],
+            "volumes": [{"name": "witness-pki", "secret": {"secretName": "synthetic-witness", "defaultMode": 256}},
+                        {"name": "dev-net", "emptyDir": {}},
+                        {"name": "run", "emptyDir": {"medium": "Memory"}}]}},
         {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "synthetic-vpn", "namespace": namespace},
             "spec": {"selector": {"app": "synthetic-vpn"}, "ports": [{"port": 1194, "protocol": "UDP", "targetPort": 1194}]}},
         {"apiVersion": "ratatoskr.skaldhall.io/v1alpha1", "kind": "EgressGateway",

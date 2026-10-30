@@ -32,10 +32,21 @@ def status(*, common_name="synthetic-client", received="1024", sent="2048", user
 class SessionTests(unittest.TestCase):
     def test_only_exact_session_identity_and_counters_returned(self):
         value = session.parse(status())
-        self.assertEqual(value, {"cn": "synthetic-client", "virtualIPv4": "10.88.0.2",
-                                 "received": 1024, "sent": 2048, "connected": value["connected"],
-                                 "peer": 7, "cipher": "AES-256-GCM"})
+        self.assertEqual(value, {"sessions": [{"cn": "synthetic-client", "virtualIPv4": "10.88.0.2",
+                                 "received": 1024, "sent": 2048, "connected": value["sessions"][0]["connected"],
+                                 "peer": 7, "cipher": "AES-256-GCM"}]})
         self.assertNotIn("10.42.1.2", json.dumps(value))
+        row = status(common_name="synthetic-witness").decode().split("\nCLIENT_LIST\t", 1)[1].split("\n", 1)[0]
+        witness = "CLIENT_LIST\t" + row.replace("10.88.0.2", "10.88.0.3").replace("\t7\t", "\t8\t")
+        combined = status(more=witness + "\n")
+        result = session.parse(combined)
+        self.assertEqual([v["cn"] for v in result["sessions"]], ["synthetic-client", "synthetic-witness"])
+        self.assertNotIn("10.42.1.2", json.dumps(result))
+        for invalid in (witness.replace("synthetic-witness", "intruder"),
+                        witness.replace("synthetic-witness", "synthetic-client"),
+                        witness.replace("10.88.0.3", "10.88.0.2")):
+            with self.assertRaises(session.Invalid):
+                session.parse(status(more=invalid + "\n"))
         self.assertEqual(session.parse(status(client_id="42")), value)
 
     def test_zero_wrong_cn_duplicate_stale_or_tampered_denied(self):
@@ -62,7 +73,7 @@ class SessionTests(unittest.TestCase):
             path = Path(temp) / "status"
             path.write_bytes(status())
             path.chmod(0o600)
-            self.assertEqual(session.read_status(path)["cn"], session.CN)
+            self.assertEqual(session.read_status(path)["sessions"][0]["cn"], session.CNS[0])
             path.chmod(0o644)
             with self.assertRaises(session.Invalid):
                 session.read_status(path)
@@ -84,7 +95,8 @@ class SessionTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(session.main(), 0)
             data = json.loads(out.getvalue())
-            self.assertEqual(set(data), {"cn", "virtualIPv4", "received", "sent", "connected", "peer", "cipher"})
+            self.assertEqual(set(data), {"sessions"})
+            self.assertEqual([s["cn"] for s in data["sessions"]], ["synthetic-client"])
 
 
 if __name__ == "__main__":

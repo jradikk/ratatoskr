@@ -110,7 +110,8 @@ class CollectorTests(unittest.TestCase):
             def server_session(self, namespace, uid, *, expected_image_id):
                 assert namespace == self.owner.names[0] and uid == "e" * 32
                 assert expected_image_id == EXPECTED
-                return self.sessions.pop(0)
+                value = self.sessions.pop(0)
+                return {"sessions": value if isinstance(value, list) else [value]}
         server_api = ServerAPI(collector.owner)
         collector.api = server_api
         def configure(sessions):
@@ -136,6 +137,64 @@ class CollectorTests(unittest.TestCase):
         configure([original, dict(original, received=101), later])
         with self.assertRaises(mod.evidence.EvidenceError):
             collector.session_traffic("e" * 32, UID, 7, "10.42.1.7")
+
+    def test_independent_witness_uid_image_and_distinct_status_contract(self):
+        from datetime import datetime, timedelta, timezone
+        collector, api = fixture()
+        start = datetime.now(timezone.utc) - timedelta(seconds=20)
+        started = (start + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+        finished = (start + timedelta(seconds=16)).isoformat().replace("+00:00", "Z")
+        image = EXPECTED
+        witness = {"metadata": {"name": "synthetic-witness", "namespace": collector.owner.names[0], "uid": "f" * 32},
+                   "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False},
+                   "status": {"phase": "Succeeded", "containerStatuses": [{"name": "witness", "imageID": image,
+                     "state": {"terminated": {"exitCode": 0, "startedAt": started, "finishedAt": finished}}}]}}
+        class WitnessAPI(FakeClient):
+            def get(self, kind, name, namespace):
+                assert kind == "pod" and name == "synthetic-witness" and namespace == self.owner.names[0]
+                return self.pod
+            def server_session(self, namespace, uid, *, expected_image_id):
+                return {"sessions": self.sessions}
+        wapi = WitnessAPI(collector.owner)
+        collector.api = wapi
+        running = json.loads(json.dumps(witness))
+        running["status"]["phase"] = "Running"
+        running["status"]["containerStatuses"][0]["state"] = {"running": {"startedAt": started}}
+        wapi.pod = running
+        primary = {"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 10,
+                   "sent": 20, "connected": 100, "peer": 7, "cipher": "AES-256-GCM"}
+        second = dict(primary, cn="synthetic-witness", virtualIPv4="10.88.0.3", peer=8,
+                      connected=int((start + timedelta(seconds=3)).timestamp()))
+        wapi.sessions = [primary, second]
+        observed = collector.witness_session("e" * 32, "f" * 32, image, start)
+        wapi.pod = witness
+        self.assertEqual(observed["cn"], "synthetic-witness")
+        self.assertEqual(collector.witness_status("f" * 32, image, start, observed),
+                         {"witnessSucceededDuringOutage": True, "distinctSession": True})
+        for bad in ([primary], [primary, dict(second, cn="synthetic-client")],
+                    [primary, dict(second, virtualIPv4="10.88.0.2")]):
+            wapi.sessions = bad
+            with self.assertRaises(mod.Incomplete):
+                wapi.pod = running
+                collector.witness_session("e" * 32, "f" * 32, image, start)
+        wapi.sessions = [primary, second]
+        wapi.pod = witness
+        for tamper in (lambda: witness["status"].update(phase="Failed"),
+                       lambda: witness["status"]["containerStatuses"][0]["state"]["terminated"].update(exitCode=1),
+                       lambda: witness["status"]["containerStatuses"][0].update(imageID="wrong")):
+            import copy
+            wapi.pod = copy.deepcopy(witness)
+            witness = wapi.pod
+            tamper()
+            with self.assertRaises(mod.Incomplete):
+                collector.witness_status("f" * 32, image, start, observed)
+            witness = {"metadata": {"name": "synthetic-witness", "namespace": collector.owner.names[0], "uid": "f" * 32},
+                       "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False},
+                       "status": {"phase": "Succeeded", "containerStatuses": [{"name": "witness", "imageID": image,
+                           "state": {"terminated": {"exitCode": 0, "startedAt": started, "finishedAt": finished}}}]}}
+        wapi.pod = witness
+        with self.assertRaises(mod.Incomplete):
+            collector.witness_status("f" * 32, image, start + timedelta(minutes=1), observed)
 
     def test_counter_background_traffic_wrong_link_or_false_marker_denied(self):
         for before, baseline, after in ((100, 101, 120), (100, 100, 100), (100, 100, 90)):

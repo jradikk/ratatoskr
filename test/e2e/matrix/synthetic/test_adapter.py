@@ -49,8 +49,8 @@ class FakeTransport:
             return json.dumps(obj).encode()
         if "exec" in argv:
             if a.SERVER_COMMAND[1] in argv:
-                return json.dumps({"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 22,
-                                   "sent": 33, "connected": 100, "peer": 7, "cipher": "AES-256-GCM"}).encode()
+                return json.dumps({"sessions": [{"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 22,
+                                   "sent": 33, "connected": 100, "peer": 7, "cipher": "AES-256-GCM"}]}).encode()
             return b"safe-result\n"
         return b"pod/synthetic-client\n"
 
@@ -178,7 +178,8 @@ class AdapterTests(unittest.TestCase):
         adapter, fake = make()
         ns = adapter.owner.names[0]
         data = adapter.server_session(ns, POD_UID, expected_image_id=IMAGE)
-        self.assertEqual((data["cn"], data["received"], data["sent"]), ("synthetic-client", 22, 33))
+        self.assertEqual((data["sessions"][0]["cn"], data["sessions"][0]["received"],
+                          data["sessions"][0]["sent"]), ("synthetic-client", 22, 33))
         argv = next(call[0] for call in fake.calls if a.SERVER_COMMAND[1] in call[0])
         self.assertEqual(argv[-len(a.SERVER_COMMAND):], list(a.SERVER_COMMAND))
         self.assertNotIn("cat", argv)

@@ -15,12 +15,14 @@ original = subprocess.run
 subprocess.run = lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no subprocess in static test"))
 try:
     spec.loader.exec_module(module)
-    sample = ("CA_PUBLIC", "SERVER_PUBLIC", "SERVER_PRIVATE", "CLIENT_PUBLIC", "CLIENT_PRIVATE")
+    sample = ("CA_PUBLIC", "SERVER_PUBLIC", "SERVER_PRIVATE", "CLIENT_PUBLIC", "CLIENT_PRIVATE",
+              "WITNESS_PUBLIC", "WITNESS_PRIVATE")
     namespace = "rtk-syn-" + "a" * 16
     objects = module.manifests(namespace, "ratatoskr-synthetic-openvpn:local", sample, "a" * 32)
-    assert len(objects) == 10
+    assert len(objects) == 12
     assert [(o["kind"], o["metadata"]["namespace"]) for o in objects if "namespace" in o["metadata"]] == [
-        ("Secret", namespace), ("Secret", namespace), ("ConfigMap", namespace), ("Pod", namespace), ("Service", namespace),
+        ("Secret", namespace), ("Secret", namespace), ("Secret", namespace), ("ConfigMap", namespace),
+        ("Pod", namespace), ("Pod", namespace), ("Service", namespace),
         ("EgressGateway", namespace), ("EgressPolicy", namespace + "-apps"),
         ("Pod", namespace + "-apps")]
     server, client = objects[2:4]
@@ -28,6 +30,10 @@ try:
     decode = lambda value: base64.b64decode(value).decode()
     assert "SERVER_PRIVATE" in decode(server["data"]["server.key"])
     profile = decode(client["data"]["client.ovpn"])
+    witness_profile = decode(objects[4]["data"]["client.ovpn"])
+    assert "WITNESS_PRIVATE" in witness_profile and "CLIENT_PRIVATE" not in witness_profile
+    assert "CLIENT_PRIVATE" in profile and "WITNESS_PRIVATE" not in profile
+    assert "synthetic-witness" == objects[4]["metadata"]["name"]
     assert "CLIENT_PRIVATE" in profile and "SERVER_PRIVATE" not in profile
     assert f"remote synthetic-vpn.{namespace}.svc.cluster.local 1194" in profile
     for malformed in ("synthetic-vpn.ratatoskr-syn-static.svc.cluster.local.evil",
@@ -53,12 +59,21 @@ try:
                    for v in workload["spec"]["volumes"])
     assert workload["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]}
     assert not workload["spec"].get("initContainers")  # Production webhook must inject the wait-init.
-    health = objects[4]
+    health = objects[5]
     assert health["data"] == {"exit-enabled": "true"}
     assert health["metadata"]["labels"] == {"ratatoskr.skaldhall.io/synthetic-lifecycle": "a" * 32}
-    assert objects[8]["spec"]["gatewayRef"]["namespace"] == namespace
-    assert objects[7]["spec"]["upstream"]["secretRef"]["name"] == client["metadata"]["name"]
-    server_pod = objects[5]
+    assert objects[10]["spec"]["gatewayRef"]["namespace"] == namespace
+    assert objects[9]["spec"]["upstream"]["secretRef"]["name"] == client["metadata"]["name"]
+    server_pod = objects[6]
+    witness = objects[7]
+    assert witness["spec"]["automountServiceAccountToken"] is False
+    assert witness["spec"]["containers"][0]["securityContext"]["capabilities"] == {
+        "drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}
+    assert witness["spec"]["containers"][0]["imagePullPolicy"] == "Never"
+    assert witness["spec"]["volumes"][0]["secret"]["secretName"] == "synthetic-witness"
+    assert not any("hostPath" in volume for volume in witness["spec"]["volumes"])
+    assert not any("ratatoskr.skaldhall.io/gateway" in key for key in witness["metadata"]["labels"])
+
     assert server_pod["spec"]["containers"][0]["imagePullPolicy"] == "Never"
     assert server_pod["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}
     assert server_pod["spec"]["volumes"][1] == {"name": "dev-net", "emptyDir": {}}

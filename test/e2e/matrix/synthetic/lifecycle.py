@@ -215,7 +215,7 @@ class Lifecycle:
                 spec.loader.exec_module(module)
                 generator = module.generate_pki
             generator(self.private_dir, deadline=self.deadline)
-            for name in ("ca.key", "server.key", "client.key"):
+            for name in ("ca.key", "server.key", "client.key", "witness.key"):
                 key = self.private_dir / name
                 if key.is_symlink() or not key.is_file():
                     raise LifecycleError("Private PKI key is absent or unsafe.")

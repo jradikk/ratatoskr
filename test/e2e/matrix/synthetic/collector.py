@@ -182,8 +182,11 @@ class Collector:
 
     def _session(self, server_uid):
         try:
-            return self.api.server_session(self.owner.names[0], server_uid,
-                                           expected_image_id=self.ids["server"])
+            value = self.api.server_session(self.owner.names[0], server_uid,
+                                            expected_image_id=self.ids["server"])
+            if not isinstance(value, dict) or not isinstance(value.get("sessions"), list):
+                raise Incomplete("Sanitized server session format invalid.")
+            return value["sessions"]
         except adapter.AdapterError:
             raise Incomplete("Authenticated server-side session evidence unavailable.") from None
 
@@ -194,23 +197,26 @@ class Collector:
         OpenVPN status, cert or private key leaves the Pod. This remains local
         evidence, not a final gate PASS (see final_result()).
         """
-        session_before = self._session(server_uid)
-        self._validate_session(session_before)
+        sessions_before = self._session(server_uid)
+        self._validate_sessions(sessions_before)
+        session_before = sessions_before[0]
         before_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
         evidence.need(type(before_link.get("ifindex")) is int and before_link["ifindex"] > 0,
                       "GENEVE device index unavailable.")
         first = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
         baseline = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
         evidence.need(first == baseline, "GENEVE background traffic invalidates marker counter attribution.")
-        session_idle = self._session(server_uid)
-        self._validate_session(session_idle)
+        sessions_idle = self._session(server_uid)
+        self._validate_sessions(sessions_idle)
+        session_idle = sessions_idle[0]
         evidence.need(session_before == session_idle,
                       "Server session changed without selected request; counter attribution unsafe.")
         body = self._exec(client_uid, "vpn-marker")
         after = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
         after_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
-        session_after = self._session(server_uid)
-        self._validate_session(session_after)
+        sessions_after = self._session(server_uid)
+        self._validate_sessions(sessions_after)
+        session_after = sessions_after[0]
         evidence.need(before_link["ifindex"] == after_link.get("ifindex"),
                       "GENEVE device identity changed during selected request.")
         evidence.assert_selected_tunnel(baseline, after, body, after_link, gateway_id, endpoint)
@@ -221,11 +227,24 @@ class Collector:
                       "Authenticated OpenVPN client identity/counters did not advance.")
         return {"geneveBytesIncreased": True, "authenticatedSessionBytesIncreased": True}
 
+    @classmethod
+    def _validate_sessions(cls, values):
+        if (not isinstance(values, list) or len(values) not in (1, 2) or
+                not isinstance(values[0], dict) or values[0].get("cn") != "synthetic-client" or
+                len(values) == 2 and (not isinstance(values[1], dict) or
+                                     values[1].get("cn") != "synthetic-witness")):
+            raise Incomplete("Unexpected OpenVPN session identities.")
+        for value in values:
+            cls._validate_session(value)
+        if len({v["virtualIPv4"] for v in values}) != len(values):
+            raise Incomplete("Duplicated OpenVPN virtual client address.")
+
     @staticmethod
     def _validate_session(value):
         if (not isinstance(value, dict) or
                 set(value) != {"cn", "virtualIPv4", "received", "sent", "connected", "peer", "cipher"} or
-                value.get("cn") != "synthetic-client" or value.get("cipher") not in {"AES-256-GCM", "AES-128-GCM"} or
+                value.get("cn") not in {"synthetic-client", "synthetic-witness"} or
+                value.get("cipher") not in {"AES-256-GCM", "AES-128-GCM"} or
                 any(type(value.get(k)) is not int or value[k] < 0 for k in ("received", "sent", "connected", "peer")) or
                 not isinstance(value.get("virtualIPv4"), str)):
             raise Incomplete("Sanitized authenticated server session identity invalid.")
@@ -235,6 +254,87 @@ class Collector:
                 raise ValueError()
         except ValueError:
             raise Incomplete("Authenticated server virtual IPv4 identity invalid.") from None
+
+    def witness_session(self, server_uid, witness_uid, expected_image_id, outage_started):
+        """Capture a distinct authenticated CN while exact witness Pod runs."""
+        from datetime import datetime, timezone
+        if (not isinstance(outage_started, datetime) or outage_started.tzinfo is None or
+                not isinstance(witness_uid, str) or not lifecycle.UID.fullmatch(witness_uid) or
+                not isinstance(expected_image_id, str) or not re.fullmatch(
+                    r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", expected_image_id)):
+            raise Incomplete("Witness running identity/timing invalid.")
+        pod = self._get("pod", "synthetic-witness", self.owner.names[0])
+        statuses = pod.get("status", {}).get("containerStatuses", [])
+        if (_uid(pod) != witness_uid or pod["metadata"].get("deletionTimestamp") or
+                pod.get("status", {}).get("phase") != "Running" or
+                len(statuses) != 1 or statuses[0].get("name") != "witness" or
+                statuses[0].get("imageID") != expected_image_id or
+                not isinstance(statuses[0].get("state", {}).get("running", {}).get("startedAt"), str)):
+            raise Incomplete("Witness not running with approved Pod UID/image.")
+        try:
+            began = datetime.fromisoformat(statuses[0]["state"]["running"]["startedAt"].replace("Z", "+00:00"))
+        except ValueError:
+            raise Incomplete("Witness running timestamp malformed.") from None
+        if began < outage_started or began > datetime.now(timezone.utc):
+            raise Incomplete("Witness was not started during outage.")
+        sessions = self._session(server_uid)
+        self._validate_sessions(sessions)
+        if len(sessions) != 2 or sessions[1]["cn"] != "synthetic-witness":
+            raise Incomplete("Distinct authenticated witness session absent.")
+        result = {key: sessions[1][key] for key in ("cn", "virtualIPv4", "connected", "peer", "cipher")}
+        if result["connected"] < int(began.timestamp()) - 1:
+            raise Incomplete("Authenticated witness session predates its Pod.")
+        result["podUID"] = witness_uid
+        result["outageStart"] = outage_started.isoformat()
+        return result
+
+    def witness_status(self, witness_uid, expected_image_id, outage_started, observed_session):
+        """One-shot witness succeeds only with prior live authenticated session.
+
+        Caller must capture observed_session during the outage, while witness
+        is Running. That Pod later exits 0 only after repeated exact marker
+        reads through its independent tunnel; no Pod logs are inspected.
+        """
+        from datetime import datetime, timedelta
+        namespace = self.owner.names[0]
+        if not isinstance(outage_started, datetime) or outage_started.tzinfo is None:
+            raise Incomplete("Trusted timezone-aware outage timestamp required.")
+        if not isinstance(expected_image_id, str) or not re.fullmatch(
+                r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", expected_image_id):
+            raise Incomplete("Immutable witness runtime image ID required.")
+        if not isinstance(witness_uid, str) or not lifecycle.UID.fullmatch(witness_uid):
+            raise Incomplete("Witness Pod UID missing or invalid.")
+        pod = self._get("pod", "synthetic-witness", namespace)
+        meta, status = pod["metadata"], pod.get("status", {})
+        if (_uid(pod) != witness_uid or meta.get("deletionTimestamp") or
+                status.get("phase") != "Succeeded" or
+                pod.get("spec", {}).get("restartPolicy") != "Never" or
+                pod.get("spec", {}).get("automountServiceAccountToken") is not False):
+            raise Incomplete("Witness Pod ownership/termination evidence invalid.")
+        cs = status.get("containerStatuses", [])
+        if len(cs) != 1 or cs[0].get("name") != "witness" or cs[0].get("imageID") != expected_image_id:
+            raise Incomplete("Witness runtime image ID mismatch.")
+        terminated = cs[0].get("state", {}).get("terminated", {})
+        start, finish = terminated.get("startedAt"), terminated.get("finishedAt")
+        try:
+            began = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            ended = datetime.fromisoformat(finish.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            raise Incomplete("Witness Pod termination timestamps invalid.") from None
+        if (terminated.get("exitCode") != 0 or began < outage_started or
+                ended < began or ended - began > timedelta(seconds=120) or
+                ended > datetime.now(began.tzinfo) + timedelta(seconds=2)):
+            raise Incomplete("Witness did not complete exact marker during outage.")
+        if (not isinstance(observed_session, dict) or
+                set(observed_session) != {"cn", "virtualIPv4", "connected", "peer", "cipher", "podUID", "outageStart"} or
+                observed_session.get("cn") != "synthetic-witness" or
+                observed_session.get("podUID") != witness_uid or
+                observed_session.get("outageStart") != outage_started.isoformat() or
+                observed_session.get("cipher") not in ("AES-256-GCM", "AES-128-GCM") or
+                type(observed_session.get("connected")) is not int or
+                type(observed_session.get("peer")) is not int):
+            raise Incomplete("Prior authenticated witness session missing or malformed.")
+        return {"witnessSucceededDuringOutage": True, "distinctSession": True}
 
     def selected_traffic(self, client_uid, gateway_id, endpoint):
         """Legacy local-only link test; use session_traffic for server proof."""

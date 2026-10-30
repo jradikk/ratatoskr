@@ -1,5 +1,43 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Independent one-shot OpenVPN marker witness (unexecuted)
+
+`prepare.py` now requires **distinct** client and witness certificates/private
+keys from the same one-day ephemeral CA; the witness CN is
+`synthetic-witness`, not `synthetic-client`. `Lifecycle.generate_pki()` checks
+the added private `witness.key` is mode 0600 under umask 077. The fixture adds
+one witness-only Secret and Pod to the temporary **privileged** server namespace,
+without Ratatoskr gateway labels, host mounts, service-account token, or any
+new host capability. Its separate test-only local image runs fixed Python and
+OpenVPN argv (no shell); it creates a Pod-local TUN and binds every marker
+request explicitly to `tun0` with SO_BINDTODEVICE. It exits 0 only after the
+*exact* tunnel-bound `/marker` body stays reachable over a bounded interval;
+all process output is discarded, and no profiles or private keys are printed.
+A final-gate caller must create this one-shot Pod **after** the probe switch
+has made `/exit` unhealthy and Gateway Ready=False/endpoints withdrawn, while
+the selected restricted client fails its *same* `/marker` request. These
+ordering and outage assertions are **not yet orchestrated**.
+
+The private server status reader now rejects unknown/duplicate CNs, duplicate
+virtual addresses and malformed rows, and emits only sanitized counters and
+identity for at most the two fixed CNs; no real addresses, usernames, status
+text, certs or keys leave its Pod. Collector binds the distinct authenticated
+witness session to the exact Running Pod UID, approved image ID and trusted
+outage start time; the witness briefly keeps its tunnel alive for this bounded
+status read and continues checking the marker. Then require Succeeded/exit 0
+timestamps within the trusted outage interval for the same UID. Successful
+Pod termination means OpenVPN has exited, so the session must be sampled
+*before* completion. Unit tests use fake
+subprocess/socket/API/status only. **No runtime status format, TUN access,
+CA/client handshake or Pod scheduling has been validated against a cluster.**
+`run.py` is still read-only and returns INCOMPLETE; no e2e PASS path exists.
+A future operator must additionally approve the witness runtime image ID;
+existing `run.py` and `collector.py` still accept seven IDs and do **not**
+validate this eighth image at preflight. No execution or coverage is awarded
+until that preflight, Pod timing, exact status-v3 shape and Kubernetes cleanup
+are implemented and verified. The witness container's Pod-local device node
+and `SO_BINDTODEVICE` behavior also require real Linux cluster validation.
+
 ## Probe-only synthetic failure switch (not an executed outage)
 
 The input scaffold now includes a **non-secret** `synthetic-exit-health`

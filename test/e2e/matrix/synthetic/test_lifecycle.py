@@ -183,7 +183,7 @@ class LifecycleTests(unittest.TestCase):
             current = module.os.umask(0o077)
             module.os.umask(current)
             observed.append((folder, deadline, current))
-            for name in ("ca.key", "server.key", "client.key"):
+            for name in ("ca.key", "server.key", "client.key", "witness.key"):
                 (folder / name).write_bytes(b"not-a-real-private-key")
         api = FakeAPI()
         life = module.Lifecycle(api, token_factory=lambda: TOKEN, pki_generator=fake_pki)
@@ -193,12 +193,12 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(observed[0][2], 0o077)
             self.assertEqual(observed[0][1], life.deadline)
             self.assertTrue(all((directory / name).stat().st_mode & 0o777 == 0o600
-                                for name in ("ca.key", "server.key", "client.key")))
+                                for name in ("ca.key", "server.key", "client.key", "witness.key")))
         self.assertFalse(directory.exists())
 
     def test_pki_key_mode_violation_erases_private_dir(self):
         def unsafe(folder, deadline):
-            for name in ("ca.key", "server.key", "client.key"):
+            for name in ("ca.key", "server.key", "client.key", "witness.key"):
                 (folder / name).write_bytes(b"fixture")
             (folder / "server.key").chmod(0o644)
         life = module.Lifecycle(FakeAPI(), token_factory=lambda: TOKEN, pki_generator=unsafe)
