@@ -241,6 +241,35 @@ WireGuard, HA, alternate CNI/mesh, full observability and Linux-5.10/runtime
 coverage remain untested. Live VPN remains **skipped** (profile unset). These
 two direct-config passes do **not** constitute M8/M9 release acceptance.
 
+## October 30, 2026 — bounded existing-release API/admission tier
+
+A separate final-gate API-only scaffold (`05a7b47`) checked **immutable
+expected controller/webhook runtime image IDs** and fully Available
+Deployments before contacting admission. The existing flannel operator
+components were rebuilt/imported and explicitly rolled so reused mutable
+`:dev` tags could not masquerade as current code. Four serial release modes
+(`agent`/`init` × `iproute`/`ebpf`) were exercised via Helm updates, then
+the previous `agent/iproute` dev release was restored; controller/webhook
+were 1/1 Available and the agent DaemonSet 3/3 Ready afterward.
+
+All four API-only runs passed server dry-run of both checked-in CRDs and
+complete Gateway/Policy objects, authorized Pod CREATE mutation plus
+configured CREATE validation, injected init/waiter security and fail-closed
+pending state, four expected unauthorized CREATE denials, and cleanup of
+non-secret fixture namespaces/Gateways. **No workload Pod was persisted, no
+healthy VPN/gateway was provisioned, and no Secret contents were read.**
+On the two eBPF releases the controller also reported unsupported
+`ebpf+wireguard` before creating a Deployment; this particular assertion
+was **SKIPPED** on iproute releases rather than inferred. Independent
+validator tamper/UPDATE and healthy Gateway reconciliation are still untested.
+Evidence directories outside the repository: agent/iproute
+`/tmp/ratatoskr-m8-fake-_2ndp2dz`, agent/eBPF
+`/tmp/ratatoskr-m8-fake-zu7sy5zj`, init/iproute
+`/tmp/ratatoskr-m8-fake-w6_965a0`, init/eBPF
+`/tmp/ratatoskr-m8-fake-yy1u47z5`. The **outer matrix remained
+INCOMPLETE / exit 4** for each run; no API assertions were counted as
+traffic/CNI/mesh compatibility. Live VPN remains skipped.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
