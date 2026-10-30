@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/google/nftables"
@@ -128,6 +129,77 @@ func TestPrivilegedClient(t *testing.T) {
 		}
 	})
 }
+func TestPrivilegedClientReturnMarkPreservesForeignBits(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		dummy(t, b, "eth0", "10.42.1.8/24")
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Endpoint: netip.MustParseAddr("10.42.2.4")}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		conn := b.nft()
+		chains, err := conn.ListChains()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reverse *nftables.Chain
+		for _, ch := range chains {
+			if ch.Table.Name == "ratatoskr" && ch.Name == "reverse_mark" {
+				reverse = ch
+			}
+		}
+		if reverse == nil || reverse.Hooknum == nil || *reverse.Hooknum != *nftables.ChainHookPrerouting {
+			t.Fatal("missing prerouting return mark selector")
+		}
+		rules, err := conn.GetRules(reverse.Table, reverse)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rules) != 1 {
+			t.Fatalf("reverse mark duplicated: %d", len(rules))
+		}
+		var preserve, write bool
+		for _, e := range rules[0].Exprs {
+			if bit, ok := e.(*expr.Bitwise); ok {
+				preserve = reflect.DeepEqual(bit.Mask, native32(^datapath.MarkMask)) && reflect.DeepEqual(bit.Xor, native32(steeringMark))
+			}
+			if meta, ok := e.(*expr.Meta); ok && meta.SourceRegister && meta.Key == expr.MetaKeyMARK {
+				write = true
+			}
+		}
+		if !preserve || !write {
+			t.Fatal("reverse marker failed to preserve CNI/mesh fwmark bits")
+		}
+		for _, name := range []string{"all", datapath.ClientDevice} {
+			data, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + name + "/rp_filter")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(data)) != "2" {
+				t.Fatal("reverse-path filtering was weakened")
+			}
+		}
+		value, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + datapath.ClientDevice + "/src_valid_mark")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(value)) != "1" {
+			t.Fatal("client GENEVE ingress does not use fwmark for reverse source validation")
+		}
+		if err := b.RemoveClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		chains, err = conn.ListChains()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ch := range chains {
+			if ch.Table.Name == "ratatoskr" && ch.Name == "reverse_mark" {
+				t.Fatal("reverse marker survived RemoveClient")
+			}
+		}
+	})
+}
+
 func TestPrivilegedPreservesForeignRules(t *testing.T) {
 	isolated(t, func(b *Backend) {
 		dummy(t, b, "eth0", "10.42.1.8/24")
