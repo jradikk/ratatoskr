@@ -149,6 +149,34 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(set(api.data), api.fail_delete)
         self.assertEqual(len([x for x in api.calls if x[0] == "delete"]), 2)
 
+    def test_realistic_deletion_timestamp_waits_for_verified_absence(self):
+        api = FakeAPI()
+        name = self.runner(api).names[1]
+        original_delete = api.delete_if_uid
+        seen = [0]
+        def terminating(target, uid, timeout):
+            original_delete(target, uid, timeout)
+            if target == name:
+                api.data[target] = {"kind": "Namespace", "metadata": {
+                    "name": target, "uid": uid, "labels": {module.LABEL: TOKEN},
+                    "deletionTimestamp": "2026-10-30T14:00:00Z"}}
+        original_get = api.get
+        def get(target, timeout):
+            if target == name and target in api.data and api.data[target]["metadata"].get("deletionTimestamp"):
+                seen[0] += 1
+                if seen[0] > 2:
+                    del api.data[target]
+            return original_get(target, timeout)
+        api.delete_if_uid = terminating
+        api.get = get
+        with self.runner(api) as life:
+            life.sleep = lambda _seconds: None
+            directory = life.private_dir
+            life.create_namespaces()
+        self.assertFalse(directory.exists())
+        self.assertEqual(api.data, {})
+        self.assertEqual(seen[0], 3)
+
     def test_replaced_namespace_is_not_deleted(self):
         api = FakeAPI()
         api.replace_on_delete.add(self.runner(api).names[1])

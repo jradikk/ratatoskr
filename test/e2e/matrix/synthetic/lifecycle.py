@@ -252,10 +252,10 @@ class Lifecycle:
             self._record(name, obj)
         return self.names
 
-    def _record(self, name, obj):
+    def _record(self, name, obj, *, allow_deleting=False):
         meta = (obj or {}).get("metadata", {})
         uid = meta.get("uid")
-        if (meta.get("name") != name or meta.get("deletionTimestamp") or
+        if (meta.get("name") != name or (meta.get("deletionTimestamp") and not allow_deleting) or
                 meta.get("labels", {}).get(LABEL) != self.token or
                 not isinstance(uid, str) or not UID.fullmatch(uid)):
             raise LifecycleError("Namespace identity/UID not verified; manual remediation may be required.")
@@ -284,15 +284,16 @@ class Lifecycle:
                 obj = self.api.get(name, timeout=self._time(deadline))
                 if obj is None:
                     continue
-                uid = self._record(name, obj)
+                uid = self._record(name, obj, allow_deleting=True)
                 if name not in self.owned:
                     raise LifecycleError("Namespace UID was never verified.")
-                self.api.delete_if_uid(name, uid, timeout=self._time(deadline))
+                if not obj.get("metadata", {}).get("deletionTimestamp"):
+                    self.api.delete_if_uid(name, uid, timeout=self._time(deadline))
                 while True:
                     obj = self.api.get(name, timeout=self._time(deadline))
                     if obj is None:
                         break
-                    self._record(name, obj)  # Detect replacement, not merely same name.
+                    self._record(name, obj, allow_deleting=True)  # Detect replacement during deletion.
                     self.sleep(min(1, max(0, deadline - self.clock())))
             except (LifecycleError, OSError, ValueError):
                 failures.append(name)
