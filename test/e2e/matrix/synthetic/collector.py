@@ -256,8 +256,7 @@ class Collector:
         return after - baseline
 
     def direct_dns(self, client_uid, api_ip, exclusions):
-        # No insecure curl to API is available in the adapter; only DNS
-        # resolution is observable here. DNS is NOT a substitute for API TLS.
+        # DNS alone is never evidence of TLS, source route or anonymous denial.
         address = str(evidence.ipv4(api_ip))
         name = _dns(self._exec(client_uid, "direct-dns"), address)
         try:
@@ -268,7 +267,22 @@ class Collector:
         evidence.need(excluded, "API ClusterIP is not excluded from selected datapath.")
         return name
 
+    def direct_api_tls(self, client_uid, client_ip, api_ip, dns_ip, exclusions):
+        """Public CA-only TLS, anonymous 403, exact DNS/remote IP and CNI route."""
+        api_address = str(evidence.ipv4(api_ip))
+        dns_address = str(evidence.ipv4(dns_ip))
+        client_address = str(evidence.ipv4(client_ip))
+        dns_name = _dns(self._exec(client_uid, "direct-dns"), api_address)
+        route = _parse_json(self._exec(client_uid, "direct-api-route"))
+        response = self._exec(client_uid, "direct-api-tls")
+        fields = response.strip().split()
+        if len(fields) != 2 or fields[0] != api_address or fields[1] != "403":
+            raise Incomplete("Anonymous TLS request did not deny at expected API ClusterIP.")
+        evidence.assert_direct_paths(exclusions, dns_address, api_address, dns_name, 403,
+                                     route, client_address)
+        return {"verifiedCA": True, "anonymousDenied": True, "directClusterRoute": True}
+
     def final_result(self):
-        # Session capture is available but not cluster-validated or orchestrated;
-        # safe server outage/recovery, UID-atomic exec and direct API TLS remain absent.
-        raise Incomplete("Full synthetic VPN final gate cannot certify PASS: missing live TLS validation, direct API TLS, safe outage/recovery and UID-atomic exec proof.")
+        # Session and public-CA API checks are cluster-unvalidated and unwired;
+        # safe server outage/recovery and atomic Pod UID binding are also absent.
+        raise Incomplete("Full synthetic VPN final gate cannot certify PASS: missing live TLS/API validation, safe outage/recovery and UID-atomic exec proof.")

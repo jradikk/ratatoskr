@@ -48,10 +48,13 @@ def client():
                          "annotations": {e.PREFIX + "datapath-ready": "true"}},
             "spec": {"automountServiceAccountToken": False, "containers": [{"name": "client", "imagePullPolicy": "Never",
                      "securityContext": {"capabilities": {"drop": ["ALL"]}, "allowPrivilegeEscalation": False,
-                                         "runAsNonRoot": True}}],
+                                         "runAsNonRoot": True}, "volumeMounts": [{"name": "api-public-ca",
+                                         "mountPath": "/var/run/ratatoskr/api-ca", "readOnly": True}]}],
                      "initContainers": [{"name": "ratatoskr-init", "args": ["-wait-agent"], "securityContext": {
                          "capabilities": {"drop": ["ALL"]}, "allowPrivilegeEscalation": False,
-                         "runAsNonRoot": True}}], "volumes": [{"name": "ratatoskr-agent-api-shadow", "emptyDir": {}}]},
+                         "runAsNonRoot": True}}], "volumes": [{"name": "ratatoskr-agent-api-shadow", "emptyDir": {}},
+                                 {"name": "api-public-ca", "configMap": {"name": "kube-root-ca.crt",
+                                  "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}]},
             "status": {"podIP": "10.42.2.5", "conditions": [cond()],
                        "containerStatuses": [{"name": "client", "ready": True, "imageID": ID}],
                        "initContainerStatuses": [{"name": "ratatoskr-init", "state": {"terminated": {"exitCode": 0}}}]}}
@@ -95,6 +98,8 @@ class EvidenceTests(unittest.TestCase):
             lambda c: c["spec"]["initContainers"][0]["securityContext"]["capabilities"].update(add=["NET_ADMIN"]),
             lambda c: c["status"]["initContainerStatuses"][0]["state"]["terminated"].update(exitCode=1),
             lambda c: c["metadata"]["annotations"].update({e.PREFIX + "datapath-ready": "pending"}),
+            lambda c: c["spec"]["volumes"][1]["configMap"].update(name="malicious-ca"),
+            lambda c: c["spec"]["containers"][0]["volumeMounts"].append({"name": "secret", "mountPath": "/bad"}),
             lambda c: c["status"]["containerStatuses"][0].update(imageID="wrong"),
         ):
             invalid = copy.deepcopy(fixture_client)
@@ -137,10 +142,14 @@ class EvidenceTests(unittest.TestCase):
 
     def test_direct_paths_fail_close_and_recovery(self):
         exclusions = [{"source": "serviceCIDR", "cidr": "10.43.0.0/16"}]
-        e.assert_direct_paths(exclusions, "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 200)
-        for bad in (([], "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 200),
-                    (exclusions, "10.43.0.10", "10.43.0.1", "invalid", 200),
-                    (exclusions, "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 403)):
+        route = {"dst": "10.43.0.1", "dev": "eth0", "prefsrc": "10.42.2.5"}
+        e.assert_direct_paths(exclusions, "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local",
+                              403, route, "10.42.2.5")
+        for bad in (([], "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 403, route, "10.42.2.5"),
+                    (exclusions, "10.43.0.10", "10.43.0.1", "invalid", 403, route, "10.42.2.5"),
+                    (exclusions, "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 200, route, "10.42.2.5"),
+                    (exclusions, "10.43.0.10", "10.43.0.1", "kubernetes.default.svc.cluster.local", 403,
+                     dict(route, dev="rtk0"), "10.42.2.5")):
             with self.assertRaises(e.EvidenceError):
                 e.assert_direct_paths(*bad)
         gw = fixture()[0]

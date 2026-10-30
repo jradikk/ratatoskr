@@ -56,6 +56,16 @@ COMMANDS = {
     "vpn-exit": ("curl", "--ipv4", "--noproxy", "*", "--silent", "--fail",
                  "--connect-timeout", "2", "--max-time", "5", "http://10.88.0.1:8080/exit"),
     "direct-dns": ("getent", "ahostsv4", "kubernetes.default.svc.cluster.local"),
+    "direct-api-route": ("ip", "-j", "-4", "route", "get", "kubernetes.default.svc.cluster.local", "ipproto", "tcp", "dport", "443"),
+    # --disable MUST be first curl option: ignore ~/.curlrc (credentials,
+    # proxy, --insecure, redirects). Fixed DNS hostname permits SAN validation.
+    # Anonymous Pods GET must be forbidden; only HTTP status crosses exec.
+    "direct-api-tls": ("curl", "--disable", "--ipv4", "--noproxy", "*", "--silent",
+                       "--proto", "=https", "--max-redirs", "0", "--cacert",
+                       "/var/run/ratatoskr/api-ca/ca.crt", "--output", "/dev/null",
+                       "--write-out", "%{remote_ip} %{http_code}", "--connect-timeout", "2",
+                       "--max-time", "5",
+                       "https://kubernetes.default.svc.cluster.local/api/v1/namespaces/default/pods"),
 }
 SERVER_COMMAND = ("python3", "/usr/local/bin/session.py")
 

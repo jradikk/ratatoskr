@@ -1,5 +1,26 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Public-CA verified direct Kubernetes API TLS path (no PASS)
+
+The restricted app Pod now mounts **only** the namespace-managed public
+`kube-root-ca.crt` ConfigMap key `ca.crt`, read-only at
+`/var/run/ratatoskr/api-ca/ca.crt`; `automountServiceAccountToken: false`
+remains enforced. The production-injected wait-init retains only its
+isolated emptyDir token-shadow mount. No Secret, token, client key or host path
+is mounted into the workload. The fixed exec command calls curl with
+`--disable` first (ignores curlrc), `--cacert` at that public CA, IPv4,
+`--proto =https`, no proxy, no redirects, no insecure mode or auth header;
+only remote IP and HTTP status are returned, never the API body. It queries
+an anonymous Pods list requiring **403**, with verified TLS hostname
+`kubernetes.default.svc.cluster.local`. The collector requires DNS resolve
+to the *known* API Service ClusterIP, curl's actual remote IP to match, and
+an `ip -j -4 route get ... ipproto tcp dport 443` result sourced from the
+client PodIP via `eth0` (not `rtk0`). Both the DNS and API ClusterIPs must
+belong to reported gateway exclusions. If the cluster lacks the public CA
+ConfigMap, the API SAN, or anonymous 403 policy, this check fails closed—never
+fallback to `-k`, an SA token, a credential or a hardcoded CA. No cluster was
+queried during authoring. `run.py` remains untouched and INCOMPLETE.
+
 ## Authenticated server-side OpenVPN session evidence (no PASS)
 
 The synthetic server writes OpenVPN **status-version 3** to
@@ -21,25 +42,24 @@ paths, tampered output and non-disclosure. This is *not* a TLS packet capture or
 a final gate assertion: the source is the server's OpenVPN status after its
 certificate-authenticated TLS setup, and no live OpenVPN test ran here.
 
-`run.py` remains read-only and INCOMPLETE. No server outage/recovery, direct
-API TLS path, live image/runtime proof or atomic Pod-UID exec binding is
-implemented; no e2e PASS can be awarded.
+`run.py` remains read-only and INCOMPLETE. No server outage/recovery,
+live image/runtime proof or atomic Pod-UID exec binding is implemented; no
+e2e PASS can be awarded.
 
 ## Isolated no-PASS evidence collector
 
 `collector.py` accepts only an active, owned `Lifecycle` and its `FixtureAPI`.
 It bounds Gateway status polling, validates UID-pinned fixture server/client
-images and owner-linked evidence, parses actual iproute2 single-object JSON
+images and owner-linked evidence, parses iproute2 single-object JSON
 (`linkinfo.info_data.id`/`remote`, `stats64.tx.bytes`) from fixed client
 commands, requires stable GENEVE link identity and idle TX counter before
-checking a selected marker request increased its TX bytes, and compares DNS
-answers with the excluded API ClusterIP. Its `final_result()` **always raises
-INCOMPLETE**. There is no CLI, resource creation, PKI invocation, report PASS,
-server-side exec or change to `run.py`. The module does *not* observe an
-authenticated OpenVPN TLS session, perform a direct API TLS request, interrupt
-or restart the server, prove endpoint withdrawal/recovery, or eliminate the
-kubectl exec UID race. These remain hard blockers; a marker and counter delta
-are not independently sufficient for full VPN e2e. Pure fake-adapter tests only.
+checking a selected marker request increased its TX bytes. Its separate
+session correlation and direct-API-TLS collectors are described above.
+`final_result()` **always raises INCOMPLETE**. There is no CLI, resource
+creation, PKI invocation, report PASS or change to `run.py`. No controlled
+server interruption/restart, endpoint withdrawal/recovery or atomic kubectl
+exec Pod-UID binding exists; these remain hard blockers. Pure fake-adapter
+tests only.
 
 ## Bounded fixture adapter (not wired into execution)
 

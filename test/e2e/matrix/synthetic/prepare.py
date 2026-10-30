@@ -107,8 +107,13 @@ def manifests(namespace, image, contents):
             "labels": {"app": "synthetic-client", PREFIX + "gateway": "synthetic",
                        PREFIX + "gateway-namespace": namespace}},
             "spec": {"automountServiceAccountToken": False, "restartPolicy": "Never",
+                "volumes": [{"name": "api-public-ca", "configMap": {"name": "kube-root-ca.crt",
+                    "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}],
                 "containers": [{"name": "client", "image": "ratatoskr-tools:m1-local", "imagePullPolicy": "Never",
-                    "command": ["sleep", "3600"], "securityContext": {"runAsNonRoot": True,
+                    "command": ["sleep", "3600"],
+                    "volumeMounts": [{"name": "api-public-ca", "mountPath": "/var/run/ratatoskr/api-ca",
+                                      "readOnly": True}],
+                    "securityContext": {"runAsNonRoot": True,
                         "runAsUser": 65532, "allowPrivilegeEscalation": False,
                         "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}}}]}}
     ]

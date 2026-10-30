@@ -150,12 +150,21 @@ def assert_restricted_client(pod, namespace, gateway_id, endpoint, tools_id):
          init[0].get("securityContext", {}).get("runAsNonRoot") is True and
          init[0].get("securityContext", {}).get("allowPrivilegeEscalation") is False,
          "Production wait-init not restricted or absent.")
-    need(len(spec.get("containers", [])) == 1 and
-         not any("secret" in v or "hostPath" in v or "projected" in v for v in spec.get("volumes", [])) and
+    public_ca = {"name": "api-public-ca", "configMap": {"name": "kube-root-ca.crt",
+                 "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}
+    public_mount = {"name": "api-public-ca", "mountPath": "/var/run/ratatoskr/api-ca", "readOnly": True}
+    volumes = spec.get("volumes", [])
+    need(len(spec.get("containers", [])) == 1 and len(volumes) == 2 and
+         public_ca in volumes and
+         len([v for v in volumes if v.get("name") == "ratatoskr-agent-api-shadow" and
+              set(v) == {"name", "emptyDir"} and isinstance(v["emptyDir"], dict) and
+              set(v["emptyDir"]) <= {"medium", "sizeLimit"} and
+              v["emptyDir"].get("medium", "") == ""]) == 1 and
+         not any("secret" in v or "hostPath" in v or "projected" in v for v in volumes) and
          all(c.get("securityContext", {}).get("capabilities") == {"drop": ["ALL"]} and
              c.get("securityContext", {}).get("allowPrivilegeEscalation") is False and
              c.get("securityContext", {}).get("runAsNonRoot") is True and
-             not c.get("envFrom") and not c.get("volumeMounts") for c in spec["containers"]),
+             not c.get("envFrom") and c.get("volumeMounts") == [public_mount] for c in spec["containers"]),
          "Workload credentials, host access or capabilities present.")
     need(any(s.get("name") == "ratatoskr-init" and s.get("state", {}).get("terminated", {}).get("exitCode") == 0
              for s in status.get("initContainerStatuses", [])), "Agent wait-init has not completed successfully.")
@@ -174,7 +183,7 @@ def assert_selected_tunnel(before, after, marker, link, gateway_id, endpoint):
          "Marker request did not increase GENEVE egress bytes.")
 
 
-def assert_direct_paths(exclusions, dns_ip, api_ip, dns_name, api_code):
+def assert_direct_paths(exclusions, dns_ip, api_ip, dns_name, api_code, route, client_ip):
     try:
         ranges = [ipaddress.ip_network(x["cidr"], strict=True) for x in exclusions
                   if x.get("source") in {"serviceCIDR", "dns", "apiserver"}]
@@ -183,8 +192,12 @@ def assert_direct_paths(exclusions, dns_ip, api_ip, dns_name, api_code):
              "DNS or API ClusterIP is not a verified Gateway exclusion.")
     except (KeyError, ValueError, TypeError):
         raise EvidenceError("Gateway exclusion evidence malformed.") from None
-    need(dns_name == "kubernetes.default.svc.cluster.local" and api_code == 200,
-         "Direct ClusterIP DNS or API request failed.")
+    need(dns_name == "kubernetes.default.svc.cluster.local" and api_code == 403,
+         "Verified TLS anonymous API denial or direct DNS path failed.")
+    need(isinstance(route, dict) and route.get("dst") == str(api) and
+         route.get("dev") == "eth0" and route.get("prefsrc") == client_ip and
+         route.get("type") not in ("unreachable", "prohibit", "blackhole") and
+         route.get("dev") != "rtk0", "API HTTPS flow is not routed directly via client CNI.")
 
 
 def assert_fail_close(down, marker_failed, direct_ok):

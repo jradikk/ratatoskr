@@ -173,6 +173,29 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaises(mod.evidence.EvidenceError):
             collector.direct_dns(UID, "10.43.0.1", [])
 
+    def test_public_ca_tls_anonymous_denial_and_direct_cni_route(self):
+        collector, api = fixture()
+        route = {"dst": "10.43.0.1", "dev": "eth0", "prefsrc": "10.42.2.5"}
+        api.outputs = {"direct-dns": "10.43.0.1 STREAM kubernetes.default.svc.cluster.local\n",
+                       "direct-api-route": payload(route), "direct-api-tls": "10.43.0.1 403"}
+        exclusions = [{"source": "serviceCIDR", "cidr": "10.43.0.0/16"}]
+        self.assertEqual(collector.direct_api_tls(UID, "10.42.2.5", "10.43.0.1", "10.43.0.10", exclusions),
+                         {"verifiedCA": True, "anonymousDenied": True, "directClusterRoute": True})
+        for result in ("10.43.0.1 200", "10.43.0.1 000", "10.43.0.2 403", "SECRET", "10.43.0.1 403 EXTRA"):
+            api.outputs["direct-api-tls"] = result
+            with self.assertRaises(mod.Incomplete) as ctx:
+                collector.direct_api_tls(UID, "10.42.2.5", "10.43.0.1", "10.43.0.10", exclusions)
+            self.assertNotIn("SECRET", str(ctx.exception))
+        api.outputs["direct-api-tls"] = "10.43.0.1 403"
+        for wrong in (dict(route, dev="rtk0"), dict(route, prefsrc="10.88.0.2"),
+                      dict(route, dst="10.43.0.2")):
+            api.outputs["direct-api-route"] = payload(wrong)
+            with self.assertRaises(mod.evidence.EvidenceError):
+                collector.direct_api_tls(UID, "10.42.2.5", "10.43.0.1", "10.43.0.10", exclusions)
+        api.outputs["direct-api-route"] = payload(route)
+        with self.assertRaises(mod.evidence.EvidenceError):
+            collector.direct_api_tls(UID, "10.42.2.5", "10.43.0.1", "10.43.0.10", [])
+
     def test_poll_convergence_strict_budget_and_timeout(self):
         collector, api = fixture()
         now = [0.0]

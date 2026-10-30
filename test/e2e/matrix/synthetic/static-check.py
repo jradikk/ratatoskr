@@ -45,6 +45,12 @@ try:
     workload = objects[-1]
     assert objects[1]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
     assert workload["spec"]["automountServiceAccountToken"] is False
+    assert workload["spec"]["volumes"] == [{"name": "api-public-ca", "configMap": {
+        "name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}]
+    assert workload["spec"]["containers"][0]["volumeMounts"] == [{"name": "api-public-ca",
+        "mountPath": "/var/run/ratatoskr/api-ca", "readOnly": True}]
+    assert not any("secret" in v or "projected" in v or "serviceAccountToken" in str(v)
+                   for v in workload["spec"]["volumes"])
     assert workload["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]}
     assert not workload["spec"].get("initContainers")  # Production webhook must inject the wait-init.
     assert objects[7]["spec"]["gatewayRef"]["namespace"] == namespace

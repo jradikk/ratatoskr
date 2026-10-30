@@ -197,6 +197,26 @@ class AdapterTests(unittest.TestCase):
             adapter.server_session(ns, POD_UID, expected_image_id=IMAGE)
         self.assertNotIn("SECRET", str(ctx.exception))
 
+    def test_direct_api_command_is_tls_verified_anonymous_fixed_and_bounded(self):
+        adapter, fake = make()
+        ns = adapter.owner.names[1]
+        self.assertEqual(adapter.exec(ns, "synthetic-client", POD_UID, "client", "direct-api-tls",
+                                      expected_image_id=IMAGE), "safe-result\n")
+        argv = next(call[0] for call in fake.calls if "--cacert" in call[0])
+        self.assertEqual(argv[-len(a.COMMANDS["direct-api-tls"]):], list(a.COMMANDS["direct-api-tls"]))
+        command = a.COMMANDS["direct-api-tls"]
+        self.assertEqual(command[:2], ("curl", "--disable"))
+        self.assertEqual(command[command.index("--cacert") + 1], "/var/run/ratatoskr/api-ca/ca.crt")
+        self.assertNotIn("--insecure", command)
+        self.assertNotIn("-k", command)
+        self.assertNotIn("--location", command)
+        self.assertNotIn("--header", command)
+        self.assertNotIn("--user", command)
+        self.assertNotIn("sh", command)
+        self.assertTrue(command[-1].startswith("https://kubernetes.default.svc.cluster.local/"))
+        route = a.COMMANDS["direct-api-route"]
+        self.assertEqual(route[-4:], ("ipproto", "tcp", "dport", "443"))
+
     def test_deadline_denies_transport(self):
         adapter, fake = make()
         adapter.owner.deadline = adapter.owner.clock() - 1
