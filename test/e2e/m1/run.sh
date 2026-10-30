@@ -273,7 +273,17 @@ client getent ahostsv4 kubernetes.default.svc.cluster.local >/dev/null
 api_before=$(client curl --ipv4 --noproxy '*' --silent --insecure --connect-timeout 3 --max-time 8 \
   --output /dev/null --write-out '%{http_code}' "https://$API_IP/version" 2>/dev/null)
 [[ "$api_before" != 000 ]]
-client_curl "http://$ORDINARY_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
+# A ready endpoint can precede kube-proxy's Service VIP programming. Give the
+# ordinary path a bounded convergence window; never accept a wrong source IP.
+service_deadline=$((SECONDS + 45))
+while true; do
+  ordinary_response=$(client_curl "http://$ORDINARY_IP:8080/echo") || ordinary_response=
+  if jq -e --arg ip "$CLIENT_IP" '.ip==$ip' <<< "$ordinary_response" >/dev/null 2>&1; then
+    break
+  fi
+  (( SECONDS < service_deadline )) || { record direct-baseline failed 'Ordinary ClusterIP did not preserve client PodIP within 45 seconds.'; exit 1; }
+  sleep 2
+done
 record direct-baseline passed 'Remote PodIP sees selected client PodIP on ordinary cluster path; DNS, API TCP/TLS and ClusterIP reachable.'
 STAGE=gateway-startup
 gateway_template=gateway-$MODE.yaml.tmpl
