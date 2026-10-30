@@ -80,10 +80,13 @@ external `gnv0` transmit drops with no gateway `gnv0` receive packets or TC
 flower hits; the client underlay route and BPF helper return counters were
 healthy. A `geneve_xmit` probe observed a transmit attempt without
 `DST_METADATA` tunnel information (`dst.flags=0`, mode/remote zero), so the
-collect_md GENEVE device discarded it before emitting outer UDP. Removing the
-TLV helper and MAC rewrite or trying clone redirect in disposable diagnostic
-builds did not repair this. Those diagnostic changes were discarded; there is
-**no verified production fix**, and the earlier isolated `gnv0` counter check
+collect_md GENEVE device discarded it before emitting outer UDP. Linux 5.10
+source confirms that the tunnel-key helper installs skb metadata and the
+GENEVE driver requires it, but **does not prove where it is lost** between the
+helpers and transmit on this kernel. Removing the TLV helper and MAC rewrite
+or trying clone redirect in disposable diagnostic builds did not repair this.
+Those diagnostic changes were discarded; there is **no verified production
+fix**, and the earlier isolated `gnv0` counter check
 was not proof of end-to-end gateway ingress. eBPF may not be represented as a
 passing second datapath.
 
