@@ -36,6 +36,11 @@ func (b *Backend) VerifyClient(ctx context.Context, c datapath.ClientConfig) err
 	if err := b.checkEgressFilters(eth); err != nil {
 		return err
 	}
+	if guard, err := b.findUpdateGuard(eth); err != nil {
+		return err
+	} else if guard != nil {
+		return fmt.Errorf("ebpf update guard still installed; reject restart adoption")
+	}
 	for _, device := range []string{datapath.ClientDevice, datapath.WireGuardDevice} {
 		if _, err := b.h.LinkByName(device); err == nil {
 			return fmt.Errorf("unexpected client tunnel device %s", device)

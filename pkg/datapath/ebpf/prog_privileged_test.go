@@ -403,18 +403,35 @@ func TestPrivilegedFailedEndpointUpdateRevokesOldKernelSelector(t *testing.T) {
 		if err := b.ApplyClient(context.Background(), changed); err == nil {
 			t.Fatal("unexpectedly accepted bad GENEVE device")
 		}
+		guard, err := b.findUpdateGuard(eth)
+		if err != nil || guard == nil {
+			t.Fatalf("failed endpoint update lacks retained tc drop guard: %v", err)
+		}
 		config := clientClientConfig{}
 		if err := b.objects.Config.Lookup(uint32(0), &config); err != nil {
 			t.Fatal(err)
 		}
-		if config.Mode != 3 || config.Healthy != 0 || config.Endpoint != 0 || config.Ifindex != 0 {
-			t.Fatalf("failed update left old policy selector active: %+v", config)
+		if config.Healthy != 1 {
+			t.Fatal("test did not preserve old program while guard takes precedence")
 		}
+		// Program.Test invokes the old program directly and cannot test clsact
+		// ordering. Send an actual selected packet and assert the guard action
+		// counter increments before the old program can redirect.
 		for _, dest := range []string{"10.42.1.11", "203.0.113.7", "169.254.64.1"} {
-			got, _, err := b.objects.Steer.Test(packet(dest, 443, false))
-			if err != nil || got != 2 {
-				t.Fatalf("stale policy permitted %s after failed update: action=%d err=%v", dest, got, err)
+			conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("10.42.1.8")})
+			if err != nil {
+				t.Fatal(err)
 			}
+			_, _ = conn.WriteToUDP([]byte("blocked"), &net.UDPAddr{IP: net.ParseIP(dest), Port: 443})
+			_ = conn.Close()
+		}
+		guard, err = b.findUpdateGuard(eth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counter := guard.(*netlink.MatchAll).Actions[0].Attrs().Statistics
+		if counter == nil || counter.Basic == nil || counter.Basic.Packets == 0 {
+			t.Fatal("guard did not drop old endpoint traffic")
 		}
 		if err := b.VerifyClient(context.Background(), c); err == nil {
 			t.Fatal("restart verifier accepted revoked old selector")
@@ -453,15 +470,26 @@ func TestPrivilegedFailedHealthyPolicyChangeDoesNotPermitOldDirectPass(t *testin
 		if err := b.ApplyClient(context.Background(), changed); err == nil {
 			t.Fatal("failed to trigger policy update failure")
 		}
-		if got, _, err := b.objects.Steer.Test(previouslyDirect); err != nil || got != 2 {
-			t.Fatalf("failed policy update retained stale direct pass: action=%d err=%v", got, err)
+		guard, err := b.findUpdateGuard(eth)
+		if err != nil || guard == nil {
+			t.Fatalf("failed policy update lacks guard: %v", err)
 		}
-		config := clientClientConfig{}
-		if err := b.objects.Config.Lookup(uint32(0), &config); err != nil {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("10.42.1.8")})
+		if err != nil {
 			t.Fatal(err)
 		}
-		if config.Mode != 3 || config.Healthy != 0 {
-			t.Fatalf("prior policy not revoked: %+v", config)
+		_, _ = conn.WriteToUDP([]byte("formerly-direct"), &net.UDPAddr{IP: net.ParseIP("198.51.100.8"), Port: 443})
+		_ = conn.Close()
+		guard, err = b.findUpdateGuard(eth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counter := guard.(*netlink.MatchAll).Actions[0].Attrs().Statistics
+		if counter == nil || counter.Basic == nil || counter.Basic.Packets == 0 {
+			t.Fatal("old direct selector bypassed retained drop guard")
+		}
+		if err := b.VerifyClient(context.Background(), c); err == nil {
+			t.Fatal("guarded incomplete update accepted on restart")
 		}
 	})
 }

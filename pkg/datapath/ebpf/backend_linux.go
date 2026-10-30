@@ -81,17 +81,20 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 	return b.gateway.ApplyGateway(ctx, c)
 }
 func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
-	if c.Encryption == "wireguard" {
-		return fmt.Errorf("ebpf client does not support WireGuard; refusing plaintext fallback")
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if c.Encryption == "wireguard" {
+		// Unsupported mode cannot be committed; fail explicitly before any
+		// kernel operation. A failed mode-switch on a previously configured
+		// client must still be fenced by the caller's lifecycle gate.
+		return fmt.Errorf("ebpf client does not support WireGuard; refusing plaintext fallback")
+	}
 	eth, err := b.h.LinkByName("eth0")
 	if err != nil {
+		if c.Encryption == "wireguard" {
+			return fmt.Errorf("ebpf client does not support WireGuard; refusing plaintext fallback")
+		}
 		return fmt.Errorf("client eth0: %w", err)
 	}
 	// Refuse any earlier clsact egress action (including terminal pass)
@@ -99,11 +102,21 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if err := b.checkEgressFilters(eth); err != nil {
 		return err
 	}
-	// Revoke a previous healthy selector before any route, GENEVE or program
-	// load can fail during an endpoint update. The old tc program continues
-	// to enforce its exclusions and drops all previously steered traffic.
-	if err := b.revokeOldEndpoint(eth); err != nil {
+	// A prior program can be held only by tc after an init process restart;
+	// BPF_OBJ_GET_FD_BY_ID is unavailable in the restricted init sandbox.
+	// Place an owned, higher-priority terminal drop guard before any fallible
+	// update. Never remove it on failure (including context cancellation).
+	if err := b.installUpdateGuard(eth); err != nil {
 		return err
+	}
+	// Validation itself can fail during a policy update. Keep the guard even
+	// for an invalid replacement or unsupported encryption, so an old direct
+	// policy cannot remain active after an agent reports update failure.
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.Encryption == "wireguard" {
+		return fmt.Errorf("ebpf client does not support WireGuard; refusing plaintext fallback")
 	}
 	addrs, err := b.h.AddrList(eth, unix.AF_INET6)
 	if err != nil {
@@ -200,7 +213,13 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if previous != nil {
 		_ = previous.Close()
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	} // guard remains during cancellation
+	if err := b.removeUpdateGuard(eth); err != nil {
+		return fmt.Errorf("remove ebpf update guard: %w", err)
+	}
+	return nil
 }
 func (b *Backend) ensureGeneve(mtu int) (netlink.Link, error) {
 	link, err := b.h.LinkByName(datapath.GatewayDevice)
@@ -248,6 +267,12 @@ func (b *Backend) checkEgressFilters(eth netlink.Link) error {
 		if f.Attrs().Priority > filterPriority {
 			continue
 		}
+		if f.Attrs().Priority == guardPriority {
+			if !isOwnedUpdateGuard(f) {
+				return fmt.Errorf("tc egress priority %d occupied by foreign filter", guardPriority)
+			}
+			continue
+		}
 		bf, ok := f.(*netlink.BpfFilter)
 		if f.Attrs().Priority != filterPriority || !ok || f.Attrs().Handle != filterHandle || bf.Name != "ratatoskr_ebpf" || !bf.DirectAction || f.Attrs().Protocol != unix.ETH_P_ALL {
 			return fmt.Errorf("tc egress filter at priority %d could bypass Ratatoskr selector", f.Attrs().Priority)
@@ -264,6 +289,11 @@ func (b *Backend) attach(eth netlink.Link, objects *clientObjects) error {
 	if err := b.checkEgressFilters(eth); err != nil {
 		return err
 	}
+	if guard, err := b.findUpdateGuard(eth); err != nil {
+		return err
+	} else if guard == nil {
+		return fmt.Errorf("ebpf update guard missing before selector replacement")
+	}
 	filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: eth.Attrs().Index, Parent: netlink.HANDLE_MIN_EGRESS, Priority: filterPriority, Handle: filterHandle, Protocol: unix.ETH_P_ALL}, Fd: objects.Steer.FD(), Name: "ratatoskr_ebpf", DirectAction: true}
 	if err := b.h.FilterReplace(filter); err != nil {
 		return fmt.Errorf("attach tc egress: %w", err)
@@ -279,6 +309,8 @@ func (b *Backend) RemoveClient(ctx context.Context, c datapath.ClientConfig) err
 	}
 	eth, err := b.h.LinkByName("eth0")
 	if err == nil {
+		// Remove the old selector first; a failed explicit removal keeps the
+		// update guard so selected traffic cannot fall through to CNI main.
 		filters, err := b.h.FilterList(eth, netlink.HANDLE_MIN_EGRESS)
 		if err != nil {
 			return err
@@ -291,6 +323,9 @@ func (b *Backend) RemoveClient(ctx context.Context, c datapath.ClientConfig) err
 					}
 				}
 			}
+		}
+		if err := b.removeUpdateGuard(eth); err != nil {
+			return err
 		}
 	} else {
 		var missing netlink.LinkNotFoundError
