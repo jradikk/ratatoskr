@@ -387,7 +387,8 @@ class FixtureAPI:
         try:
             response = json.loads(raw)
             pods = response["items"]
-            if (response.get("kind") != "PodList" or not isinstance(pods, list) or len(pods) != 1 or
+            # kubectl get pods -o json returns kind=List (not PodList).
+            if (response.get("kind") != "List" or not isinstance(pods, list) or len(pods) != 1 or
                     pods[0].get("kind") != "Pod" or pods[0]["metadata"].get("namespace") != namespace or
                     pods[0]["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway-uid") != gateway_uid or
                     pods[0]["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway-name") != "synthetic" or
@@ -409,7 +410,7 @@ class FixtureAPI:
         try:
             listed = json.loads(raw)
             slices = listed["items"]
-            if listed.get("kind") != "EndpointSliceList" or not isinstance(slices, list) or len(slices) != 1:
+            if listed.get("kind") != "List" or not isinstance(slices, list) or len(slices) != 1:
                 raise ValueError()
         except (ValueError, KeyError, AttributeError, TypeError):
             raise AdapterError("Synthetic source EndpointSlice list malformed.") from None

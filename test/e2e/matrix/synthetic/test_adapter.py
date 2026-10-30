@@ -87,6 +87,22 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(a.AdapterError):
             adapter.pod_image_id(ns, "synthetic-client", "client", "e" * 32)
 
+    def test_kubectl_list_shape_requires_exact_single_owned_pod(self):
+        adapter, fake = make()
+        ns = adapter.owner.names[0]
+        uid = "e" * 32
+        pod = {"kind": "Pod", "metadata": {"name": "synthetic-rs-pod", "namespace": ns,
+            "uid": POD_UID, "labels": {"ratatoskr.skaldhall.io/gateway-name": "synthetic",
+                                      "ratatoskr.skaldhall.io/gateway-uid": uid}}}
+        def listed(argv, **_):
+            self.assertEqual(argv[4], "get")
+            return json.dumps({"kind": "List", "items": [pod]}).encode()
+        adapter.transport = listed
+        self.assertEqual(adapter.list_owned_gateway_pods(ns, uid)["metadata"]["uid"], POD_UID)
+        adapter.transport = lambda _argv, **_: json.dumps({"kind": "PodList", "items": [pod]}).encode()
+        with self.assertRaises(a.AdapterError):
+            adapter.list_owned_gateway_pods(ns, uid)
+
     def test_stdin_create_no_secret_in_argv_or_errors(self):
         adapter, fake = make()
         ns = adapter.owner.names[0]
