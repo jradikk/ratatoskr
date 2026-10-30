@@ -1,5 +1,13 @@
 # Ratatoskr Helm chart (M6 eBPF / iproute modes)
 
+**Pre-alpha, not release-ready.** The final flannel traffic gate exposed two
+unresolved datapath failures: iproute selective TCP return is dropped by
+reverse-path validation in a restricted init Pod, and eBPF collect-md GENEVE
+transmit loses tunnel metadata before gateway ingress. The basic iproute
+full-tunnel fake proof passes, but this chart must not be represented as
+production validated. See `docs/milestones/m9/final-gate.md` for exact evidence
+and skipped compatibility/live cells; no image/chart has been published or signed.
+
 Install into one namespace (for example `helm upgrade --install ratatoskr
 charts/ratatoskr --namespace ratatoskr-system --create-namespace`).
 `operatorNamespace`, if set, must equal the Helm release namespace. The chart
