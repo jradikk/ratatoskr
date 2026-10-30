@@ -225,6 +225,12 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
             # never serialize arbitrary API responses, profiles or exception chains.
             print("FAILED: " + str(err) + " UID-owned namespaces were cleanup-attempted.")
             return 1
+        except partial_gateway.lifecycle.LifecycleError:
+            print("FAILED: UID-owned namespace or private PKI lifecycle unverified; inspect orphan state privately.")
+            return 1
+        except partial_gateway.adapter.AdapterError:
+            print("FAILED: allowlisted fixture CREATE/API transport blocked; inspect orphan state privately.")
+            return 1
         except BaseException:
             print("FAILED: partial Gateway smoke or cleanup blocked; no raw API or private data retained. Inspect UID-owned namespace orphan state privately.")
             return 1
