@@ -400,6 +400,22 @@ keepalives and failed probes can also move counters. A second, separately
 certified tunnel witness is required to establish reachability while the
 selected client is blocked; it is not yet implemented or validated.
 
+Follow-up **test-only** fixture commits (`04f35b7`, `c0592e3`, `7b6b5b9`,
+`194721a`, `5e25c20`) added a distinct ephemeral OpenVPN witness credential,
+independently tunnel-bound `/marker` request, bounded request deadline and
+outage-end timestamp, and three restricted one-shot selected Pod variants for
+healthy, withdrawal and recovery phases. The selected helper returns exit 42
+only on kernel network-unreachable errors after verified public-CA API direct
+paths; generic HTTP/network failures do **not** count as fail-close. A fixed
+CREATE output now captures only server-returned object UID/identity (never
+Secret contents), quarantines ambiguous attempts, and read-only preflight
+requires **nine** immutable expected image IDs including witness and helper.
+**75 cluster-free tests and static contracts passed**, not runtime e2e. The
+runner still does not create any resource or award PASS. Fixture images,
+OpenVPN/TUN, API TLS/ConfigMap projection, agent programming, same-interval
+witness and outage/recovery sequencing remain unverified in the cluster;
+M8/M9 stay INCOMPLETE.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
