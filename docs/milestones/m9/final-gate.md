@@ -514,6 +514,44 @@ until a safe, race-resistant identity/access model is designed and tested on
 the required runtime/kernel matrix. Live provider profile remains absent and
 SKIPPED.
 
+## October 30, 2026 — pidfd sandbox proof and remaining host-PID1 guard blocker
+
+An isolated, disposable Go probe on both existing k3d agent nodes confirmed
+that the current kernel can `pidfd_open` a CRI sandbox, transiently
+`setns(pidfd, CLONE_NEWNET)`, match the calling thread's namespace inode to
+an open, contained CRI netns path, and restore the original thread namespace.
+`d391d50` implemented this as a **fail-closed agent alternative** to opening
+`/proc/<sandbox PID>/ns/net`, without increasing chart capabilities or adopting
+a path on trust alone. Scoped race/lint/vet/build and privileged component
+checks passed. No Linux 5.10 runtime result is claimed.
+
+A real, four-gate selected-Pod smoke after the imported agent rollout remained
+**FAILED**: the Gateway/server still reached Ready and authenticated OpenVPN,
+but the capability-free wait-init did not complete and the selected Pod stayed
+Pending. Fixed-category errors narrowed the next denied operation to the
+separate **host PID1 namespace** guard, which still needed proof that the CRI
+path was not the host network namespace. `26799a4` replaced direct
+`/proc/1/ns/net` dereference with a pinned PID1 transient namespace comparison,
+again with locked-thread restoration and no privilege expansion. Its unit and
+privileged component checks passed, but a further real smoke still **FAILED**:
+`setns(pidfd(PID1), CLONE_NEWNET)` was denied by this runtime, before agent
+programming. Every attempted fixture was removed with both namespaces and
+private PKI absent afterward; the existing operator controller/webhook and
+agent DaemonSet remained healthy. No selected traffic PASS is claimed.
+
+A security review found only a **conditional** route past that guard: pin the
+agent's own startup host-network namespace and verify its own Pod UID,
+namespace/name, node, ServiceAccount, `hostNetwork=true` and `hostPID=true`
+through trusted kubelet/API identity before treating that pinned namespace as
+the host namespace. This is a *trust-model change*, not an independent kernel
+measurement of PID1. If the runtime violates hostNetwork semantics or an
+untrusted privileged deployment exists, it is not equivalent to the current
+PID1 check. Do not silently remove the guard or add `SYS_PTRACE`/privileged
+mode. The restricted agent runtime gate remains **BLOCKED** pending an approved,
+explicit host-namespace trust contract (or another safely accessible trusted
+host-netns handle), tests on the deployed runtime and Linux 5.10, then full
+selected/fail-close/recovery validation.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
