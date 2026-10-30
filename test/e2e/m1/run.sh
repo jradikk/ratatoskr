@@ -380,5 +380,12 @@ else
   record live-exit-check passed 'Selected client public exit matches gateway cached exitIP; optional expected country matched.'
   record live-failure-injection skipped 'Live upstream disruption/recovery is not automated by this M1 scaffold.'
 fi
-RESULT=passed
+# A successful direct-config smoke check must not overwrite a deliberately
+# inconclusive extended selector checkpoint. The matrix remains non-green and
+# can continue with the next independent cell (runner exit 3).
+if jq -e 'any(.checks[]; .status=="inconclusive")' "$REPORT" >/dev/null; then
+  RESULT=inconclusive
+else
+  RESULT=passed
+fi
 exit 0

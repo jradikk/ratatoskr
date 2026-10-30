@@ -39,35 +39,31 @@ m8_make_config() {
     > "$PRIVATE/m8-client.json"
 }
 
-m8_tunnel_tx() {
-  local device=rtk0
-  [[ "$DATAPATH_MODE" != ebpf ]] || device=gnv0
-  client ip -s link show dev "$device" | awk '/TX:/{getline; print $2; exit}'
-}
 
 m8_fake_selectors() {
   STAGE=m8-selective-policy
   # The inner service 198.19.0.1 is reachable only through the fake IPIP
   # upstream; the remote PodIP is the *outer* IPIP peer. It is not a valid
   # selected inner target with rp_filter enabled. Keep the pod CIDR excluded.
+  # Aggregate GENEVE TX/RX counts include unrelated IPv6 multicast/ARP and
+  # late TCP packets; nft postrouting precedes the eBPF tc-egress verdict.
+  # Neither can prove a nonmatching flow used the ordinary path. Do not report
+  # selective-cidr-port PASSED without a five-tuple-correlated packet observer.
   for policy in include wrong-port wrong-cidr exclude; do
     m8_make_config "$policy"
     m8_apply_config "$PRIVATE/m8-client.json"
-    before=$(m8_tunnel_tx)
     if [[ "$policy" == include ]]; then
       client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
-      after=$(m8_tunnel_tx)
-      (( after > before )) || { record m8-selective-policy failed 'Included inner service did not traverse the selected tunnel.'; exit 1; }
+      record m8-selective-include passed 'Matching inner TCP/8080 reached the fake upstream; admission and negative packet path not covered.'
     else
       if client_curl http://198.19.0.1:8080/echo >/dev/null; then
         record m8-selective-policy failed 'Nonmatching inner service unexpectedly reached fake upstream.'; exit 1
       fi
-      after=$(m8_tunnel_tx)
-      (( after == before )) || { record m8-selective-policy failed 'Nonmatching destination used the selected tunnel.'; exit 1; }
+      record "m8-selective-$policy" inconclusive 'Inner-only request failed; ordinary-path emission versus packet drop is not observed.'
     fi
     client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
   done
-  record m8-selective-policy passed 'Inner service include uses tunnel; wrong port/CIDR and exclude do not; ordinary PodIP remains direct. CRD compiler/admission not covered.'
+  record m8-selective-policy inconclusive 'Negative inner-only requests failed and outer PodIP stayed reachable; no five-tuple-correlated ordinary-path/tunnel proof. CRD/admission not covered.'
   STAGE=m8-no-endpoint
   m8_make_config no-endpoint
   m8_apply_config "$PRIVATE/m8-client.json"
