@@ -1,5 +1,25 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Pure dry-run execution plan (no cluster mutation or PASS)
+
+`plan.py` is an import-only, cluster-free evidence state machine. It validates
+nine immutable expected runtime IDs and an active `Lifecycle` whose two
+namespaces have confirmed, unchanged CREATE-returned UIDs. `manifest_order`
+computes only non-secret `(kind, namespace, name)` tuples: server/client/
+witness Secrets, probe-only ConfigMap, server Pod and Service, Gateway,
+Policy, then distinct healthy, outage, witness and recovery Pods. It never
+calls `prepare.manifests`, generates PKI, or runs kubectl. Its 15 strictly
+ordered checkpoints require release image preflight, healthy Gateway and
+selected-client evidence, UID/CAS probe disable and endpoint withdrawal,
+fail-closed selected Pod with independent witness and preserved direct paths,
+restoration, recovery, and verified namespace/PKI absence. Wrong order,
+missing checkpoint, image/UID mismatch, expiry or cleanup failure is
+INCOMPLETE. **Even a fully populated fake checklist cannot award PASS:**
+`final_result()` always raises, and `run.py` does not import this module.
+Live evidence collection, trustworthy ConfigMap projection observation,
+actual OpenVPN/POSIX tunnel behavior, exhaustive runtime image verification,
+and both-namespace cleanup are still required before integration.
+
 ## Immutable image expectations and exact fixture CREATE identity
 
 The read-only opt-in preflight now requires **nine** parent-approved immutable
