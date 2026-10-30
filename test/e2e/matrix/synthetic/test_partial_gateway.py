@@ -203,7 +203,7 @@ class SmokeTests(unittest.TestCase):
         self.owner.deadline = 1_000
         created = {("Pod", self.owner.names[0], "synthetic-vpn"): "e" * 32,
                    ("EgressGateway", self.owner.names[0], "synthetic"): UID}
-        with self.assertRaisesRegex(smoke.Blocked, "timed out"):
+        with self.assertRaisesRegex(smoke.Blocked, "timed out at non-secret checkpoint source-pod"):
             smoke.observe(Missing(), self.owner, IDS, created, clock=clock, sleep=lambda _sec: None)
         self.assertLess(now[0], 140)
 

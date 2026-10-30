@@ -210,15 +210,20 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         return 1
     if args.execute_partial_gateway:
         try:
+            try:
+                from . import partial_gateway
+            except ImportError:
+                import partial_gateway
             if smoke is None:
-                try:
-                    from . import partial_gateway
-                except ImportError:
-                    import partial_gateway
                 smoke = partial_gateway.execute
             smoke(ids)
         except (KeyboardInterrupt, SystemExit):
             print("FAILED: partial Gateway smoke interrupted; verify cleanup and orphan state.")
+            return 1
+        except partial_gateway.Blocked as err:
+            # Only fixed checkpoint labels from our own observer are reported;
+            # never serialize arbitrary API responses, profiles or exception chains.
+            print("FAILED: " + str(err) + " UID-owned namespaces were cleanup-attempted.")
             return 1
         except BaseException:
             print("FAILED: partial Gateway smoke or cleanup blocked; no raw API or private data retained. Inspect UID-owned namespace orphan state privately.")

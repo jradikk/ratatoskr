@@ -86,6 +86,7 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
     server_uid = created[("Pod", namespace, "synthetic-vpn")]
     gateway_uid = created[("EgressGateway", namespace, "synthetic")]
     deadline = min(owner.deadline, clock() + 110)
+    stage = "source-pod"
     while clock() < deadline:
         try:
             if owner.closed or owner.clock() >= owner.deadline:
@@ -95,11 +96,14 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
             if server["metadata"].get("uid") != server_uid:
                 raise Blocked("Synthetic source Pod UID changed.")
             source_ready(server, service, ids["server"])
+            stage = "gateway-chain"
             gateway, gateway_pod = gateway_ready(api, gateway_uid, namespace, ids)
+            stage = "source-endpoint"
             # EndpointSlice list is verified against server Pod UID/IP by
             # the adapter; no guessed/generated name is ever authorized.
             source = api.source_endpoint(namespace, service, server)
             evidence.assert_source_endpoint(source, service, server)
+            stage = "authenticated-session"
             session = api.server_session(namespace, server_uid, expected_image_id=ids["server"])
             sessions = session.get("sessions")
             if (not isinstance(sessions, list) or len(sessions) != 1 or
@@ -117,7 +121,7 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
             remaining = deadline - clock()
             if remaining > 0:
                 sleep(min(2, remaining))
-    raise Blocked("Partial Gateway smoke status/owner/TLS evidence timed out.")
+    raise Blocked("Partial Gateway smoke timed out at non-secret checkpoint " + stage + ".")
 
 
 def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapter.FixtureAPI,
