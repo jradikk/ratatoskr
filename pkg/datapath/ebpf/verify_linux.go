@@ -145,6 +145,9 @@ func (b *Backend) VerifyClient(ctx context.Context, c datapath.ClientConfig) err
 		if !ok || !g.FlowBased || g.Dport != datapath.GenevePort || g.Attrs().MTU != c.MTU || g.Attrs().Flags&net.FlagUp == 0 {
 			return fmt.Errorf("ebpf external GENEVE link inconsistent")
 		}
+		if err := b.verifyGeneveAddress(geneve); err != nil {
+			return err
+		}
 		expected.Ifindex = uint32(geneve.Attrs().Index) // #nosec G115 -- kernel ifindex fits u32.
 		expected.Endpoint = uint32FromEndpoint(c.Endpoint)
 		expected.Healthy = 1

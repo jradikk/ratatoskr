@@ -228,6 +228,12 @@ func (b *Backend) ensureGeneve(mtu int) (netlink.Link, error) {
 	if err := b.h.LinkSetMTU(link, mtu); err != nil {
 		return nil, err
 	}
+	// Kernel loose reverse-path validation treats an unnumbered GENEVE
+	// interface as lacking a valid source path. The owned /32 is distinct
+	// from the gateway neighbor .1 and creates only a local-table route.
+	if err := b.ensureGeneveAddress(link); err != nil {
+		return nil, err
+	}
 	if err := b.h.LinkSetUp(link); err != nil {
 		return nil, err
 	}
