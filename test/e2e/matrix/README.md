@@ -1,5 +1,57 @@
 # M8 incomplete coverage matrix
 
+## Existing-release API/admission-only tier (final gate only)
+
+Use `--execute --api-admission-only` to run only bounded API assertions, or
+`--with-api-admission` to run them before selected traffic scaffolds. Both still
+require `RATATOSKR_E2E_FINAL_GATE=1`; default static mode never loads/executes the
+API runner. API-only requires no VPN profile and never creates a cluster,
+builds/imports images, upgrades/reconfigures the release or starts workload Pods.
+
+Both **EXPECTED_CONTROLLER_IMAGE_ID** and **EXPECTED_WEBHOOK_IMAGE_ID** are
+required exact immutable runtime `containerStatuses[].imageID` strings approved
+by the parent/operator for the current builds. Missing expectations or mutable
+`:dev` tags are blocked before API access. Never blindly copy IDs from a known
+stale deployment to satisfy this guard. The parent must rebuild/import/roll the
+reported stale M5 release first. The tier verifies current Deployment→ReplicaSet→
+Pod ownership, rollout readiness, matching runtime IDs, aligned driver/datapath
+and fail-closed dry-run-safe webhook registration. An expected digest does not
+prove source provenance beyond the parent/operator's explicit build approval.
+
+It reuses only an existing Ready flannel/no-mesh three-node context. Complete
+non-secret Kubernetes JSON files (a YAML subset) are used—not snippets/patches.
+The 240-second total API budget, per-command timeouts and separate bounded cleanup
+cover temporary UUID-named namespaces and a Gateway whose upstream Secret is
+**deliberately nonexistent**. No Secret is created/read. Controller allocation,
+Ready=False/SecretUnavailable and absence of healthy endpoints/Deployment are
+required. All workload Pods and Policy instances remain server dry-run only.
+
+Assertions cover:
+- Server dry-run of both checked-in CRDs plus complete Gateway/Policy instances.
+- Authorized Pod CREATE through configured mutation/validation, with exact init/
+  waiter image, security, pending readiness and Downward-API or agent-shadow fields.
+- Forbidden namespace, missing gateway, hostNetwork and reserved-init CREATE
+  denials with precise Ratatoskr reasons—not generic API/PSA/timeouts.
+- **Only on an already-eBPF controller:** WireGuard Gateway reconciles as
+  Ready=False/Unsupported before Secret lookup and renders no Deployment. This
+  is controller rejection, **not webhook/schema rejection**. On iproute this is
+  SKIPPED/not covered; the release is never changed to manufacture evidence.
+
+Temporary namespaces/Gateway are deleted. No raw provider/API errors, pod logs,
+Secret bytes or live environment inputs are logged/propagated to kubectl. Fixture
+files retained for orphan cleanup contain non-secret objects only. SIGKILL/API
+loss still requires parent/operator cleanup.
+
+Evidence appears in the separate `apiAdmission` inventory section only after
+actual assertions plus successful release preflight/cleanup. It awards no traffic,
+CNI/mesh/agent coverage; full matrix remains INCOMPLETE/nonzero. Independent
+validator tamper/UPDATE checks and healthy gateway selection remain **uncovered**.
+No Pod is persisted for those missing tests. See `admission-report.md`.
+
+Allowed child validation: `python3 test/e2e/matrix/admission-static-check.py` uses
+synthetic complete fixtures, compiles Python and prohibits subprocess/API calls.
+No API runner main or e2e was executed during authoring.
+
 **All traffic execution is deferred to the final project gate.** The default
 CI/live wrappers now build an inventory, not an e2e pass. They return **4** for
 INCOMPLETE, including explicit or missing-profile skips. A listed unsupported or

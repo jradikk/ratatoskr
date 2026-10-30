@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """M8 inventory and serial final-gate orchestration. Defaults to STATIC ONLY."""
 import argparse
+import importlib.util
+import sys
 import fcntl
 import itertools
 import json
@@ -51,7 +53,7 @@ def static_preflight(mode):
     # No commands, cluster/API contacts, module loads or credential reads.
     tools = ("bash", "python3", "jq", "timeout", "kubectl", "k3d", "docker")
     files = ["hack/k3d-up.sh", "hack/k3d-down.sh", "hack/versions.env", "hack/m1-proof.sh",
-             "test/e2e/m1/run.sh", "test/e2e/m1/extended.sh", "test/e2e/matrix/client-config.py"]
+             "test/e2e/m1/run.sh", "test/e2e/m1/extended.sh", "test/e2e/matrix/client-config.py", "test/e2e/matrix/admission.py"]
     files += [f"hack/k3d/{variant}.yaml" for variant in ("flannel", "cilium", "cilium-wg", "calico")]
     return {"kind": "STATIC_ONLY", "toolsAvailable": {tool: bool(shutil.which(tool)) for tool in tools},
             "requiredFilesPresent": {file: (ROOT / file).is_file() for file in files},
@@ -70,6 +72,8 @@ def write_report(directory, report):
              "| Cell | Status | Reason |", "|---|---|---|"]
     for cell in report["cells"]:
         lines.append(f"| {cell['id']} | {cell['status']} | {cell['reason']} |")
+    lines += ["", "## API/admission-only scope", ""]
+    lines += [f"- {s['id']}: **{s['status']}** — {s['reason']}" for s in report.get("apiAdmission",{}).get("scenarios",[])]
     lines += ["", "## Missing requirements", ""]
     lines += [f"- {item}" for item in report["limitations"]]
     lines += ["", "## Scenario coverage (first implemented cell; JSON lists every cell)", ""]
@@ -117,6 +121,20 @@ def apply_result(cell, inner):
     cell["reason"] = "selected scaffold executed; remaining requirements skipped/not covered"
 
 
+def apply_api_result(inventory_entry, inner):
+    # Distinct top-level scope; do not award traffic/CNI/driver matrix coverage.
+    checks = {check["name"]:check["status"] for check in inner.get("checks",[])}
+    preflight_ok = checks.get("api-release-preflight") == "PASSED" and inner.get("status") != "FAILED"
+    cleanup_ok = checks.get("api-cleanup") == "PASSED"
+    for scenario in inventory_entry["scenarios"]:
+        actual = checks.get(scenario["id"])
+        covered = actual == "PASSED" and preflight_ok and cleanup_ok
+        scenario.update(status="PASSED" if covered else "FAILED" if actual == "FAILED" else "SKIPPED",
+                        covered=covered, reason="actual API assertions passed; no traffic tested" if covered else
+                        "required API evidence/fresh deployment/cleanup missing; not covered")
+    inventory_entry.update(status=inner.get("status","FAILED"),execution="API_ASSERTIONS_ONLY")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("fake", "live"), default="fake")
@@ -125,6 +143,8 @@ def main():
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--no-build", action="store_true", help="all images are operator-built; accepted for compatibility")
     parser.add_argument("--no-import", action="store_true")
+    parser.add_argument("--api-admission-only", action="store_true", help="final-gate API assertions only; never run traffic scaffolds")
+    parser.add_argument("--with-api-admission", action="store_true", help="run bounded API assertions before selected traffic scaffolds")
     parser.add_argument("--skip", action="store_true", help="explicitly skipped execution, still non-green matrix")
     args = parser.parse_args()
     os.umask(0o077)
@@ -133,15 +153,16 @@ def main():
         parser.error("report directory must be outside repository")
     if (directory / "report.json").exists() or any(directory.glob("cell-*")):
         parser.error("report directory already contains evidence; use a fresh directory")
-    _, cells = inventory(args.mode)
+    spec, cells = inventory(args.mode)
     unknown = set(args.cell) - {cell["id"] for cell in cells}
     if unknown:
         parser.error("unknown cell ID; consult static inventory")
     report = {"schemaVersion": 1, "scope": "M8-incomplete-M2-M8-matrix", "mode": args.mode,
               "status": "INCOMPLETE", "execution": "NOT_RUN", "preflight": static_preflight(args.mode),
-              "cells": cells, "limitations": [
+              "cells": cells, "apiAdmission": {"status":"DEFERRED", "execution":"NOT_RUN",
+                  "scenarios":[{**s,"status":"DEFERRED","covered":False,"reason":"implemented API scaffold; not executed"} for s in spec.get("apiScenarios",[])]}, "limitations": [
                   "All e2e execution was deferred during authoring; static reports are not traffic evidence.",
-                  "Alternative CNI/mesh, CRD/admission, agent, WireGuard, HA and full observability fixtures unimplemented.",
+                  "Alternative CNI/mesh, healthy CRD gateway selection, agent traffic, WireGuard, HA and full observability fixtures unimplemented.",
                   "M6 policy-only failure revocation and late IPv6 runtime safety remain final-gate blockers.",
                   "Kernel 5.10 actual runtime and full packet capture/PMTU scenarios are unverified.",
                   "Live exact steps 1–13 unavailable locally; no replacement checklist is invented.",
@@ -152,11 +173,12 @@ def main():
             parser.error("execution deferred; final gate requires RATATOSKR_E2E_FINAL_GATE=1")
         preflight = report["preflight"]
         # Missing credentials is a skip before requiring cluster tools or contacting the API.
-        if args.mode == "live" and not preflight["liveProfilePresent"]:
+        if args.mode == "live" and not args.api_admission_only and not preflight["liveProfilePresent"]:
             report["execution"] = "SKIPPED_MISSING_LIVE_PROFILE"
             write_report(directory, report)
             return 4
-        if not preflight["linux"] or not all(preflight["toolsAvailable"].values()) or not all(preflight["requiredFilesPresent"].values()):
+        needed_tools = ("python3", "kubectl") if args.api_admission_only else tuple(preflight["toolsAvailable"])
+        if not preflight["linux"] or not all(preflight["toolsAvailable"][tool] for tool in needed_tools) or not all(preflight["requiredFilesPresent"].values()):
             report["status"] = "FAILED"
             report["execution"] = "PREFLIGHT_FAILED"
             write_report(directory, report)
@@ -167,7 +189,31 @@ def main():
             except BlockingIOError:
                 parser.error("another matrix runner is active; one cluster at a time")
             report["execution"] = "SELECTED_SCAFFOLDS_ONLY"
+            if args.api_admission_only or args.with_api_admission:
+                # Load lazily: default static inventory must never invoke cluster API.
+                module_spec = importlib.util.spec_from_file_location("admission_final_gate", HERE / "admission.py")
+                module = importlib.util.module_from_spec(module_spec)
+                sys.dont_write_bytecode = True
+                module_spec.loader.exec_module(module)
+                ids = {"controller":os.environ.get("EXPECTED_CONTROLLER_IMAGE_ID",""),
+                       "webhook":os.environ.get("EXPECTED_WEBHOOK_IMAGE_ID","")}
+                def api_interrupt(_sig, _frame):
+                    raise module.Blocked("API scenario interrupted; bounded fixture cleanup requested.")
+                handlers = {sig:signal.signal(sig,api_interrupt) for sig in (signal.SIGINT,signal.SIGTERM)}
+                try:
+                    inner_api = module.execute(directory / "api-admission", ids)
+                finally:
+                    for sig,handler in handlers.items():
+                        signal.signal(sig,handler)
+                apply_api_result(report["apiAdmission"], inner_api)
+                write_report(directory, report)
+                if inner_api.get("status") == "FAILED":
+                    report["status"] = "FAILED"
+                    write_report(directory, report)
+                    return 1
             for index, cell in enumerate(cells):
+                if args.api_admission_only:
+                    continue
                 if not cell["runnerImplemented"]:
                     continue
                 if args.cell and cell["id"] not in args.cell:

@@ -202,5 +202,42 @@
       "mode": "both",
       "assertion": "Real alternative CNI/mesh gateway/client fixture and cross-node traffic; enumerating is not implementing"
     }
+  ],
+  "apiScenarios": [
+    {
+      "id": "api-crd-server-dry-run",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Existing-release server dry-run of two checked-in CRDs and complete Gateway/Policy instances; not healthy gateway deployment"
+    },
+    {
+      "id": "api-authorized-mutation-validation",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Authorized Pod server CREATE dry-run passes registered mutation+validation with allocated but unhealthy Gateway; not traffic or healthy endpoint selection"
+    },
+    {
+      "id": "api-unauthorized-denial",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Forbidden namespace, nonexistent gateway, hostNetwork and reserved-init CREATE dry-runs denied with exact Ratatoskr reasons"
+    },
+    {
+      "id": "api-security-fields",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Programming/wait init security, Downward API or shadow mount, exact configured image and pending fail-close state; no Pod startup"
+    },
+    {
+      "id": "api-ebpf-wireguard-rejection",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Only if existing controller DATAPATH=ebpf: complete Gateway CR is reconciled Ready=False/Unsupported before Secret lookup and no Deployment rendered; NOT webhook rejection"
+    }
   ]
 }
