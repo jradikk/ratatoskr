@@ -1,9 +1,43 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
-**Not wired into the matrix runner and not awarded coverage.** Static-only checks
+## Guarded read-only preflight (still NOT a final-gate e2e)
+
+`run.py` is an explicitly incomplete guard, not a traffic runner. Without **both**
+`RATATOSKR_E2E_FINAL_GATE=1` and `--execute`, it exits 2 without calling kubectl.
+With both guards and seven `EXPECTED_{CONTROLLER,WEBHOOK,AGENT,GATEWAY,PLUGIN,SERVER,TOOLS}_IMAGE_ID`
+values (each an immutable runtime SHA-256 ID), it makes only bounded, read-only
+requests against `k3d-ratatoskr-flannel`. It checks the existing three Ready
+flannel/no-mesh nodes, fail-closed admission registration, current
+Deployment→ReplicaSet→Pod and DaemonSet→Pod runtime IDs for the three release
+components, aligned agent/iproute config, and the exact trusted probe URL in
+controller configuration. It deliberately exits **4 / INCOMPLETE** even after
+this preflight succeeds: the other four IDs are required but **not verified**
+against runtime Pods, and no fixture, PKI, traffic, cleanup or TLS proof occurs.
+Failure exits 1 with no raw Kubernetes object/error printing. It does not
+build/import images, create resources, provision hosts or upgrade a release.
+
+**Do not use preflight success as authorization to claim e2e coverage.** A full
+runner must additionally verify *all seven* actual image IDs including new
+fixture Pod runtime IDs, tunnel identity/bytes, ownership/status, restricted
+agent behavior, direct DNS/API routing, fail-close and recovery, and both unique
+namespace deletions before ever reporting PASS. This remains a deliberately
+blocked boundary rather than a partial positive traffic test. In particular,
+there is no unsafe namespace create with unverified cleanup and no persistent
+secret manifest in this preflight.
+
+Cluster-free validation:
+
+```sh
+python3 -m unittest discover -s test/e2e/matrix/synthetic -p test_run.py
+python3 test/e2e/matrix/synthetic/static-check.py
+sh -n test/e2e/matrix/synthetic/server/start.sh
+```
+
+**Not wired into the matrix runner and not awarded coverage.** Static-only fixture checks
 exercise safe manifest structure without generating PKI, invoking Docker/openssl,
-reading credentials or contacting a cluster. Execution requires a separate final-
-gate runner, evidence checks and cleanup before a pass can be asserted. This
+reading credentials or contacting a cluster. The separate read-only preflight above
+can contact a cluster only with both explicit guards; a complete final-gate runner,
+evidence checks and cleanup are still required before a pass can be asserted. This
 scaffold alone does not verify owner chain, agent marker, DNS/API, fail-close,
 recovery or traffic. Do not `kubectl apply` these objects manually as a proof.
 

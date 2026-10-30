@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Cluster-free synthetic preflight contracts. No Docker, OpenSSL or kubectl."""
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+import subprocess
+import sys
+import unittest
+
+HERE = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("synthetic_run", HERE / "run.py")
+run = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(run)
+DIGEST = "containerd://sha256:" + "a" * 64
+IDS = {component: DIGEST for component in run.COMPONENTS}
+
+
+def node(control=False):
+    return {"metadata": {"labels": {"node-role.kubernetes.io/control-plane": ""} if control else {}},
+            "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+
+
+def pod(component, owner_kind, owner_uid):
+    return {"metadata": {"ownerReferences": [{"kind": owner_kind, "name": owner_uid, "uid": owner_uid,
+                                               "controller": True}]},
+            "status": {"conditions": [{"type": "Ready", "status": "True"}],
+                       "containerStatuses": [{"name": component, "ready": True, "imageID": DIGEST}]}}
+
+
+def deployment(component):
+    return {"metadata": {"uid": component + "-uid", "generation": 1},
+            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": component}},
+                     "template": {"spec": {"containers": [{"name": component, "env": [
+                         {"name": "DRIVER", "value": "agent"}, {"name": "DATAPATH", "value": "iproute"},
+                         {"name": "GATEWAY_UPSTREAM_PROBE_URL", "value": run.PROBE},
+                         {"name": "IMAGE_PULL_POLICY", "value": "Never"},
+                         {"name": "GATEWAY_IMAGE", "value": "gateway-local"},
+                         {"name": "OPENVPN_IMAGE", "value": "plugin-local"},
+                         {"name": "INIT_IMAGE", "value": "ratatoskr-tools:m1-local"}]}]}}},
+            "status": {"observedGeneration": 1, "availableReplicas": 1}}
+
+
+class FakeAPI:
+    def __init__(self):
+        self.objects = {
+            ("nodes", None, None, None): {"items": [node(True), node(), node()]},
+            ("configmap", "ratatoskr-testenv", "kube-system", None):
+                {"data": {"variant": "flannel", "mesh": "none"}},
+        }
+        paths = [("pods.ratatoskr.skaldhall.io", "/mutate-v1alpha1-pod"),
+                 ("pods.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
+                 ("egressgateways.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
+                 ("egresspolicies.ratatoskr.skaldhall.io", "/validate-v1alpha1")]
+        hooks = [{"name": name, "failurePolicy": "Fail", "sideEffects": "None",
+                  "clientConfig": {"caBundle": "public", "service": {"namespace": "operator", "path": path}}}
+                 for name, path in paths]
+        self.objects[("mutatingwebhookconfiguration", "ratatoskr-pods", None, None)] = {"webhooks": hooks[:1]}
+        self.objects[("validatingwebhookconfiguration", "ratatoskr-validation", None, None)] = {"webhooks": hooks[1:]}
+        for component in ("controller", "webhook"):
+            name = "ratatoskr-" + component
+            self.objects[("deployment", name, "operator", None)] = deployment(component)
+            self.objects[("pods", None, "operator", "app=" + component)] = (
+                {"items": [pod(component, "ReplicaSet", component + "-rs")]})
+            self.objects[("replicaset", component + "-rs", "operator", None)] = (
+                {"metadata": {"uid": component + "-rs", "ownerReferences": [
+                    {"kind": "Deployment", "uid": component + "-uid", "controller": True}]}})
+        self.objects[("daemonset", "ratatoskr-agent", "operator", None)] = {
+            "metadata": {"uid": "agent-uid", "generation": 1},
+            "spec": {"selector": {"matchLabels": {"app": "agent"}},
+                     "template": {"spec": {"containers": [{"name": "agent", "env": [{"name": "DATAPATH", "value": "iproute"}]}]}}},
+            "status": {"observedGeneration": 1, "desiredNumberScheduled": 3,
+                       "updatedNumberScheduled": 3, "numberReady": 3}}
+        self.objects[("pods", None, "operator", "app=agent")] = {
+            "items": [pod("agent", "DaemonSet", "agent-uid") for _ in range(3)]}
+        self.calls = []
+
+    def get(self, resource, name=None, namespace=None, selector=None):
+        self.calls.append((resource, name, namespace, selector))
+        return self.objects[(resource, name, namespace, selector)]
+
+
+class GateTests(unittest.TestCase):
+    def test_disabled_does_not_access_api(self):
+        def forbidden():
+            raise AssertionError("unauthorized cluster access")
+        for argv, env in (([], {}), (["--execute"], {}), ([], {"RATATOSKR_E2E_FINAL_GATE": "1"})):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run.main(argv, env, forbidden), 2)
+
+    def test_expected_ids_all_mandatory_immutable(self):
+        env = {"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()}
+        self.assertEqual(run.expected_ids(env), IDS)
+        for key in env:
+            for invalid in ("", "example:latest", "sha256:" + "g" * 64):
+                altered = dict(env, **{key: invalid})
+                with self.assertRaises(run.Blocked):
+                    run.expected_ids(altered)
+
+    def test_positive_preflight_never_awards_e2e(self):
+        api = FakeAPI()
+        self.assertEqual(run.preflight(api, IDS), "operator")
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run.main(["--execute"], env, lambda: api), 4)
+        self.assertIn("INCOMPLETE", output.getvalue())
+        self.assertNotIn("PASSED", output.getvalue())
+        self.assertTrue(all(call[0] not in ("secret", "logs") for call in api.calls))
+
+    def test_safety_breaks_fail_closed(self):
+        mutations = [
+            lambda a: a.objects[("nodes", None, None, None)]["items"].pop(),
+            lambda a: a.objects[("configmap", "ratatoskr-testenv", "kube-system", None)]["data"].update(variant="cilium"),
+            lambda a: a.objects[("deployment", "ratatoskr-controller", "operator", None)]["spec"]["template"]["spec"]["containers"][0]["env"][2].update(value=""),
+            lambda a: a.objects[("pods", None, "operator", "app=agent")]["items"][0]["status"]["containerStatuses"][0].update(imageID="sha256:bad"),
+            lambda a: a.objects[("validatingwebhookconfiguration", "ratatoskr-validation", None, None)]["webhooks"][0].update(failurePolicy="Ignore"),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                api = FakeAPI()
+                mutate(api)
+                with self.assertRaises(run.Blocked):
+                    run.preflight(api, IDS)
+
+    def test_api_no_raw_errors_or_mutations(self):
+        original = subprocess.run
+        try:
+            def fake(args, **_kwargs):
+                self.assertEqual(args[4:6], ["get", "nodes"])
+                raise subprocess.TimeoutExpired(args, 1, stderr="private")
+            subprocess.run = fake
+            with self.assertRaisesRegex(run.Blocked, "unavailable") as ctx:
+                run.ReadOnlyAPI().get("nodes")
+            self.assertNotIn("private", str(ctx.exception))
+            with self.assertRaises(run.Blocked):
+                run.ReadOnlyAPI(budget=-1).get("nodes")
+        finally:
+            subprocess.run = original
+
+
+if __name__ == "__main__":
+    unittest.main()
