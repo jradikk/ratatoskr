@@ -23,3 +23,18 @@ clarifications. Do not treat unimplemented checks or skipped tests as passing.
 | # | Conflict | User-approved resolution |
 |---|---|---|
 | S13 | M2 originally demanded gateway PodIP change recovery **without restarting client pods**, but its `init` driver configures the pod's fixed-remote GENEVE device once. Repointing to a stable ClusterIP Service cannot work: the Linux GENEVE receive lookup rejects return packets whose actual gateway PodIP source differs from the configured Service VIP (`drivers/net/geneve.c`, `geneve_lookup`, upstream v7.0). | On October 29, 2026 the user selected option 1: keep M2 init-only and require a client-pod rollout after a gateway PodIP change; M5 `agent` mode must meet no-client-restart recovery with in-place endpoint updates. The Service VIP proposal remains rejected (ADR-0012). |
+
+## Open final-gate design conflicts (October 30, 2026)
+
+These are **unresolved release blockers**, not accepted changes to the user-approved
+routing, security or compatibility contracts. Do not mark either check passed on
+the strength of isolated unit tests, and do not silently widen egress policy.
+
+| # | Observed conflict | Required decision and proof before acceptance |
+|---|---|---|
+| S14 | The iproute client uses an nft route/output mark for port-qualified steering. A selected TCP SYN-ACK reaches client `rtk0` **without** that mark. With effective loose `rp_filter=2`, default `src_valid_mark=0`, kernel `fib_validate_source` returned `-16` and dropped the packet as `SKB_DROP_REASON_IP_RPFILTER`. Marking ingress and setting `src_valid_mark=1` passed a disposable-netns test, but the normal NET_ADMIN-only init Pod's `/proc/sys` mount is read-only, so it cannot apply that sysctl. An unmarked destination rule routes wrong-port traffic through the tunnel and breaks include-policy semantics; `iif`-scoped and throw routes did not rescue the reply. | Design and review a **NET_ADMIN-only, restricted-Pod-compatible** return-source-validation strategy or a different routing-based selector before declaring selective mode supported. Preserve `rp_filter`/source validation, client init privilege bounds, cluster exclusions and nonmatching direct paths. Prove both positive selected TCP/UDP returns and negative wrong-port/CIDR cases in disposable netns **and** final multi-pod traffic. Until then, M8 selective and M9 are blocked. |
+| S15 | The tc-egress eBPF client reports successful tunnel-key/option helpers but its collect-md `gnv0` drops steered packets before outer UDP emission; `geneve_xmit` sees no usable TX tunnel metadata. A disposable tc-ingress hook with the same program emits the expected UDP/VNI/TLV and reaches the gateway, but locally generated pod OUTPUT traffic never traverses client `eth0` ingress. Source review does not prove exactly where egress metadata is lost or that Linux 5.10 forbids it. | Review an attachment/routing topology for **locally generated** selected packets that preserves CNI-independent routing semantics, mark exclusions, mesh compatibility, and no-endpoint fail-close. Require captured outer packet, gateway flower accept, return traffic and supported-kernel validation—not only BPF helper success or `gnv0` TX counters. No ingress-only swap, unverified clone redirect, or plaintext fallback may be represented as the second production datapath. |
+
+The exact diagnostics, safe rollback and skipped live tier are in
+`docs/milestones/m9/final-gate.md`; no VPN configuration, key or token is
+needed to review these design choices.
