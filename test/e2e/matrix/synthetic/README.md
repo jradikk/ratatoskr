@@ -1,5 +1,23 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Immutable image expectations and exact fixture CREATE identity
+
+The read-only opt-in preflight now requires **nine** parent-approved immutable
+runtime image IDs: controller, webhook, agent, gateway, plugin, server, tools,
+witness, and selected helper. Its cluster access remains read-only; only the
+first three existing release components can be runtime-compared until fixtures
+are actually created. `FixtureAPI.create` accepts one allowlisted fixture JSON
+per exact `(kind, namespace, name)` and sends it by stdin to `kubectl create`
+with a fixed identity-only JSONPath (`apiVersion`, `kind`, `namespace`, `name`,
+`UID`) and a 256-byte capture cap. Even a Secret CREATE's data is **never
+printed, captured or returned**. It returns only the
+API-server-created kind, namespace, name, and immutable UID after exact
+response validation, not a guessed name-only GET. A timeout, malformed/error
+response, changed identity or ambiguous CREATE permanently quarantines that
+name in the adapter; it is not retried or adopted. Such an object may need
+operator orphan remediation if namespace cleanup fails. These helpers remain
+unwired to `run.py` and **cannot award PASS**.
+
 ## Selected restricted one-shot application helper (unexecuted)
 
 `app/Dockerfile` is a **locally built, test-only, nonroot UID 65532** image
@@ -29,8 +47,9 @@ a negative test only when `exit42` lies inside verified endpoint withdrawal
 and a separate authenticated witness simultaneously proves `/marker` remains
 reachable through its own VPN. Three static/fake-only phases do **not**
 orchestrate such a test. **`run.py` remains read-only and INCOMPLETE.**
-The ninth local image (selected helper), fresh Pod UID capture from CREATE,
-and all runtime packet/agent/exclusion proofs require explicit parent preflight;
+The ninth local image (selected helper) has an explicit expected immutable ID,
+but its runtime ID and all packet/agent/exclusion proofs still require a parent
+preflight;
 Pod exit alone is not standalone tunnel evidence.
 
 ## Independent one-shot OpenVPN marker witness (unexecuted)
@@ -65,8 +84,8 @@ subprocess/socket/API/status only. **No runtime status format, TUN access,
 CA/client handshake or Pod scheduling has been validated against a cluster.**
 `run.py` is still read-only and returns INCOMPLETE; no e2e PASS path exists.
 A future operator must additionally approve the witness runtime image ID;
-existing `run.py` and `collector.py` still accept seven IDs and do **not**
-validate this eighth image at preflight. No execution or coverage is awarded
+`run.py` and `collector.py` now require nine explicit expected image IDs,
+but only three existing release components are runtime-verified at preflight. No execution or coverage is awarded
 until that preflight, Pod timing, exact status-v3 shape and Kubernetes cleanup
 are implemented and verified. The witness container's Pod-local device node
 and `SO_BINDTODEVICE` behavior also require real Linux cluster validation.
@@ -233,7 +252,7 @@ no cluster, OpenSSL or real private keys were used during authoring.
 
 `run.py` is an explicitly incomplete guard, not a traffic runner. Without **both**
 `RATATOSKR_E2E_FINAL_GATE=1` and `--execute`, it exits 2 without calling kubectl.
-With both guards and seven `EXPECTED_{CONTROLLER,WEBHOOK,AGENT,GATEWAY,PLUGIN,SERVER,TOOLS}_IMAGE_ID`
+With both guards and nine `EXPECTED_{CONTROLLER,WEBHOOK,AGENT,GATEWAY,PLUGIN,SERVER,TOOLS,WITNESS,SELECTED}_IMAGE_ID`
 values (each an immutable runtime SHA-256 ID), it makes only bounded, read-only
 requests against `k3d-ratatoskr-flannel`. It checks the existing three Ready
 flannel/no-mesh nodes, fail-closed admission registration, current
@@ -246,7 +265,7 @@ Failure exits 1 with no raw Kubernetes object/error printing. It does not
 build/import images, create resources, provision hosts or upgrade a release.
 
 **Do not use preflight success as authorization to claim e2e coverage.** A full
-runner must additionally verify *all seven* actual image IDs including new
+runner must additionally verify *all nine* actual image IDs including new
 fixture Pod runtime IDs, tunnel identity/bytes, ownership/status, restricted
 agent behavior, direct DNS/API routing, fail-close and recovery, and both unique
 namespace deletions before ever reporting PASS. This remains a deliberately

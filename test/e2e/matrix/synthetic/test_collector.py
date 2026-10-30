@@ -14,7 +14,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 UID = "c" * 32
 EXPECTED = "containerd://sha256:" + "d" * 64
-IDS = {name: EXPECTED for name in ("controller", "webhook", "agent", "gateway", "plugin", "server", "tools")}
+IDS = {name: EXPECTED for name in ("controller", "webhook", "agent", "gateway", "plugin", "server", "tools", "witness", "selected")}
 LINK = {"ifname": "rtk0", "ifindex": 5, "operstate": "UP", "linkinfo": {
     "info_kind": "geneve", "info_data": {"id": 7, "remote": "10.42.1.7"}}}
 MARKER = {"ifname": "rtk-ready", "flags": ["UP"], "linkinfo": {"info_kind": "dummy"}}

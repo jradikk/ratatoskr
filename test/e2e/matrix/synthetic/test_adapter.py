@@ -52,7 +52,12 @@ class FakeTransport:
                 return json.dumps({"sessions": [{"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 22,
                                    "sent": 33, "connected": 100, "peer": 7, "cipher": "AES-256-GCM"}]}).encode()
             return b"safe-result\n"
-        return b"pod/synthetic-client\n"
+        if argv[4] == "create":
+            manifest = json.loads(payload)
+            return ("\t".join((manifest["apiVersion"], manifest["kind"],
+                                manifest["metadata"]["namespace"], manifest["metadata"]["name"],
+                                self.uid))).encode()
+        return b"unknown"
 
 
 def make():
@@ -88,17 +93,69 @@ class AdapterTests(unittest.TestCase):
         obj = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                "metadata": {"name": "synthetic-server", "namespace": ns},
                "data": {"ca.crt": "PUBLIC", "server.crt": "PUBLIC", "server.conf": "PRIVATE", "server.key": "PRIVATE-CREDENTIAL"}}
-        adapter.create(obj)
+        created = adapter.create(obj)
+        self.assertEqual(created, {"kind": "Secret", "namespace": ns, "name": "synthetic-server", "uid": POD_UID})
         argv, data, timeout, limit = fake.calls[-1]
-        self.assertEqual(argv[-5:], ["create", "-f", "-", "-o", "name"])
+        self.assertEqual(argv[-5:], ["create", "-f", "-", "-o", a.CREATE_IDENTITY])
         self.assertNotIn("PRIVATE-CREDENTIAL", " ".join(argv))
         self.assertIn(b"PRIVATE-CREDENTIAL", data)
         self.assertLessEqual(timeout, 12)
-        self.assertEqual(limit, 1024)
+        self.assertEqual(limit, 256)
         fake.fail = RuntimeError("PRIVATE-CREDENTIAL printed by API")
         with self.assertRaises(a.AdapterError) as ctx:
-            adapter.create(obj)
+            make_adapter, _ = make()
+            make_adapter.transport = fake
+            make_adapter.create(obj)
         self.assertNotIn("PRIVATE-CREDENTIAL", str(ctx.exception))
+
+    def test_ambiguous_create_response_never_guesses_identity_or_retries(self):
+        adapter, fake = make()
+        ns = adapter.owner.names[0]
+        obj = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+               "metadata": {"name": "synthetic-server", "namespace": ns},
+               "data": {"ca.crt": "PUBLIC", "server.crt": "PUBLIC",
+                        "server.conf": "PRIVATE", "server.key": "PRIVATE-CREDENTIAL"}}
+        for response in (b"", b"not-json", b"v1\tSecret\t" + ns.encode() +
+                         b"\tsynthetic-server\tx",
+                         b"v1\tSecret\tforeign\tsynthetic-server\t" + POD_UID.encode(),
+                         b"v1\tSecret\t" + ns.encode() + b"\tsynthetic-server\t" +
+                         POD_UID.encode() + b"\tSECRET"):
+            current, transport = make()
+            def scripted(argv, *, payload, timeout, max_output):
+                transport.calls.append((argv, payload, timeout, max_output))
+                return response
+            current.transport = scripted
+            with self.subTest(response=response[:16]), self.assertRaises(a.AdapterError):
+                current.create(obj)
+            self.assertEqual(current.created, {})
+            self.assertEqual(len(transport.calls), 1)
+            with self.assertRaisesRegex(a.AdapterError, "already attempted"):
+                current.create(obj)
+            self.assertEqual(len(transport.calls), 1)
+        current, transport = make()
+        def timeout(argv, **kwargs):
+            transport.calls.append((argv, kwargs["payload"], kwargs["timeout"], kwargs["max_output"]))
+            raise TimeoutError("PRIVATE-CREDENTIAL")
+        current.transport = timeout
+        with self.assertRaises(a.AdapterError) as ctx:
+            current.create(obj)
+        self.assertNotIn("PRIVATE-CREDENTIAL", str(ctx.exception))
+        with self.assertRaisesRegex(a.AdapterError, "already attempted"):
+            current.create(obj)
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(current.created, {})
+
+    def test_duplicate_successful_create_never_posts_twice(self):
+        api, fake = make()
+        ns = api.owner.names[0]
+        obj = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+               "metadata": {"name": "synthetic-witness", "namespace": ns}, "data": {"client.ovpn": "PRIVATE"}}
+        created = api.create(obj)
+        self.assertEqual(created["uid"], POD_UID)
+        with self.assertRaisesRegex(a.AdapterError, "already attempted"):
+            api.create(obj)
+        self.assertEqual(len([call for call in fake.calls if call[0][4] == "create"]), 1)
+        self.assertEqual(api.created, {("Secret", ns, "synthetic-witness"): POD_UID})
 
     def test_preexisting_replacement_or_foreign_namespace_denied(self):
         adapter, fake = make()

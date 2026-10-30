@@ -46,9 +46,9 @@ class Transport:
             assert (argv[5], argv[6], argv[8]) == ("configmap", "synthetic-exit-health", self.namespace)
             return json.dumps(self.object()).encode()
         if argv[4] == "create":
-            assert argv[5:] == ["-f", "-", "-o", "name"]
+            assert argv[5:] == ["-f", "-", "-o", a.CREATE_IDENTITY]
             assert json.loads(payload)["metadata"]["namespace"] == self.namespace
-            return b"configmap/synthetic-exit-health"
+            return ("\t".join(("v1", "ConfigMap", self.namespace, "synthetic-exit-health", self.uid))).encode()
         assert argv[4:6] == ["replace", "--raw=/api/v1/namespaces/" + self.namespace + "/configmaps/synthetic-exit-health"]
         body = json.loads(payload)
         assert body["metadata"]["uid"] == self.uid

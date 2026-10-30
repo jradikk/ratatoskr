@@ -14,7 +14,7 @@ import time
 
 CONTEXT = "k3d-ratatoskr-flannel"
 PROBE = "http://10.88.0.1:8080/exit"
-COMPONENTS = ("controller", "webhook", "agent", "gateway", "plugin", "server", "tools")
+COMPONENTS = ("controller", "webhook", "agent", "gateway", "plugin", "server", "tools", "witness", "selected")
 ID_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}\Z")
 
 
@@ -26,7 +26,7 @@ def expected_ids(environ):
     ids = {component: environ.get("EXPECTED_" + component.upper() + "_IMAGE_ID", "")
            for component in COMPONENTS}
     if not all(ID_PATTERN.fullmatch(value) for value in ids.values()):
-        raise Blocked("Seven explicit immutable runtime image IDs are required; no mutable tag or missing ID is accepted.")
+        raise Blocked("Nine explicit immutable runtime image IDs are required; no mutable tag or missing ID is accepted.")
     return ids
 
 
@@ -182,7 +182,7 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI):
         # API objects/errors are untrusted: never print their content.
         print("FAILED: synthetic final-gate preflight blocked; no resources created. Inspect release/operator preflight privately.")
         return 1
-    print("INCOMPLETE: existing flannel/agent release and probe preflight passed; gateway/plugin/server/tools runtime IDs, TLS tunnel, DNS/API, fail-close and cleanup evidence NOT TESTED. No resources created.")
+    print("INCOMPLETE: existing flannel/agent release and probe preflight passed; gateway/plugin/server/tools/witness/selected runtime IDs, TLS tunnel, DNS/API, fail-close and cleanup evidence NOT TESTED. No resources created.")
     return 4
 
 

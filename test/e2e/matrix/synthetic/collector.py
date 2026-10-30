@@ -94,10 +94,10 @@ class Collector:
                 set(owner.owned) != set(owner.names)):
             raise Incomplete("Owned fixture Lifecycle and adapter required.")
         if (not isinstance(image_ids, dict) or
-                set(image_ids) != {"controller", "webhook", "agent", "gateway", "plugin", "server", "tools"} or
+                set(image_ids) != {"controller", "webhook", "agent", "gateway", "plugin", "server", "tools", "witness", "selected"} or
                 not all(isinstance(v, str) and re.fullmatch(
                     r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", v) for v in image_ids.values())):
-            raise Incomplete("Seven immutable expected runtime image IDs required.")
+            raise Incomplete("Nine immutable expected runtime image IDs required.")
         self.owner, self.api, self.ids = owner, api, dict(image_ids)
         self.clock, self.sleep = clock, sleep
 

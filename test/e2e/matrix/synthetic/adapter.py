@@ -48,6 +48,11 @@ FIXTURE = {"Secret": frozenset({"synthetic-server", "synthetic-client", "synthet
 GENERATED = re.compile(r"synthetic-[a-z0-9-]{1,48}\Z")
 UID = lifecycle.UID
 CONTEXT = lifecycle.CONTEXT
+# kubectl formats the API server's CREATE response, but prints ONLY five
+# identity fields. In particular, a Secret's data never reaches stdout or
+# the captured pipe. No user-controlled template or shell interpolation.
+CREATE_IDENTITY = ('jsonpath={.apiVersion}{"\\t"}{.kind}{"\\t"}'
+                   '{.metadata.namespace}{"\\t"}{.metadata.name}{"\\t"}{.metadata.uid}')
 
 # Commands accept no user-built tokens. Never exec `sh`, `cat`, `env`, `printenv`,
 # `kubectl logs`, `ip route` with nonliteral targets, or curl with redirected URLs.
@@ -149,6 +154,8 @@ class FixtureAPI:
             raise AdapterError("A running, authorized Lifecycle is required.")
         self.owner, self.transport = owner, transport
         self.exit_health_uid = None
+        self.create_attempts = set()  # never retry an ambiguous remote POST
+        self.created = {}             # only server-returned immutable UIDs
 
     def _time(self):
         if self.owner.closed:
@@ -206,14 +213,20 @@ class FixtureAPI:
             raise AdapterError("Kubernetes object identity or JSON malformed.") from None
 
     def create(self, obj):
-        """Complete allowlisted fixture JSON via stdin; never log/return body."""
+        """Single POST with pinned server-returned UID; no name-only adoption.
+
+        The attempted name is quarantined BEFORE transport. A timeout, lost
+        response, identity mismatch or malformed Secret response is ambiguous:
+        only Lifecycle namespace deletion may clean it, never a guessed GET.
+        """
         try:
             kind, meta = obj["kind"], obj["metadata"]
             name, namespace = meta["name"], meta["namespace"]
             if kind not in CREATE or name not in FIXTURE[kind] or type(obj) is not dict:
                 raise ValueError()
             if namespace != (self.owner.names[1] if kind == "EgressPolicy" or
-                             kind == "Pod" and name == "synthetic-client" else self.owner.names[0]):
+                             kind == "Pod" and (name == "synthetic-client" or
+                                                  name.startswith("synthetic-probe-")) else self.owner.names[0]):
                 raise ValueError()
             if kind == "ConfigMap":
                 if (set(obj) != {"apiVersion", "kind", "metadata", "data"} or
@@ -245,10 +258,26 @@ class FixtureAPI:
                 raise ValueError()
         except (KeyError, TypeError, ValueError, AttributeError, IndexError):
             raise AdapterError("Fixture kind, namespace or payload not allowlisted.") from None
-        # Suppress kubectl output entirely; response is not needed and may carry
-        # bytes from admission or a misbehaving server. Recheck namespace after.
-        self._call(["create", "-f", "-", "-o", "name"], payload=payload, max_output=1024)
+        identity = (kind, namespace, name)
+        if identity in self.create_attempts:
+            raise AdapterError("Fixture CREATE already attempted; no duplicate or ambiguous retry.")
+        self.create_attempts.add(identity)
+        # A fixed kubectl JSONPath outputs ONLY identity, never Secret.data.
+        # Backend receives a complete response, but private bytes do not pass
+        # through subprocess stdout/capture or later Python parsing.
+        raw = self._call(["create", "-f", "-", "-o", CREATE_IDENTITY], payload=payload,
+                         max_output=256)
+        try:
+            fields = raw.decode("ascii").rstrip("\n").split("\t")
+            if (len(fields) != 5 or fields[:4] != [obj["apiVersion"], kind, namespace, name] or
+                    not UID.fullmatch(fields[4])):
+                raise ValueError()
+            uid = fields[4]
+        except (UnicodeError, ValueError, TypeError):
+            raise AdapterError("Fixture CREATE response identity/UID unverified; no retry permitted.") from None
         self._namespace(namespace)
+        self.created[identity] = uid
+        return {"kind": kind, "namespace": namespace, "name": name, "uid": uid}
 
     def _exit_health(self, expected_uid=None):
         """Never inspect unrelated ConfigMaps or return arbitrary ConfigMap data."""

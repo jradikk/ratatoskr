@@ -66,6 +66,18 @@ class SelectedTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare.selected_probe_pod(APP, NS, "healthy", ip)
 
+    def test_adapter_create_captures_each_selected_pod_uid_without_retry(self):
+        import test_adapter as fake_adapter
+        client, transport = fake_adapter.make()
+        for phase in ("healthy", "outage", "recovery"):
+            obj = prepare.selected_probe_pod(APP, NS, phase, "10.43.0.1")
+            created = client.create(obj)
+            self.assertEqual(created, {"kind": "Pod", "namespace": APP,
+                                       "name": "synthetic-probe-" + phase, "uid": fake_adapter.POD_UID})
+        self.assertEqual(len([call for call in transport.calls if call[0][4] == "create"]), 3)
+        with self.assertRaises(fake_adapter.a.AdapterError):
+            client.create(prepare.selected_probe_pod(APP, NS, "outage", "10.43.0.1"))
+
     def test_positive_pod_status_and_negative_fail_close_exit(self):
         ids = set()
         for phase in ("healthy", "outage", "recovery"):
