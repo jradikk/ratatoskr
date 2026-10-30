@@ -215,14 +215,41 @@ This is a successful component/positive-traffic step, **not M8 or M9 acceptance*
 No new live VPN inputs were available; live remains skipped. Neither a
 Linux-5.10 runtime pass nor alternate-CNI/mesh acceptance is claimed.
 
+## October 30, 2026 — same-destination direct versus steered validation
+
+After the numbered-interface and guarded-update fixes, the selector fixture
+was further corrected to make the **same remote PodIP:8080** reachable by both
+CNI direct routing and the fake upstream; only its /32 was removed from the
+cluster Pod-CIDR exclusions. A disposable flannel Pod test established both
+routes for each backend before changing the harness. The HTTP echo identifies
+the actual remote peer: **client PodIP** for ordinary direct traffic and
+**198.19.0.2** for steered traffic. This avoids inferring routing from link
+counters, nft postrouting (which precedes the eBPF tc-egress verdict), or a
+timeout to an inner-only address.
+
+The guarded final-gate matrix then executed its two flannel/no-mesh/init/none
+cells **serially**. Both inner direct-config fake suites reported **passed**:
+matching CIDR/TCP-port requests reached the fake upstream; wrong port, wrong
+CIDR and exclude cases returned through the ordinary CNI with the client
+PodIP; endpoint withdrawal blocked the *otherwise directly reachable*
+selected destination, while DNS/API remained usable and the full tunnel
+recovered. Payload integrity, private metric health transitions, upstream
+failure/recovery and ephemeral namespace cleanup also passed. Evidence:
+`/tmp/ratatoskr-m8-fake-_cj0w5sf/`. The outer 96-cell inventory correctly
+returned **INCOMPLETE / exit 4**, because CRD/admission, restricted agent,
+WireGuard, HA, alternate CNI/mesh, full observability and Linux-5.10/runtime
+coverage remain untested. Live VPN remains **skipped** (profile unset). These
+two direct-config passes do **not** constitute M8/M9 release acceptance.
+
 ## Release blockers / next gate
 
-1. Complete five-tuple-correlated **negative** selector and no-endpoint
-   fail-close proofs on both datapaths, including a controlled reachable
-   ordinary path, without treating a timeout or aggregate link counter as
-   proof. Recheck restricted agent-mode traffic and Linux 5.10 runtime. The
-   earlier iproute and eBPF return-path component failures were resolved for
-   the flannel/init positive-flow subset, not the full policy contract.
+1. The two flannel/init direct-config cells now distinguish selected from
+   nonselected TCP/8080 using the **same reachable destination**, and
+   withdrawal blocks that destination. Extend this packet-level proof to
+   UDP, multi-policy transitions and controller-created workloads, then
+   recheck restricted agent-mode traffic and Linux 5.10 runtime. Earlier
+   iproute/eBPF return-path failures were resolved for the two flannel/init
+   subsets, not the full CNI/mesh/HA/WireGuard contract.
 2. Implement and run the missing CNI/mesh/agent/WireGuard/HA compatibility
    scenarios under the existing mandatory resource preflight. Skipped cells
    must never be represented as passed.

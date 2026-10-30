@@ -15,13 +15,15 @@ def build(config, remote_ip, pod_cidr, mode):
     remote = ipaddress.IPv4Address(remote_ip)
     pods = ipaddress.IPv4Network(pod_cidr)
     if remote not in pods or str(pods) not in cfg["exclusions"]:
-        raise ValueError("outer fake peer must remain inside an excluded pod CIDR")
-    # The fake remote's PodIP is also the IPIP OUTER peer. Steering its own
-    # PodIP through IPIP produces asymmetric replies rejected by rp_filter.
-    # Exercise the distinct, actually reachable inner service instead and
-    # retain all cluster PodIP exclusions; never disable source validation.
-    inner = "198.19.0.1/32"
-    target = str(ipaddress.IPv4Network(str(remote) + "/32")) if mode == "wrong-cidr" else inner
+        raise ValueError("remote must be inside an explicitly excluded pod CIDR")
+    # Remove ONLY the fake remote's /32 from the pod CIDR exclusions. The
+    # remote HTTP listener is reachable through both the CNI and the fake
+    # upstream. Its selected reply requires the owned, numbered GENEVE link
+    # so loose reverse-path validation can check the tunneled source.
+    cfg["exclusions"] = [p for p in cfg["exclusions"] if p != str(pods)]
+    selected = ipaddress.IPv4Network(str(remote) + "/32")
+    cfg["exclusions"] += [str(p) for p in pods.address_exclude(selected)]
+    target = "198.19.0.1/32" if mode == "wrong-cidr" else str(selected)
     port = 8081 if mode == "wrong-port" else 8080
     cfg["policy"] = {"mode": "exclude" if mode == "exclude" else "include",
                      "rules": [{"cidrs": [target], "ports": [{"protocol": "TCP", "port": port}]}]}

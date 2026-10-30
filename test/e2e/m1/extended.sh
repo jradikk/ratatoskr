@@ -33,8 +33,8 @@ m8_apply_config() {
 }
 
 m8_make_config() {
-  # The fake remote PodIP is the IPIP outer peer, not a safe inner target.
-  # Keep PodIP exclusions intact; select its distinct inner HTTP address.
+  # The controlled remote HTTP PodIP is reachable both directly through CNI
+  # and through fake IPIP. Only this /32 is removed from pod exclusions.
   python3 "$ROOT/test/e2e/matrix/client-config.py" "$PRIVATE/client.json" "$REMOTE_IP" "$POD_CIDR" "$1" \
     > "$PRIVATE/m8-client.json"
 }
@@ -42,45 +42,32 @@ m8_make_config() {
 
 m8_fake_selectors() {
   STAGE=m8-selective-policy
-  # The inner service 198.19.0.1 is reachable only through the fake IPIP
-  # upstream; the remote PodIP is the *outer* IPIP peer. It is not a valid
-  # selected inner target with rp_filter enabled. Keep the pod CIDR excluded.
-  # Aggregate GENEVE TX/RX counts include unrelated IPv6 multicast/ARP and
-  # late TCP packets; nft postrouting precedes the eBPF tc-egress verdict.
-  # Neither can prove a nonmatching flow used the ordinary path. Do not report
-  # selective-cidr-port PASSED without a five-tuple-correlated packet observer.
+  # The same remote PodIP:8080 is reachable directly over CNI and as an
+  # inner target through the fake upstream. The observed HTTP peer address
+  # distinguishes the paths without aggregate link counters or packet noise.
   for policy in include wrong-port wrong-cidr exclude; do
     m8_make_config "$policy"
     m8_apply_config "$PRIVATE/m8-client.json"
-    if [[ "$policy" == include ]]; then
-      client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
-      record m8-selective-include passed 'Matching inner TCP/8080 reached the fake upstream; admission and negative packet path not covered.'
-    else
-      if client_curl http://198.19.0.1:8080/echo >/dev/null; then
-        record m8-selective-policy failed 'Nonmatching inner service unexpectedly reached fake upstream.'; exit 1
-      fi
-      record "m8-selective-$policy" inconclusive 'Inner-only request failed; ordinary-path emission versus packet drop is not observed.'
-    fi
-    client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
+    expected=$CLIENT_IP
+    [[ "$policy" != include ]] || expected=198.19.0.2
+    client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$expected" '.ip==$ip' >/dev/null
   done
-  record m8-selective-policy inconclusive 'Negative inner-only requests failed and outer PodIP stayed reachable; no five-tuple-correlated ordinary-path/tunnel proof. CRD/admission not covered.'
+  record m8-selective-policy passed 'Same reachable remote PodIP reports VPN exit for matching CIDR/TCP port and client PodIP for wrong port/CIDR and exclude; admission not covered.'
   STAGE=m8-no-endpoint
   m8_make_config no-endpoint
   m8_apply_config "$PRIVATE/m8-client.json"
-  if client_curl http://198.19.0.1:8080/echo >/dev/null; then
-    record m8-no-endpoint failed 'Selected inner service unexpectedly succeeded after endpoint withdrawal.'
+  if client_curl "http://$REMOTE_IP:8080/echo" >/dev/null; then
+    record m8-no-endpoint failed 'Selected reachable PodIP unexpectedly succeeded after endpoint withdrawal.'
     exit 1
   fi
-  # No-endpoint drop has independent privileged BPF/route tests; a failed
-  # request to an inner-only address alone cannot prove no ordinary leak.
   client getent ahostsv4 kubernetes.default.svc.cluster.local >/dev/null
   api_code=$(client curl --ipv4 --noproxy '*' --silent --insecure --connect-timeout 3 --max-time 8 \
     --output /dev/null --write-out '%{http_code}' "https://$API_IP/version" 2>/dev/null)
   [[ "$api_code" == "$api_before" ]]
-  client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
   m8_apply_config "$PRIVATE/client.json"
+  client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
   client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
-  record m8-no-endpoint passed 'Inner-only service was unavailable after endpoint withdrawal; cluster paths survived and full tunnel recovered. Ordinary-leak prevention is NOT proven by this check.'
+  record m8-no-endpoint passed 'Endpoint withdrawal blocks the otherwise directly reachable selected PodIP while DNS/API survive; original full steering recovers.'
 }
 
 m8_fake_payload() {

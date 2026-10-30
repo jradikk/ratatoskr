@@ -1,7 +1,7 @@
 # M8 — compatibility coverage inventory and deferred scenario scaffold
 
-Status: **static validation passed; final compatibility acceptance remains INCOMPLETE**.
-This report records the M8 *authoring-stage* static checks. Initial final fake subsets failed. Subsequent numbered-client-GENEVE and fail-closed eBPF update fixes let both direct-config flannel/init positive-traffic subsets complete independently; a serial rerun marked negative selector paths **INCONCLUSIVE**, so the matrix remains nonzero/incomplete. The live VPN tier skipped because its profile was unset. No full CNI/mesh matrix cell is accepted; see `docs/milestones/m9/final-gate.md`.
+Status: **static and two direct-config flannel/init fake subsets passed; full compatibility acceptance remains INCOMPLETE**.
+This report records the M8 authoring-stage static checks and later final-gate follow-ups. Initial fake subsets failed; numbered-client-GENEVE and guarded eBPF update fixes restored positive traffic. A corrected fixture then tested selected and nonselected TCP/8080 against the **same reachable remote PodIP**: both iproute and eBPF inner suites passed serially, including directly reachable endpoint withdrawal, while the 96-cell matrix returned INCOMPLETE/exit 4 because other CNI/mesh/agent/WireGuard/HA scenarios remain untested. The live VPN tier skipped because its profile was unset. No full compatibility/release acceptance is claimed; see `docs/milestones/m9/final-gate.md`.
 
 ## Audit and implementation
 
@@ -37,17 +37,20 @@ traffic evidence for M8.
   bounded M1 cleanup and local-image-only contract. No VM changes or alternate
   CNI installation are attempted by these new scenarios. No resource preflight
   is bypassed or duplicated on cluster reuse.
-- Final-gate extended fake scenarios test include/exclude CIDR and TCP-port
-  selectors against the **inner** IPIP service `198.19.0.1` and compare tunnel
-  transmit counters with direct access to the separately reachable outer PodIP.
-  The original fixture steered the outer IPIP peer PodIP through its own tunnel;
-  its SYN-ACK was rejected by the client reverse-path check and it was not a
-  valid selective policy proof. The corrected fixture retains cluster PodIP
-  exclusions and does not relax `rp_filter`. Endpoint-withdrawal failure for
-  the inner-only service alone is **not** proof that an ordinary path would
-  have been available; that requires a separate controlled reachable fixture.
-  These are direct datapath checks, **not CRD compiler, admission or endpoint-
-  reconciliation proofs**.
+- Final-gate extended fake scenarios now use the **same reachable remote
+  PodIP:8080** through both the ordinary CNI path and the fake upstream. Only
+  that remote /32 is removed from pod-CIDR exclusions. Its HTTP echo returns
+  the client PodIP on the direct path and fake exit IP `198.19.0.2` when
+  steered, proving matching include versus wrong-port, wrong-CIDR and exclude
+  behavior without relying on aggregate GENEVE counters, inner-only timeouts
+  or packet classification before tc egress. Endpoint withdrawal also blocks
+  this otherwise directly reachable destination; DNS/API survive, and the
+  full tunnel recovers. The owned numbered client GENEVE addresses permit
+  reverse-source validation without relaxing `rp_filter`. These are still
+  **direct datapath checks**, not CRD compiler, admission, agent, mesh or
+  multi-gateway reconciliation proofs. A serial final-gate run at
+  `/tmp/ratatoskr-m8-fake-_cj0w5sf/` recorded both inner suites passed while
+  the outer matrix remained INCOMPLETE/exit 4.
 - A 4.5 MiB deterministic fake payload is checked for exact length and SHA256
   (the existing fixture repeats the nine-byte `ratatoskr` 512×1024 times, exactly
   4,718,592 bytes; the older 4 MiB task description was inaccurate);
