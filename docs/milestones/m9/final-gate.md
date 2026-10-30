@@ -96,6 +96,16 @@ positive cell. The exact requested live steps 1–13 were unavailable and have
 not been invented. A working live VPN profile and an approved exact checklist
 are prerequisites before live acceptance.
 
+## Publication safety gate
+
+The original `.github/workflows/ci.yaml` pushed and signed component images
+on any `v*` tag after local lint/test jobs, even though the full traffic and
+compatibility gates were absent. CI has now been made build-only (`push: false`,
+no registry login, package-write or signing identity). Tags no longer trigger
+an automatic publication. A future **separately reviewed, explicitly gated**
+release workflow is required before any release tag can publish images, chart,
+SBOM or signature. This is a safety guard, not completion of M9.
+
 ## Release blockers / next gate
 
 1. Resolve selective port-qualified return with a verified fail-closed design
