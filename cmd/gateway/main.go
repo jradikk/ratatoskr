@@ -315,7 +315,10 @@ func run(ctx context.Context, configPath string) error {
 	// The health API remains on the pod network for probes/controller. Metrics
 	// are deliberately bound to loopback only; do not add a public Service or
 	// NetworkPolicy ingress without an explicit scrape-authentication design.
-	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: observability.GatewayHandler(func() bool { return current.Load().(state).ready }), ReadHeaderTimeout: 3 * time.Second}
+	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: observability.GatewayHandler(func() (bool, int) {
+		s := current.Load().(state)
+		return s.ready, s.effectiveMTU
+	}), ReadHeaderTimeout: 3 * time.Second}
 	metricsListener, err := net.Listen("tcp4", metrics.Addr)
 	if err != nil {
 		return fmt.Errorf("listen private gateway metrics: %w", err)
