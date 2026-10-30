@@ -8,8 +8,11 @@ or VPN is down, steered traffic fails closed.
 
 > **Status: pre-alpha; NOT READY FOR PRODUCTION.** M4–M7 components have local
 > checks, but the final traffic gate is blocked: iproute port-selective TCP
-> replies fail reverse-path validation in restricted init Pods, and the eBPF
-> client loses collect-md GENEVE transmit metadata before gateway ingress.
+> replies fail reverse-path validation in the NET_ADMIN-only programming init
+> container, and the eBPF fake echo times out **after** packet-correlated
+> gateway flower acceptance and GENEVE return reception. The precise eBPF
+> socket failure remains unproven; intrinsic tc-egress metadata loss was not
+> reproduced with the unchanged production program.
 > The basic iproute full-tunnel fake proof passes after a return-TTL fix, but
 > it does not establish selective, eBPF, CNI/mesh, HA, or live VPN acceptance.
 > No release has been published. See [final-gate evidence](docs/milestones/m9/final-gate.md),

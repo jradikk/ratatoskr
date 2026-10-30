@@ -105,9 +105,11 @@ The full M2–M8 matrix remains incomplete. Unimplemented requirements include:
   and endpoint updates without workload recreation.
 - eBPF policy-update lockdown and agent late-IPv6 quarantine were subsequently
   implemented and component-tested (`5aa03fb`, `d5ae6af`). The final eBPF fake
-  traffic gate later **failed before gateway ingress** with missing collect-md
-  TX metadata. Init-driver late IPv6, actual Linux 5.10 loading and CNI-specific
-  interface/underlay source verification remain unverified.
+  traffic gate later **failed** at the tunneled echo. A subsequent flannel Pod
+  reproduction saw gateway flower acceptance and client GENEVE return reception;
+  the client's socket still timed out, so the earlier pre-ingress metadata
+  explanation was too broad. Init-driver late IPv6, actual Linux 5.10 loading
+  and CNI-specific interface/underlay source verification remain unverified.
 - 1–3 gateway replicas, HA affinity/failover and endpoint churn. Existing flows
   may break across replicas; transparent continuity must not be claimed.
 - Full observability counters/handshake/peer metrics absent from components.

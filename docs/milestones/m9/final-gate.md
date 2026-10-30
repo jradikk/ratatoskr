@@ -74,26 +74,24 @@ permission model is needed; **M8 selective traffic still fails**.
 
 **The independent eBPF fake subset also FAILED** at its first steered echo.
 Its client init, baseline cluster paths, gateway readiness, MTU and private
-metric checks passed, but the fake tunneled request timed out. A bounded
-isolated two-netns eBPF-client → iproute-gateway reproduction showed client
-external `gnv0` transmit drops with no gateway `gnv0` receive packets or TC
-flower hits; the client underlay route and BPF helper return counters were
-healthy. A `geneve_xmit` probe recorded a transmit attempt where the observed skb
-had `dst.flags=0`, mode/remote zero; the collect-md GENEVE device dropped
-traffic before outer UDP was observed. **That skb was not conclusively
-correlated to the selected IPv4 flow** and may have been unrelated ARP/IPv6
-noise. In a newer minimal disposable-netns test, tc **egress** with the same
-24-byte tunnel-key ABI, option helper, MAC rewrite and redirect *did* emit
-outer UDP/VNI/TLV; `geneve_xmit` saw DST_METADATA for that packet. Therefore
-metadata loss is **not proven to be intrinsic to tc egress**. Linux 5.10 source
-confirms the helper installs skb metadata and the GENEVE driver requires it,
-but neither source nor the minimal test explains why the full production
-program/map path failed. Removing the TLV helper and MAC rewrite
-or trying clone redirect in disposable diagnostic builds did not repair this.
-Those diagnostic changes were discarded; there is **no verified production
-fix**, and the earlier isolated `gnv0` counter check
-was not proof of end-to-end gateway ingress. eBPF may not be represented as a
-passing second datapath.
+metric checks passed, but the fake tunneled request timed out. An early
+isolated two-netns attempt observed client `gnv0` transmit drops and no
+gateway GENEVE reception. An uncorrelated `geneve_xmit` probe saw an skb with
+`dst.flags=0`; **it was not proven to be the selected IPv4 packet**, and may
+have been ARP/IPv6 noise. The initial conclusion that production tc egress
+intrinsically lost metadata was incorrect.
+
+A later fresh disposable-netns test loaded the **unchanged production bpf2go
+program and maps** (tag `dd6261f9ac61fee5`), emitted outer UDP/6081 with VNI
+7 and identity TLV, and the actual gateway `gnv0`/source-and-VNI flower
+accepted the selected packet. Selected-packet probes observed `DST_METADATA`
+at `geneve_xmit`. A separate disposable **flannel Pod** reproduction with the
+same program tag likewise saw gateway flower acceptance and GENEVE RX, return
+outer UDP delivered to the client node, and client `gnv0` RX, yet the client
+socket timed out. Thus the **forward path works in the reproduced case**; the
+remaining failure is after return delivery, with reverse-path validation a
+hypothesis requiring a packet-correlated drop trace. Neither an end-to-end
+reply nor Linux 5.10 runtime has passed; eBPF remains unaccepted.
 
 A follow-up **disposable-netns tc-ingress experiment** on kernel 7.0 used the
 same BPF program and successfully emitted outer UDP/6081 with expected VNI
@@ -169,12 +167,14 @@ untested, and the unset live profile is still a **skip**, not a pass.
 ## Release blockers / next gate
 
 1. Resolve selective port-qualified return with a verified fail-closed design
-   that operates in restricted init Pods without weakening reverse-path
-   validation. Separately repair eBPF metadata delivery to collect_md GENEVE
-   and verify actual gateway ingress, not only BPF helper success. Rerun the
-   extended fake subset, policy/metadata/DNS and both datapaths. The basic
-   iproute full-tunnel return TTL problem is fixed and its direct fake suite
-   passed, but it does not imply selective/eBPF/HA acceptance.
+   that operates in NET_ADMIN-only programming init containers without
+   weakening reverse-path validation. Diagnose the eBPF socket timeout **after
+   verified forward GENEVE and return reception** with packet-correlated
+   source-validation/drop evidence before proposing a fix; do not redesign
+   collect-md on the disproven assumption that tc egress intrinsically loses
+   metadata. Rerun the extended fake subset, policy/metadata/DNS and both
+   datapaths. The basic iproute full-tunnel return TTL problem is fixed and its
+   direct fake suite passed, but not selective/eBPF/HA acceptance.
 2. Implement and run the missing CNI/mesh/agent/WireGuard/HA compatibility
    scenarios under the existing mandatory resource preflight. Skipped cells
    must never be represented as passed.
