@@ -298,6 +298,30 @@ and the agent DaemonSet 3/3 Ready. Each outer inventory remained
 **INCOMPLETE / exit 4** because API evidence does not establish healthy VPN,
 agent-managed traffic, other CNI/mesh variants, HA, or live acceptance.
 
+## October 30, 2026 — operator-only probe and unexecuted synthetic fixture
+
+An operator-only `dns.upstreamProbeURL` Helm value (`67d9634`) now passes a
+literal unicast IPv4 HTTP(S) URL to the OpenVPN plugin's existing
+`--probe-url` flag. Empty preserves the external HTTPS default. The controller
+rejects credentials, hostnames, queries, fragments and malformed ports;
+workloads cannot set this value in the CRD. The plugin retains its tunnel-bound,
+marked socket and rejects non-tunnel fallback. Controller render tests, full
+Go race/lint/vet/build and chart checks passed; **no new images were rolled or
+VPN requests run**.
+
+The non-executing `test/e2e/matrix/synthetic/` scaffold (`5bb6205`, followed by
+Pod-local TUN isolation `d4c3f53`) defines real OpenVPN server and ephemeral
+PKI/Secret/manifest helpers plus static contract tests. The server uses only
+NET_ADMIN/MKNOD and an emptyDir TUN device, not a host device mount; the
+restricted client declares no added capabilities or credentials. Synthetic
+private keys, even generated only for tests, are sensitive material. Only
+static, shell-syntax and matrix/admission-static checks passed; **no PKI,
+server image, Secret, Gateway, Pod or tunnel was created and no e2e passed**.
+A bounded runner with immutable image provenance, release probe verification,
+owner-chain/agent/traffic/negative-path assertions and verified cleanup remains
+required before healthy controller-created Gateway acceptance. The two direct-
+config fake cells and four-mode API admission checks do not establish it.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
