@@ -25,6 +25,7 @@ def node(control=False):
 def pod(component, owner_kind, owner_uid):
     return {"metadata": {"ownerReferences": [{"kind": owner_kind, "name": owner_uid, "uid": owner_uid,
                                                "controller": True}]},
+            "spec": {"containers": [{"name": component, "image": component + ":local", "imagePullPolicy": "Never"}]},
             "status": {"conditions": [{"type": "Ready", "status": "True"}],
                        "containerStatuses": [{"name": component, "ready": True, "imageID": DIGEST}]}}
 
@@ -32,14 +33,16 @@ def pod(component, owner_kind, owner_uid):
 def deployment(component):
     return {"metadata": {"uid": component + "-uid", "generation": 1},
             "spec": {"replicas": 1, "selector": {"matchLabels": {"app": component}},
-                     "template": {"spec": {"containers": [{"name": component, "env": [
+                     "template": {"spec": {"containers": [{"name": component, "image": component + ":local",
+                         "imagePullPolicy": "Never", "env": [
                          {"name": "DRIVER", "value": "agent"}, {"name": "DATAPATH", "value": "iproute"},
                          {"name": "GATEWAY_UPSTREAM_PROBE_URL", "value": run.PROBE},
                          {"name": "IMAGE_PULL_POLICY", "value": "Never"},
                          {"name": "GATEWAY_IMAGE", "value": "gateway-local"},
                          {"name": "OPENVPN_IMAGE", "value": "plugin-local"},
                          {"name": "INIT_IMAGE", "value": "ratatoskr-tools:m1-local"}]}]}}},
-            "status": {"observedGeneration": 1, "availableReplicas": 1}}
+            "status": {"observedGeneration": 1, "availableReplicas": 1, "updatedReplicas": 1,
+                       "readyReplicas": 1}}
 
 
 class FakeAPI:
@@ -54,6 +57,10 @@ class FakeAPI:
                  ("egressgateways.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
                  ("egresspolicies.ratatoskr.skaldhall.io", "/validate-v1alpha1")]
         hooks = [{"name": name, "failurePolicy": "Fail", "sideEffects": "None",
+                  "objectSelector": {"matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway",
+                                                            "operator": "Exists"}]} if name.startswith("pods.") else None,
+                  "rules": [{"resources": [name.split(".")[0]],
+                             "operations": ["CREATE"] if path == "/mutate-v1alpha1-pod" else ["CREATE", "UPDATE"]}],
                   "clientConfig": {"caBundle": "public", "service": {"namespace": "operator", "path": path}}}
                  for name, path in paths]
         self.objects[("mutatingwebhookconfiguration", "ratatoskr-pods", None, None)] = {"webhooks": hooks[:1]}
@@ -69,7 +76,9 @@ class FakeAPI:
         self.objects[("daemonset", "ratatoskr-agent", "operator", None)] = {
             "metadata": {"uid": "agent-uid", "generation": 1},
             "spec": {"selector": {"matchLabels": {"app": "agent"}},
-                     "template": {"spec": {"containers": [{"name": "agent", "env": [{"name": "DATAPATH", "value": "iproute"}]}]}}},
+                     "template": {"spec": {"containers": [{"name": "agent", "image": "agent:local",
+                                                           "imagePullPolicy": "Never",
+                                                           "env": [{"name": "DATAPATH", "value": "iproute"}]}]}}},
             "status": {"observedGeneration": 1, "desiredNumberScheduled": 3,
                        "updatedNumberScheduled": 3, "numberReady": 3}}
         self.objects[("pods", None, "operator", "app=agent")] = {
@@ -117,6 +126,10 @@ class GateTests(unittest.TestCase):
             lambda a: a.objects[("deployment", "ratatoskr-controller", "operator", None)]["spec"]["template"]["spec"]["containers"][0]["env"][2].update(value=""),
             lambda a: a.objects[("pods", None, "operator", "app=agent")]["items"][0]["status"]["containerStatuses"][0].update(imageID="sha256:bad"),
             lambda a: a.objects[("validatingwebhookconfiguration", "ratatoskr-validation", None, None)]["webhooks"][0].update(failurePolicy="Ignore"),
+            lambda a: a.objects[("mutatingwebhookconfiguration", "ratatoskr-pods", None, None)]["webhooks"][0].update(rules=[]),
+            lambda a: a.objects[("daemonset", "ratatoskr-agent", "operator", None)]["status"].update(updatedNumberScheduled=2),
+            lambda a: a.objects[("deployment", "ratatoskr-webhook", "operator", None)]["status"].update(updatedReplicas=0),
+            lambda a: a.objects[("pods", None, "operator", "app=agent")]["items"][0]["spec"]["containers"][0].update(imagePullPolicy="Always"),
         ]
         for mutate in mutations:
             with self.subTest(mutation=mutate):

@@ -77,8 +77,9 @@ def verify_workload(api, namespace, kind, name, component, expected, count):
     if not selector or status.get("observedGeneration", 0) < workload["metadata"]["generation"]:
         raise Blocked("Release workload rollout is stale.")
     if kind == "deployment":
-        if spec.get("replicas", 1) != count or status.get("availableReplicas") != count:
-            raise Blocked("Release Deployment is not fully available.")
+        if (spec.get("replicas", 1) != count or status.get("availableReplicas") != count or
+                status.get("updatedReplicas") != count or status.get("readyReplicas") != count):
+            raise Blocked("Release Deployment is not fully updated and available.")
     elif (status.get("desiredNumberScheduled") != count or
           status.get("numberReady") != count or status.get("updatedNumberScheduled") != count):
         raise Blocked("Release agent DaemonSet is not fully rolled out.")
@@ -98,6 +99,13 @@ def verify_workload(api, namespace, kind, name, component, expected, count):
                 raise Blocked("Release Deployment owner chain mismatch.")
         elif not owner_is(pod, "DaemonSet", workload["metadata"]["uid"]):
             raise Blocked("Release agent Pod owner mismatch.")
+        template_containers = [c for c in spec["template"]["spec"]["containers"] if c.get("name") == component]
+        running_containers = [c for c in pod["spec"]["containers"] if c.get("name") == component]
+        if (len(template_containers) != 1 or len(running_containers) != 1 or
+                template_containers[0].get("imagePullPolicy") != "Never" or
+                running_containers[0].get("imagePullPolicy") != "Never" or
+                template_containers[0].get("image") != running_containers[0].get("image")):
+            raise Blocked("Release Pod image/pull policy differs from local immutable runtime preflight.")
         statuses = [s for s in pod.get("status", {}).get("containerStatuses", []) if s.get("name") == component]
         if not ready(pod) or len(statuses) != 1 or not statuses[0].get("ready") or statuses[0].get("imageID") != expected:
             raise Blocked("Release runtime image ID or Pod readiness mismatch.")
@@ -124,6 +132,19 @@ def preflight(api, ids):
     if not needed <= paths or not hooks or any(h.get("failurePolicy") != "Fail" or
             h.get("sideEffects") != "None" or not h.get("clientConfig", {}).get("caBundle") for h in hooks):
         raise Blocked("Registered fail-closed admission webhooks missing.")
+    for hook in hooks:
+        path = hook.get("clientConfig", {}).get("service", {}).get("path")
+        target = hook.get("name", "").split(".")[0]
+        operations = {"CREATE"} if path == "/mutate-v1alpha1-pod" else {"CREATE", "UPDATE"}
+        if not any(target in rule.get("resources", []) and operations <= set(rule.get("operations", []))
+                   for rule in hook.get("rules", [])):
+            raise Blocked("Webhook rule does not cover required operations.")
+        if target == "pods" and hook.get("objectSelector") != {
+                "matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway", "operator": "Exists"}]}:
+            raise Blocked("Pod webhook selector differs from opt-in contract.")
+        if path == "/mutate-v1alpha1-pod" and any(set(rule.get("operations", [])) != {"CREATE"}
+                                                    for rule in hook.get("rules", [])):
+            raise Blocked("Pod mutation must be CREATE-only.")
     namespace = mutation["webhooks"][0]["clientConfig"]["service"]["namespace"]
     if not namespace or any(h["clientConfig"]["service"].get("namespace") != namespace for h in hooks):
         raise Blocked("Release webhook namespaces differ.")

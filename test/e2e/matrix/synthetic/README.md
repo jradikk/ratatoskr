@@ -25,6 +25,21 @@ blocked boundary rather than a partial positive traffic test. In particular,
 there is no unsafe namespace create with unverified cleanup and no persistent
 secret manifest in this preflight.
 
+**Unresolved full-gate blockers:** The existing fixture has no lifecycle/cleanup
+owner, and the current runner does not create or contain temporary mode-0700
+PKI, two UUID namespaces, API-side UID-scoped deletion, signal handling or
+verified post-delete absence. It cannot compare the four fixture/runtime image
+IDs until trusted, externally built/imported Pods are created. It checks the
+controller's literal configured probe but cannot establish operator chart
+release provenance or inspect a rendered plugin's `--probe-url` without first
+creating a Gateway. There is no implemented evidence collector for the exact
+Gateway→Deployment→ReplicaSet→Pod ownership and status/MTU, wait-init and agent
+marker, independent tunnel-byte/route proof, direct ClusterIP DNS/API paths, or
+server interruption with endpoint withdrawal and recovery. An HTTP marker alone
+is insufficient; without reliable tunnel proof and both namespace/PKI teardown,
+executing even the partial fixture would risk a false pass and leave credentials.
+Therefore no full-gate invocation or e2e PASS path is present.
+
 Cluster-free validation:
 
 ```sh
