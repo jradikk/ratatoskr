@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -84,10 +85,15 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	if details.PID <= 1 {
 		return nil, errors.New("sandbox PID unavailable; cannot corroborate reported netns path")
 	}
-	// CRI metadata is authoritative for UID; the process path is opened without
-	// following any intermediate /proc symlinks and never accepted as host netns.
-	// A PID alone is not a sandbox identity: enforce its cgroup membership,
-	// including systemd's underscore-escaped form, to reject PID recycling.
+	// Pin the reported sandbox process before reading its cgroup. The pidfd
+	// prevents PID reuse between UID verification and namespace comparison.
+	pidfd, err := unix.PidfdOpen(details.PID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("pin sandbox PID: %w", err)
+	}
+	defer unix.Close(pidfd)
+	// A PID alone is not a sandbox identity: require its cgroup to contain
+	// the Kubernetes Pod UID (including systemd's underscore-escaped form).
 	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(details.PID) + "/cgroup")
 	if err != nil {
 		return nil, fmt.Errorf("read sandbox PID cgroup: %w", err)
@@ -95,37 +101,115 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	if !strings.Contains(string(cgroup), uid) && !strings.Contains(string(cgroup), strings.ReplaceAll(uid, "-", "_")) {
 		return nil, errors.New("sandbox PID cgroup does not match Pod UID")
 	}
-	path := "/proc/" + strconv.Itoa(details.PID) + "/ns/net"
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open sandbox PID network namespace: %w", err)
+	if err := checkPIDAlive(pidfd); err != nil {
+		return nil, fmt.Errorf("sandbox PID exited during cgroup verification: %w", err)
 	}
-	f := os.NewFile(uintptr(fd), path)
-	if err := rejectHost(f); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("verify sandbox PID network namespace: %w", err)
-	}
+	// The CRI path is mandatory, confined by openat2, and never followed via
+	// symlinks. Transient setns(pidfd) corroborates this pinned candidate even
+	// when hidepid/Yama forbids opening /proc/<PID>/ns/net directly.
+	var candidate *os.File
 	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
-		if ns.Type != "network" || ns.Path == "" {
+		if ns.Type != "network" {
 			continue
 		}
-		candidate, err := openContainedNetns(ns.Path)
+		if candidate != nil {
+			candidate.Close()
+			return nil, errors.New("multiple CRI network namespace paths")
+		}
+		candidate, err = openContainedNetns(ns.Path)
 		if err != nil {
-			f.Close()
 			return nil, fmt.Errorf("verify CRI-reported network namespace path: %w", err)
 		}
-		var pidStat, candidateStat unix.Stat_t
-		if err = unix.Fstat(int(f.Fd()), &pidStat); err == nil {
-			err = unix.Fstat(int(candidate.Fd()), &candidateStat)
-		}
-		f.Close()
-		if err != nil || !sameNetns(pidStat, candidateStat) {
-			candidate.Close()
-			return nil, errors.New("reported netns differs from sandbox PID netns")
-		}
-		return candidate, nil
 	}
-	return f, nil
+	if candidate == nil {
+		return nil, errors.New("CRI network namespace path unavailable")
+	}
+	if err := verifyPIDNetns(pidfd, candidate); err != nil {
+		candidate.Close()
+		return nil, fmt.Errorf("corroborate CRI path with pinned sandbox PID: %w", err)
+	}
+	if err := checkPIDAlive(pidfd); err != nil {
+		candidate.Close()
+		return nil, fmt.Errorf("sandbox PID exited after namespace comparison: %w", err)
+	}
+	return candidate, nil
+}
+
+// Polling a pidfd distinguishes a live sandbox process from a dead process
+// whose namespace might remain pinned elsewhere. PID reuse cannot replace the
+// process represented by this fd.
+func checkPIDAlive(pidfd int) error {
+	if pidfd < 0 || pidfd > math.MaxInt32 {
+		return errors.New("invalid pidfd")
+	}
+	fds := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, 0)
+	if err != nil {
+		return err
+	}
+	if n != 0 || fds[0].Revents != 0 {
+		return errors.New("sandbox process exited")
+	}
+	return nil
+}
+
+// verifyPIDNetns compares the pinned pidfd's actual network namespace with
+// the confined CRI netns fd on the current OS thread. The original thread
+// namespace is restored even if comparison, stat or liveness checks fail.
+func verifyPIDNetns(pidfd int, candidate *os.File) (err error) {
+	if candidate == nil {
+		return errors.New("candidate network namespace is required")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	original, err := os.Open("/proc/thread-self/ns/net")
+	if err != nil {
+		return fmt.Errorf("save verifier thread namespace: %w", err)
+	}
+	defer original.Close()
+	if err := rejectHost(candidate); err != nil {
+		return fmt.Errorf("reject forbidden candidate namespace: %w", err)
+	}
+	var candidateStat, originalStat unix.Stat_t
+	if err := unix.Fstat(int(candidate.Fd()), &candidateStat); err != nil {
+		return fmt.Errorf("stat candidate namespace before setns: %w", err)
+	}
+	if err := unix.Fstat(int(original.Fd()), &originalStat); err != nil {
+		return fmt.Errorf("stat original thread namespace before setns: %w", err)
+	}
+	if err := rejectForbiddenNetns(candidateStat, originalStat); err != nil {
+		return fmt.Errorf("reject current thread namespace before setns: %w", err)
+	}
+	if err := checkPIDAlive(pidfd); err != nil {
+		return fmt.Errorf("sandbox PID not live before namespace comparison: %w", err)
+	}
+	if err := unix.Setns(pidfd, unix.CLONE_NEWNET); err != nil {
+		return fmt.Errorf("enter pinned sandbox PID namespace: %w", err)
+	}
+	defer func() {
+		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
+			panic(errors.Join(err, fmt.Errorf("restore verifier thread namespace: %w", restore)))
+		}
+	}()
+	current, statErr := os.Open("/proc/thread-self/ns/net")
+	if statErr != nil {
+		return fmt.Errorf("open verifier thread namespace after setns: %w", statErr)
+	}
+	defer current.Close()
+	var entered, reported unix.Stat_t
+	if statErr = unix.Fstat(int(current.Fd()), &entered); statErr != nil {
+		return fmt.Errorf("stat verifier thread namespace: %w", statErr)
+	}
+	if statErr = unix.Fstat(int(candidate.Fd()), &reported); statErr != nil {
+		return fmt.Errorf("stat confined CRI namespace: %w", statErr)
+	}
+	if !sameNetns(entered, reported) {
+		return errors.New("reported netns differs from pinned sandbox PID netns")
+	}
+	if err := checkPIDAlive(pidfd); err != nil {
+		return fmt.Errorf("sandbox PID exited during namespace comparison: %w", err)
+	}
+	return nil
 }
 
 func openContainedNetns(path string) (*os.File, error) {
