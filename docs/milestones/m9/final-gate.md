@@ -439,6 +439,46 @@ no `GATEWAY_UPSTREAM_PROBE_URL` value; even with local synthetic images built,
 it is not yet the current operator probe configuration. No Secret/Pod/VPN
 runtime fixture was started and no acceptance was awarded.
 
+## October 30, 2026 — bounded real synthetic OpenVPN Gateway, partial only
+
+On the existing three-node flannel/no-mesh cluster, the operator's locally
+built controller image was imported and rolled to the trusted private
+`GATEWAY_UPSTREAM_PROBE_URL=http://10.88.0.1:8080/exit`; the running controller
+was 1/1 Ready and agent DaemonSet 3/3 Ready. Three locally built fixture images
+(server, independent witness, restricted selected helper) and the required
+local plugin/tools images were imported into **all three existing nodes**.
+The guarded read-only preflight compared exact container runtime config IDs
+for six fixture/gateway/plugin tags on every node, plus immutable running
+controller/webhook/agent image IDs; it returned INCOMPLETE without mutation.
+No registry push, host VM change, new cluster or public probe was used.
+
+The separate **four-gate**, UID-scoped partial smoke then generated fresh
+short-lived synthetic CA/server/client/witness keys under an outside-repo 0700
+private directory and created only eight base resources in two fresh namespaces:
+three Secret fixtures, non-secret probe ConfigMap, actual OpenVPN server Pod,
+UDP-only Service, controller-created EgressGateway and EgressPolicy. Early
+bounded runs failed while exact fixture assertions were repaired; each run
+removed both namespaces and private PKI. Runtime sampling exposed the real
+server and upstream containers becoming Ready, measured Gateway MTU conditions
+and an owned gateway Deployment; the harness, not the production datapath,
+incorrectly expected `PodList`/`EndpointSliceList` whereas `kubectl get -o json`
+returned `List`. `09a987b` fixed those strict, still owner-verified checks.
+
+With rebuilt/imported trusted images and the corrected harness, the final
+partial smoke **PASSED its own bounded assertions** in 48 seconds but returned
+**INCOMPLETE / exit 4 by design**: it verified exact CREATE-returned UIDs,
+real server Pod/UDP EndpointSlice target identity, controller-managed
+Gateway→Deployment→ReplicaSet→Pod and owned Service/ConfigMap/NetworkPolicy,
+Gateway Ready/current generation/measured MTU/healthy endpoint, exact private
+plugin probe args, immutable gateway/plugin/server runtime image IDs, and a
+sanitized authenticated OpenVPN server session for the gateway's distinct
+synthetic client with positive received/sent bytes. Both UID-owned namespaces
+and the temporary private PKI directory were confirmed absent afterward.
+No selected workload or witness Pod was created by this partial smoke, so
+**restricted agent traffic, fail-close, recovery, DNS/API preservation, full
+M8 compatibility, and release readiness remain untested**. Actual live VPN
+profile is still unset and remains SKIPPED, not passed.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
