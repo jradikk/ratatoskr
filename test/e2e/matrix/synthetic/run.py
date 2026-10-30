@@ -200,7 +200,7 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
                     raise Blocked("Controller image configuration unavailable for partial Gateway.")
                 environment = {item.get("name"): item.get("value") for item in containers[0].get("env", [])}
                 if (environment.get("GATEWAY_IMAGE") != "ghcr.io/skaldhall/ratatoskr-gateway:dev" or
-                        environment.get("OPENVPN_IMAGE") != "ratatoskr-openvpn:m1-local" or
+                        environment.get("OPENVPN_IMAGE") != "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev" or
                         environment.get("GATEWAY_UPSTREAM_PROBE_URL") != PROBE or
                         environment.get("IMAGE_PULL_POLICY") != "Never"):
                     raise Blocked("Controller private-probe/owned image references do not match local imports.")

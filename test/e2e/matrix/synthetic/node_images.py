@@ -18,7 +18,7 @@ NODES = ("k3d-ratatoskr-flannel-server-0",
          "k3d-ratatoskr-flannel-agent-0",
          "k3d-ratatoskr-flannel-agent-1")
 TAGS = {"gateway": "ghcr.io/skaldhall/ratatoskr-gateway:dev",
-        "plugin": "docker.io/library/ratatoskr-openvpn:m1-local",
+        "plugin": "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev",
         "server": "docker.io/library/ratatoskr-synthetic-openvpn:local",
         "tools": "docker.io/library/ratatoskr-tools:m1-local",
         "witness": "docker.io/library/ratatoskr-synthetic-witness:local",

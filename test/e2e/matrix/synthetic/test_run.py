@@ -39,7 +39,7 @@ def deployment(component):
                          {"name": "GATEWAY_UPSTREAM_PROBE_URL", "value": run.PROBE},
                          {"name": "IMAGE_PULL_POLICY", "value": "Never"},
                          {"name": "GATEWAY_IMAGE", "value": "ghcr.io/skaldhall/ratatoskr-gateway:dev"},
-                         {"name": "OPENVPN_IMAGE", "value": "ratatoskr-openvpn:m1-local"},
+                         {"name": "OPENVPN_IMAGE", "value": "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev"},
                          {"name": "INIT_IMAGE", "value": "ratatoskr-tools:m1-local"}]}]}}},
             "status": {"observedGeneration": 1, "availableReplicas": 1, "updatedReplicas": 1,
                        "readyReplicas": 1}}
