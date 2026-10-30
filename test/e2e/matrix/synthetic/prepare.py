@@ -25,10 +25,13 @@ def server_config():
 def client_config(remote, ca, cert, key):
     # Only caller-chosen Kubernetes Service DNS is interpolated; no arbitrary
     # OpenVPN options, routes or executable scripts enter this profile.
-    if not remote.endswith(".svc.cluster.local") or not all(
-            part and len(part) <= 63 and all(c.islower() or c.isdigit() or c == "-" for c in part)
-            and part[0].isalnum() and part[-1].isalnum() for part in remote.split(".")[:2]):
-        raise ValueError("invalid service DNS")
+    labels = remote.split(".")
+    if (len(labels) != 5 or labels[0] != "synthetic-vpn" or
+            labels[2:] != ["svc", "cluster", "local"] or
+            not all(part and len(part) <= 63 and
+                    all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in part) and
+                    part[0].isalnum() and part[-1].isalnum() for part in labels[:2])):
+        raise ValueError("invalid synthetic service DNS")
     return (f"client\nproto udp4\nremote {remote} 1194\nnobind\n"
             "remote-cert-tls server\nverify-x509-name synthetic-server name\n"
             "tls-version-min 1.2\ndata-ciphers AES-256-GCM:AES-128-GCM\n"

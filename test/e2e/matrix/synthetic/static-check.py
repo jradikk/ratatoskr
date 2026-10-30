@@ -30,6 +30,15 @@ try:
     profile = decode(client["data"]["client.ovpn"])
     assert "CLIENT_PRIVATE" in profile and "SERVER_PRIVATE" not in profile
     assert "remote synthetic-vpn.ratatoskr-syn-static.svc.cluster.local 1194" in profile
+    for malformed in ("synthetic-vpn.ratatoskr-syn-static.svc.cluster.local.evil",
+                      "synthetic-vpn.ratatoskr-syn-static.svc.cluster.local/arg",
+                      "synthetic-vpn.ratatoskr-syn-static.svc.cluster.local:1194"):
+        try:
+            module.client_config(malformed, *sample[:1], sample[3], sample[4])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid service hostname admitted")
     assert "remote-cert-tls server" in profile and "verify-x509-name synthetic-server name" in profile
     assert "remote-cert-tls client" in decode(server["data"]["server.conf"])
     assert "redirect-gateway" not in profile and "auth-user-pass" not in profile
