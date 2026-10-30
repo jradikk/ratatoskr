@@ -17,7 +17,7 @@ Status: **implementation and local component gates pass; full packet-level/5.10 
 
 ## Known constraints and final-gate checks
 
-- The eBPF implementation is IPv4-only; it rejects assigned global IPv6 on eth0 at programming time and drops IPv6 seen by tc. IPv6 added *later* or CNI-specific interfaces/routes require runtime verification before claiming complete dual-stack fail-close.
-- eBPF has no WireGuard support (use iproute for encrypted mode). Seccomp and node capability support for `bpf(2)`/NET_ADMIN differ by runtime; an actual restricted-node k3d program load and Linux 5.10 validation remain pending.
-- Healthy-to-healthy **policy-only** changes retain the prior selector until atomic filter replacement; a failed update can temporarily retain stale policy. This must be addressed or explicitly failed at the final production gate, not represented as a complete policy-revocation guarantee.
-- No complete eBPF capture of outer source, destination, VNI, TLV or return traffic through a live gateway/upstream has yet been run. Final CI/live e2e must cover both datapaths; unavailable VPN inputs count as skipped, never passed.
+- eBPF is IPv4-only. Later commit `d5ae6af` adds an agent-mode namespace-wide IPv6 drop guard and quarantine for late dual-stack; disposable-netns tests passed. Init mode and actual multi-pod/5.10 runtime behavior remain unverified.
+- eBPF has no WireGuard support (use iproute for encrypted mode). Runtime seccomp/BPF permissions on a restricted node and Linux 5.10 still require validation.
+- Later commit `5aa03fb` atomically locks down the old selector before fallible policy updates, with privileged failure-injection coverage and isolated capture of outer source, destination, VNI and TLV. It does **not** establish complete eBPF traffic through a live gateway/upstream.
+- Final CI/live e2e must cover both datapaths; unavailable VPN inputs count as skipped, never passed.

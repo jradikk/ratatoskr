@@ -96,8 +96,10 @@ The full M2–M8 matrix remains incomplete. Unimplemented requirements include:
   handshake/return path and plaintext GENEVE denial.
 - Restricted agent workloads, healthy CRI/setns marker-up, agent adoption/restarts
   and endpoint updates without workload recreation.
-- eBPF policy-only update failure revocation, late IPv6 runtime safety, actual
-  Linux 5.10 loading and CNI-specific interface/underlay source verification.
+- eBPF policy-update lockdown and agent late-IPv6 quarantine were subsequently
+  implemented and component-tested (`5aa03fb`, `d5ae6af`), but real multi-pod
+  runtime safety, init-driver late IPv6, actual Linux 5.10 loading and
+  CNI-specific interface/underlay source verification remain unverified.
 - 1–3 gateway replicas, HA affinity/failover and endpoint churn. Existing flows
   may break across replicas; transparent continuity must not be claimed.
 - Full observability counters/handshake/peer metrics absent from components.
