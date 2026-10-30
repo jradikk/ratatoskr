@@ -4,8 +4,10 @@
 unresolved datapath failures: iproute selective TCP return is dropped by
 reverse-path validation in the NET_ADMIN-only programming init container;
 the eBPF fake echo times out after packet-correlated gateway ingress and
-client GENEVE return reception, with its socket failure still unproven. A
-later unchanged-program test disproved intrinsic tc-egress metadata loss.
+client GENEVE return reception. A later healthy three-netns fixture traced
+the returned SYN-ACK to `SKB_DROP_REASON_IP_RPFILTER` on the same skb; no safe
+fix is validated on Linux 5.10. An unchanged-program test disproved intrinsic
+tc-egress metadata loss.
 The basic iproute
 full-tunnel fake proof passes, but this chart must not be represented as
 production validated. See `docs/milestones/m9/final-gate.md` for exact evidence

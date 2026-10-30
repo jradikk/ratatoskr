@@ -11,8 +11,10 @@ or VPN is down, steered traffic fails closed.
 > replies fail reverse-path validation in the NET_ADMIN-only programming init
 > container, and the eBPF fake echo times out **after** packet-correlated
 > gateway flower acceptance and GENEVE return reception. The precise eBPF
-> socket failure remains unproven; intrinsic tc-egress metadata loss was not
-> reproduced with the unchanged production program.
+> socket failure is now packet-correlated to reverse-path filtering in a
+> healthy three-netns fixture; intrinsic tc-egress metadata loss was not
+> reproduced with the unchanged production program. No safe correction is
+> validated on the Linux 5.10 baseline.
 > The basic iproute full-tunnel fake proof passes after a return-TTL fix, but
 > it does not establish selective, eBPF, CNI/mesh, HA, or live VPN acceptance.
 > No release has been published. See [final-gate evidence](docs/milestones/m9/final-gate.md),

@@ -107,8 +107,10 @@ The full M2–M8 matrix remains incomplete. Unimplemented requirements include:
   implemented and component-tested (`5aa03fb`, `d5ae6af`). The final eBPF fake
   traffic gate later **failed** at the tunneled echo. A subsequent flannel Pod
   reproduction saw gateway flower acceptance and client GENEVE return reception;
-  the client's socket still timed out, so the earlier pre-ingress metadata
-  explanation was too broad. Init-driver late IPv6, actual Linux 5.10 loading
+  the client's socket still timed out. A subsequent healthy three-netns
+  production-component fixture attributed returned SYN-ACK drops to
+  `SKB_DROP_REASON_IP_RPFILTER` by matching skb pointers; the earlier
+  pre-ingress metadata explanation was too broad. Init-driver late IPv6, actual Linux 5.10 loading
   and CNI-specific interface/underlay source verification remain unverified.
 - 1–3 gateway replicas, HA affinity/failover and endpoint churn. Existing flows
   may break across replicas; transparent continuity must not be claimed.

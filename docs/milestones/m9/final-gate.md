@@ -88,10 +88,19 @@ accepted the selected packet. Selected-packet probes observed `DST_METADATA`
 at `geneve_xmit`. A separate disposable **flannel Pod** reproduction with the
 same program tag likewise saw gateway flower acceptance and GENEVE RX, return
 outer UDP delivered to the client node, and client `gnv0` RX, yet the client
-socket timed out. Thus the **forward path works in the reproduced case**; the
-remaining failure is after return delivery, with reverse-path validation a
-hypothesis requiring a packet-correlated drop trace. Neither an end-to-end
-reply nor Linux 5.10 runtime has passed; eBPF remains unaccepted.
+socket timed out. Thus the **forward path works in the reproduced case**.
+
+A subsequent healthy **three-netns production-component fixture** generated
+actual fake-upstream TCP SYN/SYN-ACK replies using unchanged binaries. On the
+client's `gnv0`, three packet-correlated `198.19.0.1 → clientPodIP` SYN-ACK
+skbs had mark 0; `fib_validate_source` returned `-16`, followed by
+`skb:kfree_skb` **reason 16 (`SKB_DROP_REASON_IP_RPFILTER`) for the same skb
+pointers**. Client all/eth0/gnv0 `rp_filter=2`, `src_valid_mark=0` were read
+without alteration. Gateway flower accepted the forward packets and the
+client received the outer return tunnel, but TCP connect timed out. This
+establishes the eBPF **return-path RPF failure** in the disposable fixture,
+not a generic tc-egress metadata problem. No safe correction or Linux 5.10
+runtime pass is established; eBPF remains unaccepted.
 
 A follow-up **disposable-netns tc-ingress experiment** on kernel 7.0 used the
 same BPF program and successfully emitted outer UDP/6081 with expected VNI
