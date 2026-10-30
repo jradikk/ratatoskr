@@ -52,9 +52,12 @@ after rebuilding the gateway image.
 
 **Selective port-qualified return remains blocked.** In a three-namespace
 reproduction, outbound nft route/output marks a TCP request for the gateway;
-its SYN-ACK returns unmarked on `rtk0`. With the default `src_valid_mark=0`,
-the client's loose `rp_filter=2` reverse FIB lookup follows the ordinary CNI
-route through `eth0` and discards that SYN-ACK before TCP can ACK. Marking
+its SYN-ACK returns unmarked on `rtk0`. In a disposable-netns kernel trace
+with effective loose `rp_filter=2` and default `src_valid_mark=0`, that
+`198.19.0.1 → clientPodIP` SYN-ACK had skb mark 0; `fib_validate_source`
+returned `-16` and `skb:kfree_skb` reported `SKB_DROP_REASON_IP_RPFILTER` on
+`rtk0` for seven packets. The reverse FIB cannot use the outbound
+port-qualified mark, so TCP never ACKs. Marking
 incoming `rtk0` packets and setting `src_valid_mark=1` made an isolated test
 pass *without disabling rp_filter*, but a production init Pod has read-only
 `/proc/sys` even with NET_ADMIN: trying to set `src_valid_mark` failed with
@@ -62,7 +65,9 @@ pass *without disabling rp_filter*, but a production init Pod has read-only
 change (`e698c2b`) was reverted (`2fcb8fe`), and the rebuilt NET_ADMIN-only
 client image restored the direct full-tunnel fake pass. An `iif rtk0` RPDB
 rule did not rescue reverse lookup; a broad unmarked destination rule did,
-but improperly steered all ports, violating selective policy. No SYS_ADMIN,
+but improperly steered all ports, violating selective policy. A narrow
+`RTN_THROW` experiment preserved the ordinary route but did not rescue the
+reply either. No SYS_ADMIN,
 privileged init, global rp_filter disable, broad routing rule or host sysctl
 workaround was introduced. A reviewed alternative architecture/runtime
 permission model is needed; **M8 selective traffic still fails**.
