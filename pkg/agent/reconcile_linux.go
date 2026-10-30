@@ -236,7 +236,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	}
 	target, err := Sandbox(ctx, r.CRI, pod.Namespace, pod.Name, string(pod.UID), pod.Status.PodIP)
 	if err != nil {
-		return err
+		return fmt.Errorf("verify sandbox network namespace: %w", err)
 	}
 	defer target.Close()
 	gatewayMTU := cfg.MTU
@@ -245,11 +245,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		// steering. Inspect on every resync, including marker/hash adoption.
 		if err = InNamespace(target, func() error {
 			if e := guardWorkload(); e != nil {
-				return e
+				return fmt.Errorf("install workload IPv6 fail-closed guard: %w", e)
 			}
-			return completeClientMTU(&cfg)
+			if e := completeClientMTU(&cfg); e != nil {
+				return fmt.Errorf("measure selected workload MTU: %w", e)
+			}
+			return nil
 		}); err != nil {
-			return errors.Join(err, r.setPodError(ctx, pod))
+			return errors.Join(fmt.Errorf("enter verified workload namespace or initialize: %w", err), r.setPodError(ctx, pod))
 		}
 	}
 	if !removing && cfg.Encryption == "wireguard" && mode == "ebpf" {
@@ -304,9 +307,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	}
 	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
 		if errors.Is(err, errUnsupportedIPv6) {
-			return errors.Join(err, r.setPodError(ctx, pod))
+			return errors.Join(fmt.Errorf("program selected datapath: %w", err), r.setPodError(ctx, pod))
 		}
-		return err
+		return fmt.Errorf("program selected datapath: %w", err)
 	}
 	if removing {
 		original := pod.DeepCopy()
