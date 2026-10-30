@@ -1,5 +1,34 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Private lifecycle building block (no traffic or e2e assertion)
+
+`lifecycle.py` exports `Lifecycle` as a reusable context manager; `run.py` is
+**not changed to call it**. The operator must complete preflight and explicitly
+opt in *before* creating a Lifecycle. On entry it owns a new outside-repository
+mode-0700 temporary directory and installs SIGINT/SIGTERM cleanup handlers.
+`create_namespaces()` checks that **both** random names are absent before any
+create and records server-returned namespace UIDs. Avoid any fixture Secret
+creation before both namespaces have been confirmed; on ambiguous CREATE with
+no returned UID, the module refuses deletion and requires operator remediation.
+Exit deletes only those confirmed matching UIDs using an atomic Kubernetes
+DeleteOptions UID precondition, checks both absences, removes the temporary
+directory, and restores the signal handlers. Cleanup has a bounded grace
+independent of the normal monotonic total deadline. Cleanup failure raises,
+overriding a successful body; a timed-out CREATE without a verified UID
+deliberately leaves an orphan for operator remediation rather than risk deleting
+a raced, preexisting object.
+SIGKILL, machine loss, an unavailable API or finalizers can still prevent
+confirmed cleanup; no PASS can be claimed in those cases.
+
+`generate_pki()` is optional and **must only be called in an authorized final
+gate**: it invokes the existing scaffold's OpenSSL helper with a monotonic
+deadline and per-call timeout, under umask 077, validates all key files are
+mode 0600, and leaves all inputs inside the private directory for removal on
+exit. It never prints key bytes or raw Kubernetes output. The lifecycle does
+not provision a cluster, build/import images, create Secret fixtures or award
+coverage. This module is statically/unit tested with fake APIs and fake PKI;
+no cluster, OpenSSL or real private keys were used during authoring.
+
 ## Guarded read-only preflight (still NOT a final-gate e2e)
 
 `run.py` is an explicitly incomplete guard, not a traffic runner. Without **both**
@@ -43,7 +72,7 @@ Therefore no full-gate invocation or e2e PASS path is present.
 Cluster-free validation:
 
 ```sh
-python3 -m unittest discover -s test/e2e/matrix/synthetic -p test_run.py
+python3 -m unittest discover -s test/e2e/matrix/synthetic -p 'test_*.py'
 python3 test/e2e/matrix/synthetic/static-check.py
 sh -n test/e2e/matrix/synthetic/server/start.sh
 ```

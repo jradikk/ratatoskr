@@ -7,6 +7,7 @@ its temporary directory lifecycle and guaranteed ordinary-exit cleanup.
 import base64
 import json
 import subprocess
+import time
 
 PREFIX = "ratatoskr.skaldhall.io/"
 
@@ -35,10 +36,14 @@ def client_config(remote, ca, cert, key):
                       (("ca", ca), ("cert", cert), ("key", key))))
 
 
-def generate_pki(folder):
+def generate_pki(folder, deadline=None):
     def run(*args):
+        remaining = 25 if deadline is None else min(25, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("PKI generation deadline exceeded")
         subprocess.run(["openssl", *map(str, args)], cwd=folder, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=remaining)
 
     # Ephemeral 2048-bit RSA keys; serial database and config stay private.
     run("req", "-x509", "-newkey", "rsa:2048", "-sha256", "-nodes", "-days", "1",
