@@ -428,6 +428,17 @@ there was no PKI generation, Secret, Gateway, Pod, VPN session or traffic in
 this step. The planner still raises INCOMPLETE and real status-format/device,
 TLS, projected ConfigMap and cleanup behavior remain unverified.
 
+`26bbe3e` removed an obsolete hour-long selected Pod from the synthetic
+manifest generator. The static check now matches the eight initial fixture
+CREATE identities expected by the planner; selected phase Pods are generated
+separately. Upstream OpenVPN 2.6 source confirms the parser's status-v3 header,
+certificate-only `UNDEF` username and optional Client ID fields. **80 fake-only
+unit tests and the synthetic static contract passed** after this correction.
+Read-only cluster inspection showed the existing operator release still has
+no `GATEWAY_UPSTREAM_PROBE_URL` value; even with local synthetic images built,
+it is not yet the current operator probe configuration. No Secret/Pod/VPN
+runtime fixture was started and no acceptance was awarded.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
