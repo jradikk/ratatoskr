@@ -11,6 +11,10 @@ import re
 import subprocess
 import sys
 import time
+try:
+    from . import node_images
+except ImportError:
+    import node_images
 
 CONTEXT = "k3d-ratatoskr-flannel"
 PROBE = "http://10.88.0.1:8080/exit"
@@ -115,7 +119,9 @@ def verify_workload(api, namespace, kind, name, component, expected, count):
 def preflight(api, ids):
     nodes = api.get("nodes")["items"]
     if (len(nodes) != 3 or
-        sum("node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {}) for n in nodes) != 1 or
+        {n["metadata"].get("name") for n in nodes} != set(node_images.NODES) or
+        {n["metadata"].get("name") for n in nodes if
+         "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {node_images.NODES[0]} or
         not all(ready(n) for n in nodes)):
         raise Blocked("Existing three-node cluster is not Ready.")
     env = api.get("configmap", "ratatoskr-testenv", "kube-system").get("data", {})
@@ -167,22 +173,30 @@ def preflight(api, ids):
     return namespace
 
 
-def main(argv=None, environ=None, api_factory=ReadOnlyAPI):
+def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None):
     parser = argparse.ArgumentParser(description="Read-only synthetic VPN final-gate preflight (never e2e PASS)")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--allow-partial-vpn-smoke", action="store_true")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
-    if not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1":
-        print("SKIPPED: requires --execute and RATATOSKR_E2E_FINAL_GATE=1; no cluster accessed.")
+    if (not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
+            args.allow_partial_vpn_smoke and env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1"):
+        print("SKIPPED: missing explicit final-gate/partial-smoke authorization; no cluster accessed.")
         return 2
     try:
         ids = expected_ids(env)
         preflight(api_factory(), ids)
-    except (Blocked, KeyError, IndexError, StopIteration, TypeError, AttributeError):
+        if args.allow_partial_vpn_smoke:
+            verifier = node_images.verify if node_verify is None else node_verify
+            verifier({component: ids[component] for component in node_images.TAGS})
+    except (Blocked, node_images.Blocked, KeyError, IndexError, StopIteration, TypeError, AttributeError):
         # API objects/errors are untrusted: never print their content.
         print("FAILED: synthetic final-gate preflight blocked; no resources created. Inspect release/operator preflight privately.")
         return 1
-    print("INCOMPLETE: existing flannel/agent release and probe preflight passed; gateway/plugin/server/tools/witness/selected runtime IDs, TLS tunnel, DNS/API, fail-close and cleanup evidence NOT TESTED. No resources created.")
+    if args.allow_partial_vpn_smoke:
+        print("INCOMPLETE: read-only three-node CRI config image IDs matched explicit expectations; release and private probe preflight passed. Partial synthetic VPN smoke remains BLOCKED before resource creation pending runtime safety review. No resources, PKI or Pods created; no VPN traffic tested.")
+    else:
+        print("INCOMPLETE: existing flannel/agent release and probe preflight passed; gateway/plugin/server/tools/witness/selected runtime IDs, TLS tunnel, DNS/API, fail-close and cleanup evidence NOT TESTED. No resources created.")
     return 4
 
 

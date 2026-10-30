@@ -17,8 +17,8 @@ DIGEST = "containerd://sha256:" + "a" * 64
 IDS = {component: DIGEST for component in run.COMPONENTS}
 
 
-def node(control=False):
-    return {"metadata": {"labels": {"node-role.kubernetes.io/control-plane": ""} if control else {}},
+def node(control=False, name=""):
+    return {"metadata": {"name": name, "labels": {"node-role.kubernetes.io/control-plane": ""} if control else {}},
             "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
 
 
@@ -48,7 +48,9 @@ def deployment(component):
 class FakeAPI:
     def __init__(self):
         self.objects = {
-            ("nodes", None, None, None): {"items": [node(True), node(), node()]},
+            ("nodes", None, None, None): {"items": [node(True, run.node_images.NODES[0]),
+                                                  node(False, run.node_images.NODES[1]),
+                                                  node(False, run.node_images.NODES[2])]},
             ("configmap", "ratatoskr-testenv", "kube-system", None):
                 {"data": {"variant": "flannel", "mesh": "none"}},
         }
@@ -98,6 +100,47 @@ class GateTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run.main(argv, env, forbidden), 2)
 
+    def test_partial_smoke_triple_opt_in_without_cluster_mutation(self):
+        called = []
+        def api():
+            called.append(True)
+            return FakeAPI()
+        ids = {"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()}
+        for argv, env in ((["--execute", "--allow-partial-vpn-smoke"],
+                           dict(ids, RATATOSKR_E2E_FINAL_GATE="1")),
+                          (["--allow-partial-vpn-smoke"],
+                           dict(ids, RATATOSKR_E2E_FINAL_GATE="1", RATATOSKR_E2E_PARTIAL_VPN_SMOKE="1")),
+                          (["--execute", "--allow-partial-vpn-smoke"],
+                           dict(ids, RATATOSKR_E2E_PARTIAL_VPN_SMOKE="1"))):
+            with self.subTest(argv=argv), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run.main(argv, env, api), 2)
+        self.assertFalse(called)
+        env = dict(ids, RATATOSKR_E2E_FINAL_GATE="1", RATATOSKR_E2E_PARTIAL_VPN_SMOKE="1")
+        out = io.StringIO()
+        checked = []
+        def fake_nodes(images):
+            checked.append(images)
+            return True
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke"], env, api,
+                                      fake_nodes), 4)
+        self.assertEqual(len(called), 1)
+        self.assertEqual(checked, [{k: IDS[k] for k in run.node_images.TAGS}])
+        self.assertIn("three-node CRI config image IDs matched", out.getvalue())
+        self.assertIn("No resources, PKI or Pods created", out.getvalue())
+        self.assertNotIn("PASSED", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke"], env,
+                                      lambda: FakeAPI(),
+                                      lambda _ids: (_ for _ in ()).throw(run.node_images.Blocked("SECRET"))), 1)
+
+    def test_partial_smoke_missing_image_id_fails_before_api(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
+        def forbidden():
+            raise AssertionError("image preflight should not contact cluster")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke"], env, forbidden), 1)
+
     def test_expected_ids_all_mandatory_immutable(self):
         env = {"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()}
         self.assertEqual(run.expected_ids(env), IDS)
@@ -121,6 +164,7 @@ class GateTests(unittest.TestCase):
 
     def test_safety_breaks_fail_closed(self):
         mutations = [
+            lambda a: a.objects[("nodes", None, None, None)]["items"][0]["metadata"].update(name="foreign-control-plane"),
             lambda a: a.objects[("nodes", None, None, None)]["items"].pop(),
             lambda a: a.objects[("configmap", "ratatoskr-testenv", "kube-system", None)]["data"].update(variant="cilium"),
             lambda a: a.objects[("deployment", "ratatoskr-controller", "operator", None)]["spec"]["template"]["spec"]["containers"][0]["env"][2].update(value=""),

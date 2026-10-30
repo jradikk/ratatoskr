@@ -1,5 +1,24 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Triple-opt-in partial smoke preflight remains blocked before mutation
+
+`run.py --execute --allow-partial-vpn-smoke` additionally requires both
+`RATATOSKR_E2E_FINAL_GATE=1` and `RATATOSKR_E2E_PARTIAL_VPN_SMOKE=1`.
+Without all three gates it exits 2 **without cluster access**. With them it
+checks the existing release, then runs a bounded read-only `/bin/crictl images
+-o json` query in exactly the three preflighted k3d node containers using
+fixed `docker exec` argv (no shell). For each of six local tags—gateway,
+plugin, server, tools, witness and selected helper—it requires exactly one
+CRI config `sha256:` ID identical to the parent-approved expected value on
+**every node**. Duplicate tags, missing imports, mismatched or malformed IDs,
+CLI failure, oversized JSON or deadline expiry fail closed. Controller,
+webhook and agent runtime IDs are already verified on running Pods. These
+config digests establish current per-node tag resolution, not source-build
+provenance or a guarantee that a future Pod cannot race with an image change.
+After successful checks the preflight still returns **4 / INCOMPLETE** before
+PKI, namespace, Secret or Pod creation. It does not execute a partial smoke,
+create/import images, mutate a release, award matrix coverage or return PASS.
+
 ## Pure dry-run execution plan (no cluster mutation or PASS)
 
 `plan.py` is an import-only, cluster-free evidence state machine. It validates
