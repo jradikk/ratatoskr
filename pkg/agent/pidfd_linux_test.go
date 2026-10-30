@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"runtime"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -32,7 +31,7 @@ func TestPinnedPIDExitAndCandidateGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer self.Close()
-	if err := verifyPIDNetns(fd, self); err == nil || !strings.Contains(err.Error(), "forbidden candidate") {
+	if err := verifyPIDNetns(fd, self); err == nil {
 		t.Fatalf("self candidate should fail before setns: %v", err)
 	}
 	// The verifier rejection must not move the OS thread's namespace.

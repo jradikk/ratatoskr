@@ -32,3 +32,19 @@ cgroup ownership containing the exact Pod UID. Unknown CRI verbose formats
 fail closed. The marker is a non-secret in-netns dummy link named `rtk-ready`;
 its presence alongside the complete authorized config hash prevents redundant
 route replacement after agent restart.
+
+## Trusted host namespace anchor
+
+`NODE_NAME`, `POD_NAMESPACE`, `POD_NAME`, and `POD_UID` must come from the
+kubelet Downward API fieldRefs. On startup the agent makes an uncached API GET
+of its own exact Pod UID and validates node, hostNetwork, hostPID, non-deleting
+lifecycle, `ratatoskr-agent` ServiceAccount and the fieldRef declarations.
+Only then does it pin its current thread's netns FD as the host baseline.
+Every resync rechecks the Pod via the API and refuses programming/readiness on
+API failure or identity changes. The candidate CRI netns must differ from that
+pinned baseline and match the pinned sandbox PID via pidfd before programming.
+This is a trusted **kubelet/API inference** that a hostNetwork agent's netns
+is the node host netns; it is not independent PID1 attestation. A cluster
+where the kubelet or API reports false Pod hostNetwork/identity breaks this
+trust model. Kernel 5.10 must support pidfd_open and pidfd setns for sandbox
+proof; otherwise the agent fails closed without adding privileges.

@@ -36,7 +36,8 @@ func run(ctx context.Context) error {
 		return err
 	}
 	node, socket := os.Getenv("NODE_NAME"), os.Getenv("CRI_SOCKET")
-	if node == "" || socket == "" {
+	own := agent.OwnPod{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("POD_NAME"), UID: os.Getenv("POD_UID"), Node: node}
+	if node == "" || socket == "" || own.Namespace == "" || own.Name == "" || own.UID == "" {
 		return errors.New("NODE_NAME and CRI_SOCKET are required")
 	}
 	scheme := runtime.NewScheme()
@@ -70,7 +71,10 @@ func run(ctx context.Context) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ready := &atomic.Bool{}
-	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), EBPFBackend: func() (datapath.Backend, error) { return ebpf.New() }, Log: logger}
+	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), EBPFBackend: func() (datapath.Backend, error) { return ebpf.New() }, Log: logger, Own: own}
+	if err := reconciler.Bootstrap(ctx); err != nil {
+		return fmt.Errorf("verify host-network agent bootstrap: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

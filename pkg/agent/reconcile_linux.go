@@ -162,6 +162,7 @@ type Reconciler struct {
 	EBPFBackend             BackendFactory
 	Log                     *slog.Logger
 	Ready                   *atomic.Bool
+	Own                     OwnPod
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
@@ -401,6 +402,12 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 }
 func (r *Reconciler) Sync(ctx context.Context) error {
+	if err := r.VerifyOwnPod(ctx); err != nil {
+		return fmt.Errorf("recheck own agent Pod before sync: %w", err)
+	}
+	if err := checkThreadHost(); err != nil {
+		return err
+	}
 	var pods corev1.PodList
 	if err := r.Client.List(ctx, &pods, client.MatchingFields{"spec.nodeName": r.Node}); err != nil {
 		return err

@@ -68,6 +68,9 @@ func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, n
 }
 
 func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
+	if _, err := hostStat(); err != nil {
+		return nil, err
+	}
 	var details struct {
 		PID         int `json:"pid"`
 		RuntimeSpec struct {
@@ -164,6 +167,9 @@ func pinnedNetnsStat(pidfd int) (entered unix.Stat_t, err error) {
 		return entered, fmt.Errorf("save verifier thread namespace: %w", err)
 	}
 	defer original.Close()
+	if err = checkThreadHost(); err != nil {
+		return entered, err
+	}
 	if err := checkPIDAlive(pidfd); err != nil {
 		return entered, fmt.Errorf("pinned process not live before setns: %w", err)
 	}
@@ -173,6 +179,9 @@ func pinnedNetnsStat(pidfd int) (entered unix.Stat_t, err error) {
 	defer func() {
 		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
 			panic(errors.Join(err, fmt.Errorf("restore verifier thread namespace: %w", restore)))
+		}
+		if e := checkThreadHost(); e != nil {
+			panic(errors.Join(err, fmt.Errorf("restored verifier thread differs from verified host: %w", e)))
 		}
 	}()
 	current, err := os.Open("/proc/thread-self/ns/net")
@@ -206,6 +215,9 @@ func verifyPIDNetns(pidfd int, candidate *os.File) error {
 		return fmt.Errorf("save verifier thread namespace: %w", err)
 	}
 	defer original.Close()
+	if err := checkThreadHost(); err != nil {
+		return err
+	}
 	var reported, self unix.Stat_t
 	if err := unix.Fstat(int(candidate.Fd()), &reported); err != nil {
 		return fmt.Errorf("stat confined CRI namespace: %w", err)
@@ -215,6 +227,9 @@ func verifyPIDNetns(pidfd int, candidate *os.File) error {
 	}
 	if err := rejectForbiddenNetns(reported, self); err != nil {
 		return fmt.Errorf("reject current thread namespace before setns: %w", err)
+	}
+	if err := checkThreadHost(); err != nil {
+		return err
 	}
 	entered, err := pinnedNetnsStat(pidfd)
 	if err != nil {
@@ -269,27 +284,13 @@ func rejectForbiddenNetns(target unix.Stat_t, forbidden ...unix.Stat_t) error {
 }
 
 func rejectHost(f *os.File) error {
-	var target, self unix.Stat_t
+	host, err := hostStat()
+	if err != nil {
+		return err
+	}
+	var target unix.Stat_t
 	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
 		return err
-	}
-	if err := unix.Stat("/proc/thread-self/ns/net", &self); err != nil {
-		return fmt.Errorf("stat agent thread network namespace: %w", err)
-	}
-	if err := rejectForbiddenNetns(target, self); err != nil {
-		return err
-	}
-	// hostPID exposes PID1 but restricted /proc mount policies can prohibit
-	// opening /proc/1/ns/net. Pin PID1 and sample its network namespace on a
-	// transient locked thread instead; no host netns FD is programmed.
-	hostPIDFD, err := unix.PidfdOpen(1, 0)
-	if err != nil {
-		return fmt.Errorf("pin host PID1: %w", err)
-	}
-	defer unix.Close(hostPIDFD)
-	host, err := pinnedNetnsStat(hostPIDFD)
-	if err != nil {
-		return fmt.Errorf("verify host PID1 network namespace: %w", err)
 	}
 	return rejectForbiddenNetns(target, host)
 }
@@ -306,6 +307,9 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 		return e
 	}
 	defer original.Close()
+	if e = checkThreadHost(); e != nil {
+		return e
+	}
 	if e = rejectHost(target); e != nil {
 		return e
 	}
@@ -314,8 +318,10 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 	}
 	defer func() {
 		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
-			err = errors.Join(err, fmt.Errorf("restore host namespace: %w", restore))
-			panic(err)
+			panic(errors.Join(err, fmt.Errorf("restore host namespace: %w", restore)))
+		}
+		if e := checkThreadHost(); e != nil {
+			panic(errors.Join(err, fmt.Errorf("restored thread differs from verified host: %w", e)))
 		}
 	}()
 	return fn()

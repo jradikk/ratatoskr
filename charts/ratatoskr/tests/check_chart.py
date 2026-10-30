@@ -67,9 +67,11 @@ def check_agent(docs, socket, datapath):
                          (["BPF", "PERFMON"] if bpf_enabled else [])},
     }
     env = {e["name"]: e for e in container["env"]}
-    assert set(env) == {"NODE_NAME", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
+    assert set(env) == {"NODE_NAME", "POD_NAMESPACE", "POD_NAME", "POD_UID", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
     assert env["DATAPATH"]["value"] == datapath
-    assert env["NODE_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "spec.nodeName"
+    for name, field in {"NODE_NAME": "spec.nodeName", "POD_NAMESPACE": "metadata.namespace",
+                        "POD_NAME": "metadata.name", "POD_UID": "metadata.uid"}.items():
+        assert env[name]["valueFrom"]["fieldRef"]["fieldPath"] == field
     assert env["CRI_SOCKET"]["value"] == socket
     assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
     assert pod["volumes"] == [
