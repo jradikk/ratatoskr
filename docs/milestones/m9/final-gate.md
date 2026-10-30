@@ -604,6 +604,38 @@ effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
 unimplemented, so this does not finish M7/M8 observability acceptance.
 
+## October 30, 2026 — separate init-driver runtime remains blocked
+
+A separately gated, **nonrestricted init-driver** partial smoke was run on the
+existing flannel/no-mesh cluster with the release temporarily rolled to
+`driver=init`, `datapath=iproute`. The synthetic OpenVPN server and
+controller-owned Gateway again reached the healthy baseline, but the selected
+Pod's production `ratatoskr-init` container exited **1** before its application
+started. This is not a selected-traffic PASS. The runner reported FAILED, not
+INCOMPLETE-as-success, then removed both UID-owned namespaces and temporary
+PKI. The operator release was restored to `driver=agent`: controller and webhook
+were 1/1 Available and agent 3/3 Ready; no synthetic namespace remained.
+
+A follow-up with an init image containing **only fixed-stage error labels**
+repeated the bounded, explicitly gated partial test. An independent observer
+read the failing init container's output privately and emitted only allowlisted
+categories: `init exit 1` and **`client fallback`**. This places the observed
+`operation not permitted` at the first `RouteReplace` of a fail-closed
+unreachable route in the selected Pod's private policy table, before nft,
+GENEVE, the marker request, or application startup. The immutable diagnostic
+image ID was checked in the runtime preflight; it has not been promoted to a
+release image. The diagnostic test also failed and cleaned up; release
+restoration again yielded controller/webhook 1/1 and agent 3/3. The image's
+configured user is 65532; the webhook grants the init container `NET_ADMIN`
+but does not override that image user. The exact kernel/container-runtime
+reason `RouteReplace` is denied has **not** been independently proved. No
+privilege, capability, sysctl, seccomp or Pod security context was loosened
+as a speculative remedy. Separately reviewing a tightly scoped init execution
+identity change would be necessary before rerunning this coverage; it cannot
+resolve the distinct agent sandbox-pidfd blocker or substitute for restricted
+workload traffic. M8 and M9 remain blocked, and the absent live VPN profile
+remains SKIPPED.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from

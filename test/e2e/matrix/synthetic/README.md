@@ -1,5 +1,14 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+Runtime status (October 30, 2026): the guarded init-driver partial smoke was
+executed twice against the existing cluster after a parent-managed release
+switch. The real Gateway and OpenVPN session reached the healthy baseline, but
+`ratatoskr-init` exited 1 on `client fallback` route installation with
+`operation not permitted`; the application never ran. Both fixture namespaces
+and private PKI were cleaned up, and the release was restored to agent mode.
+This is a **FAILED** partial traffic test, not M8 acceptance. The separate
+restricted-agent sandbox-pidfd blocker remains. See `docs/milestones/m9/final-gate.md`.
+
 ## Separately gated init-driver/nonrestricted partial traffic (never M8 PASS)
 
 Only `run.py --execute --allow-partial-vpn-smoke --execute-init-smoke
@@ -37,8 +46,9 @@ fail-close, witness or WireGuard. Both namespaces/private PKI must be verified
 removed on all ordinary exits; any uncertainty returns failure with sanitized
 diagnostics. Even after success the runner returns **4 / INCOMPLETE**, labeled
 *init-driver/nonrestricted* and **never** restricted-agent or M8 PASS.
-Only fake APIs/PKI were used during authoring; the actual parent-rolled init
-release and its restoration have not been exercised by this code.
+The initial fixture checks used fake APIs/PKI. The later parent-rolled init
+release and restoration were exercised as noted above; the partial traffic
+assertions did not pass.
 
 ## Init-driver/nonrestricted scaffold (fifth gate; NO resource execution)
 

@@ -233,11 +233,11 @@ func (b *Backend) rejectDualStack() error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return fmt.Errorf("inspect client eth0: %w", err)
 	}
 	addrs, err := b.h.AddrList(link, unix.AF_INET6)
 	if err != nil {
-		return err
+		return fmt.Errorf("inspect client IPv6 addresses: %w", err)
 	}
 	for _, a := range addrs {
 		if a.IP == nil {
@@ -258,7 +258,7 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 		return err
 	}
 	if err := b.rejectDualStack(); err != nil {
-		return err
+		return fmt.Errorf("check client IPv4-only safety: %w", err)
 	}
 	if c.Encryption == "wireguard" {
 		// Install plaintext deny before any WG-tunneled GENEVE route exists.
@@ -345,12 +345,12 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	// Remove stale exemptions only after the new steering selector is active.
 	old, err := b.ownedClientRules()
 	if err != nil {
-		return err
+		return fmt.Errorf("inspect owned client rules: %w", err)
 	}
 	for _, r := range old {
 		if r.Priority != steer.Priority {
 			if err := b.h.RuleDel(&r); err != nil {
-				return err
+				return fmt.Errorf("remove stale client rule: %w", err)
 			}
 		}
 	}
@@ -360,7 +360,7 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 		meta.Table = table
 		meta.Dst = prefix(metadataIP)
 		if err := b.rule(meta); err != nil {
-			return err
+			return fmt.Errorf("client metadata rule: %w", err)
 		}
 	} else {
 		// The higher-priority metadata selector is gone before its route.
@@ -378,7 +378,7 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	}
 	for _, r := range rs {
 		if err := b.rule(r); err != nil {
-			return err
+			return fmt.Errorf("client exclusion rule: %w", err)
 		}
 	}
 	link, err := b.h.LinkByName(datapath.ClientDevice)
@@ -394,7 +394,7 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 		return nil
 	}
 	if err != nil && !isMissing(err) {
-		return err
+		return fmt.Errorf("inspect existing client GENEVE: %w", err)
 	}
 	if err == nil {
 		g, ok := link.(*netlink.Geneve)
@@ -416,31 +416,31 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 		}
 		link, err = b.h.LinkByName(datapath.ClientDevice)
 		if err != nil {
-			return err
+			return fmt.Errorf("inspect created client GENEVE: %w", err)
 		}
 	}
 	if err := b.h.LinkSetMTU(link, c.MTU); err != nil {
-		return err
+		return fmt.Errorf("set client GENEVE MTU: %w", err)
 	}
 	if err := sysctl("conf/all/rp_filter", 2); err != nil {
-		return err
+		return fmt.Errorf("configure client all reverse-path filter: %w", err)
 	}
 	if err := sysctl("conf/"+datapath.ClientDevice+"/rp_filter", 2); err != nil {
-		return err
+		return fmt.Errorf("configure client GENEVE reverse-path filter: %w", err)
 	}
 	// An unnumbered GENEVE ingress fails the kernel's loose reverse-source
 	// validation before its second FIB lookup (no_addr). A link-local /32
 	// supplies an interface address without changing the tunnel route's
 	// explicit PodIP source, the pod's main default, or the CNI routes.
 	if err := b.clientTunnelAddr(link); err != nil {
-		return err
+		return fmt.Errorf("configure client GENEVE address: %w", err)
 	}
 	if err := b.h.LinkSetUp(link); err != nil {
-		return err
+		return fmt.Errorf("activate client GENEVE: %w", err)
 	}
 	mac, _ := net.ParseMAC(datapath.GatewayMAC)
 	if err := b.h.NeighSet(&netlink.Neigh{LinkIndex: link.Attrs().Index, IP: net.ParseIP("169.254.64.1"), HardwareAddr: mac, State: netlink.NUD_PERMANENT}); err != nil {
-		return err
+		return fmt.Errorf("configure client GENEVE neighbour: %w", err)
 	}
 	r := netlink.Route{Family: unix.AF_INET, Table: table, LinkIndex: link.Attrs().Index, Gw: net.ParseIP("169.254.64.1"), Src: ip(c.PodIP), Flags: unix.RTNH_F_ONLINK, Protocol: datapath.RouteProtocol, MTU: c.MTU}
 	if err := b.h.RouteReplace(&r); err != nil {
