@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,6 +320,119 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
 	}
+	if err := netns.Set(clientNS); err != nil {
+		t.Fatal(err)
+	}
+	selected := cc
+	selected.Policy = datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("198.19.0.1/32")}, Ports: []datapath.Port{{Protocol: "TCP", Port: 8080}, {Protocol: "UDP", Port: 8080}}}}}
+	selected.Exclusions = []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16"), netip.MustParsePrefix("10.43.0.0/16")}
+	if err := cl.ApplyClient(context.Background(), selected); err != nil {
+		t.Fatal(err)
+	}
+	clEth, err = cl.h.LinkByName("eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.h.RouteAdd(&netlink.Route{Dst: prefix(netip.MustParsePrefix("0.0.0.0/0")), LinkIndex: clEth.Attrs().Index}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"all", datapath.ClientDevice} {
+		for _, kind := range []string{"rp_filter", "src_valid_mark"} {
+			b, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + name + "/" + kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "2"
+			if kind == "src_valid_mark" {
+				want = "0"
+			}
+			if strings.TrimSpace(string(b)) != want {
+				t.Fatalf("%s %s=%q", name, kind, b)
+			}
+		}
+	}
+	if err := netns.Set(upstreamNS); err != nil {
+		t.Fatal(err)
+	}
+	_ = upstream.Close()
+	selectServer, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("198.19.0.1"), Port: 8080})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer selectServer.Close()
+	selectedDone := make(chan error, 1)
+	go func() {
+		conn, e := selectServer.AcceptTCP()
+		if e != nil {
+			selectedDone <- e
+			return
+		}
+		defer conn.Close()
+		_, e = conn.Write([]byte("selected"))
+		selectedDone <- e
+	}()
+	if err := netns.Set(clientNS); err != nil {
+		t.Fatal(err)
+	}
+	selectedConn, err := net.DialTimeout("tcp4", "198.19.0.1:8080", 1200*time.Millisecond)
+	if err != nil {
+		showGatewayCounters(t, gw, gwNS)
+		t.Fatalf("selected TCP response with rp_filter=2 failed: %v", err)
+	}
+	defer selectedConn.Close()
+	_ = selectedConn.SetReadDeadline(time.Now().Add(time.Second))
+	n, err = selectedConn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "selected" {
+		t.Fatalf("selected response=%q", buf[:n])
+	}
+	if err := <-selectedDone; err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("selected TCP response reached PodIP via numbered GENEVE with rp_filter 2")
+	if err := netns.Set(upstreamNS); err != nil {
+		t.Fatal(err)
+	}
+	udpSrv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("198.19.0.1"), Port: 8080})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpSrv.Close()
+	udpDone := make(chan error, 1)
+	go func() {
+		data := make([]byte, 64)
+		_ = udpSrv.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+		_, remote, e := udpSrv.ReadFromUDP(data)
+		if e == nil {
+			_, e = udpSrv.WriteToUDP([]byte("udp-selected"), remote)
+		}
+		udpDone <- e
+	}()
+	if err := netns.Set(clientNS); err != nil {
+		t.Fatal(err)
+	}
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(clientIP.String())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	_ = udp.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	if _, err := udp.WriteToUDP([]byte("selected"), &net.UDPAddr{IP: net.ParseIP("198.19.0.1"), Port: 8080}); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err = udp.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("selected UDP reply failed: %v", err)
+	}
+	if string(buf[:n]) != "udp-selected" {
+		t.Fatalf("UDP reply=%q", buf[:n])
+	}
+	if err := <-udpDone; err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("selected UDP response reached PodIP via numbered GENEVE with rp_filter 2")
 }
 func showGatewayCounters(t *testing.T, gw *Backend, ns netns.NsHandle) {
 	t.Helper()

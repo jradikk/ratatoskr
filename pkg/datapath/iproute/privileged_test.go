@@ -128,6 +128,87 @@ func TestPrivilegedClient(t *testing.T) {
 		}
 	})
 }
+func TestPrivilegedClientTunnelAddressOwnership(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		eth := dummy(t, b, "eth0", "10.42.1.8/24")
+		if err := b.h.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Gw: net.ParseIP("10.42.1.1")}); err != nil {
+			t.Fatal(err)
+		}
+		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400, Endpoint: netip.MustParseAddr("10.42.2.4")}
+		for i := 0; i < 2; i++ {
+			if err := b.ApplyClient(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		check := func(want string) {
+			t.Helper()
+			link, err := b.h.LinkByName(datapath.ClientDevice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			addresses, err := b.h.AddrList(link, unix.AF_INET)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(addresses) != 1 || addresses[0].IPNet.String() != want {
+				t.Fatalf("client tunnel addresses=%v; want %s", addresses, want)
+			}
+			r, err := b.h.RouteListFiltered(unix.AF_INET, &netlink.Route{Table: datapath.ClientTable(c.GatewayID)}, netlink.RT_FILTER_TABLE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, route := range r {
+				if route.Type == unix.RTN_UNICAST && route.Dst != nil && route.Dst.String() == "0.0.0.0/0" && !route.Src.Equal(net.ParseIP(c.PodIP.String())) {
+					t.Fatalf("tunnel lost explicit PodIP source: %s", route.Src)
+				}
+			}
+		}
+		check("169.254.64.2/32")
+		c.Endpoint = netip.MustParseAddr("10.42.2.5")
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		check("169.254.64.2/32")
+		link, err := b.h.LinkByName(datapath.ClientDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foreign, err := netlink.ParseAddr("169.254.64.3/32")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.h.AddrAdd(link, foreign); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ApplyClient(context.Background(), c); err == nil {
+			t.Fatal("conflicting foreign tunnel address accepted")
+		}
+		addresses, err := b.h.AddrList(link, unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(addresses) != 2 {
+			t.Fatal("conflicting foreign address was modified")
+		}
+		if err := b.h.AddrDel(link, foreign); err != nil {
+			t.Fatal(err)
+		}
+		c.Endpoint = netip.Addr{}
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.h.LinkByName(datapath.ClientDevice); err == nil {
+			t.Fatal("unhealthy client kept GENEVE device and address")
+		}
+		if err := b.RemoveClient(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.h.LinkByName(datapath.ClientDevice); err == nil {
+			t.Fatal("removed client still has GENEVE device")
+		}
+	})
+}
+
 func TestPrivilegedPreservesForeignRules(t *testing.T) {
 	isolated(t, func(b *Backend) {
 		dummy(t, b, "eth0", "10.42.1.8/24")

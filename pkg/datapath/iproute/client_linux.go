@@ -30,6 +30,10 @@ const metadataPriority = datapath.RulePriority - 1
 
 var metadataIP = netip.MustParsePrefix("169.254.169.254/32")
 
+// clientTunnelAddress is an owned, link-local /32 on the GENEVE interface.
+// It is deliberately distinct from the gateway neighbor 169.254.64.1.
+var clientTunnelAddress = netip.MustParsePrefix("169.254.64.2/32")
+
 type Backend struct{ h *netlink.Handle }
 
 var _ datapath.Backend = (*Backend)(nil)
@@ -424,6 +428,13 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if err := sysctl("conf/"+datapath.ClientDevice+"/rp_filter", 2); err != nil {
 		return err
 	}
+	// An unnumbered GENEVE ingress fails the kernel's loose reverse-source
+	// validation before its second FIB lookup (no_addr). A link-local /32
+	// supplies an interface address without changing the tunnel route's
+	// explicit PodIP source, the pod's main default, or the CNI routes.
+	if err := b.clientTunnelAddr(link); err != nil {
+		return err
+	}
 	if err := b.h.LinkSetUp(link); err != nil {
 		return err
 	}
@@ -437,6 +448,36 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	}
 	return ctx.Err()
 }
+
+// clientTunnelAddr accepts only its exact owned address on rtk0. Any other
+// address implies an unexpected netns occupant or prior foreign attachment;
+// refuse rather than replacing or removing another owner's state.
+func (b *Backend) clientTunnelAddr(link netlink.Link) error {
+	addrs, err := b.h.AddrList(link, unix.AF_INET)
+	if err != nil {
+		return err
+	}
+	desired := clientTunnelAddress.Masked()
+	for _, a := range addrs {
+		ip, ok := netip.AddrFromSlice(a.IP)
+		if !ok || !ip.Is4() || a.IPNet == nil {
+			return fmt.Errorf("unexpected IPv4 address on %s", datapath.ClientDevice)
+		}
+		ones, bits := a.Mask.Size()
+		if bits != 32 || netip.PrefixFrom(ip, ones).Masked() != desired {
+			return fmt.Errorf("foreign/conflicting IPv4 address %s on %s", a.IPNet, datapath.ClientDevice)
+		}
+	}
+	if len(addrs) == 1 {
+		return nil
+	}
+	addr := &netlink.Addr{IPNet: prefix(desired), Label: datapath.ClientDevice}
+	if err := b.h.AddrAdd(link, addr); err != nil {
+		return fmt.Errorf("assign owned client GENEVE address: %w", err)
+	}
+	return nil
+}
+
 func isMissing(err error) bool {
 	var e netlink.LinkNotFoundError
 	return errors.As(err, &e) || errors.Is(err, unix.ENODEV)
