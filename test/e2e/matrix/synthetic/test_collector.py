@@ -169,8 +169,12 @@ class CollectorTests(unittest.TestCase):
         observed = collector.witness_session("e" * 32, "f" * 32, image, start)
         wapi.pod = witness
         self.assertEqual(observed["cn"], "synthetic-witness")
-        self.assertEqual(collector.witness_status("f" * 32, image, start, observed),
+        self.assertEqual(collector.witness_status("f" * 32, image, start,
+                                                  start + timedelta(seconds=25), observed),
                          {"witnessSucceededDuringOutage": True, "distinctSession": True})
+        with self.assertRaises(mod.Incomplete):
+            collector.witness_status("f" * 32, image, start,
+                                     start + timedelta(seconds=5), observed)
         for bad in ([primary], [primary, dict(second, cn="synthetic-client")],
                     [primary, dict(second, virtualIPv4="10.88.0.2")]):
             wapi.sessions = bad
@@ -187,14 +191,16 @@ class CollectorTests(unittest.TestCase):
             witness = wapi.pod
             tamper()
             with self.assertRaises(mod.Incomplete):
-                collector.witness_status("f" * 32, image, start, observed)
+                collector.witness_status("f" * 32, image, start,
+                                         start + timedelta(seconds=25), observed)
             witness = {"metadata": {"name": "synthetic-witness", "namespace": collector.owner.names[0], "uid": "f" * 32},
                        "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False},
                        "status": {"phase": "Succeeded", "containerStatuses": [{"name": "witness", "imageID": image,
                            "state": {"terminated": {"exitCode": 0, "startedAt": started, "finishedAt": finished}}}]}}
         wapi.pod = witness
         with self.assertRaises(mod.Incomplete):
-            collector.witness_status("f" * 32, image, start + timedelta(minutes=1), observed)
+            collector.witness_status("f" * 32, image, start + timedelta(minutes=1),
+                                     start + timedelta(minutes=2), observed)
 
     def test_counter_background_traffic_wrong_link_or_false_marker_denied(self):
         for before, baseline, after in ((100, 101, 120), (100, 100, 100), (100, 100, 90)):

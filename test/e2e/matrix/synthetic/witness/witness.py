@@ -44,17 +44,23 @@ def ensure_tun(path=TUN):
 
 
 def fetch_marker(timeout=3):
-    """Bind socket to tunnel; never permit routing fallback via Pod eth0."""
+    """Bind socket to tunnel and enforce one absolute request deadline."""
     conn = None
+    deadline = time.monotonic() + timeout
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn = sock
-        sock.settimeout(timeout)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"tun0\0")
+        sock.settimeout(max(0.001, deadline - time.monotonic()))
         sock.connect(("10.88.0.1", 8080))
+        sock.settimeout(max(0.001, deadline - time.monotonic()))
         sock.sendall(b"GET /marker HTTP/1.0\r\nHost: 10.88.0.1\r\nConnection: close\r\n\r\n")
         result = bytearray()
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Invalid()
+            sock.settimeout(remaining)
             chunk = sock.recv(min(1024, 2049 - len(result)))
             if not chunk:
                 break
@@ -62,7 +68,8 @@ def fetch_marker(timeout=3):
             if len(result) > 2048:
                 raise Invalid()
         head, sep, body = bytes(result).partition(b"\r\n\r\n")
-        if (not sep or not head.startswith(b"HTTP/1.0 200 ") and
+        if (time.monotonic() > deadline or not sep or
+                not head.startswith(b"HTTP/1.0 200 ") and
                 not head.startswith(b"HTTP/1.1 200 ") or
                 body != b"ratatoskr-synthetic-vpn-v1\n"):
             raise Invalid()
@@ -84,7 +91,8 @@ def main(argv=None):
             raise Invalid()
         ensure_tun()
         child = subprocess.Popen(["/usr/sbin/openvpn", "--config", str(PROFILE),
-                                  "--dev", "tun0", "--dev-node", str(TUN), "--verb", "0"],
+                                  "--dev", "tun0", "--dev-node", str(TUN),
+                                  "--disable-dco", "--verb", "0"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
                                  start_new_session=True)

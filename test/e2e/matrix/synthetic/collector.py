@@ -288,17 +288,20 @@ class Collector:
         result["outageStart"] = outage_started.isoformat()
         return result
 
-    def witness_status(self, witness_uid, expected_image_id, outage_started, observed_session):
-        """One-shot witness succeeds only with prior live authenticated session.
+    def witness_status(self, witness_uid, expected_image_id, outage_started, outage_ended, observed_session):
+        """One-shot witness must finish before verified probe restoration.
 
-        Caller must capture observed_session during the outage, while witness
-        is Running. That Pod later exits 0 only after repeated exact marker
-        reads through its independent tunnel; no Pod logs are inspected.
+        Caller must capture observed_session while witness is Running and the
+        Gateway endpoint is withdrawn, then verify that withdrawal still holds
+        before this call. The outage end is a trusted, timezone-aware instant
+        recorded before restoring the probe switch; no Pod logs are inspected.
         """
         from datetime import datetime, timedelta
         namespace = self.owner.names[0]
-        if not isinstance(outage_started, datetime) or outage_started.tzinfo is None:
-            raise Incomplete("Trusted timezone-aware outage timestamp required.")
+        if (not isinstance(outage_started, datetime) or outage_started.tzinfo is None or
+                not isinstance(outage_ended, datetime) or outage_ended.tzinfo is None or
+                outage_ended <= outage_started):
+            raise Incomplete("Trusted timezone-aware outage interval required.")
         if not isinstance(expected_image_id, str) or not re.fullmatch(
                 r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", expected_image_id):
             raise Incomplete("Immutable witness runtime image ID required.")
@@ -322,7 +325,8 @@ class Collector:
         except (ValueError, AttributeError):
             raise Incomplete("Witness Pod termination timestamps invalid.") from None
         if (terminated.get("exitCode") != 0 or began < outage_started or
-                ended < began or ended - began > timedelta(seconds=120) or
+                ended < began or ended > outage_ended or
+                ended - began > timedelta(seconds=120) or
                 ended > datetime.now(began.tzinfo) + timedelta(seconds=2)):
             raise Incomplete("Witness did not complete exact marker during outage.")
         if (not isinstance(observed_session, dict) or

@@ -54,6 +54,21 @@ class WitnessTests(unittest.TestCase):
                 with patch.object(witness.socket, "socket", return_value=FakeSocket(response)):
                     self.assertFalse(witness.fetch_marker())
 
+    def test_drip_fed_marker_cannot_exceed_absolute_deadline(self):
+        response = b"HTTP/1.0 200 OK\r\n\r\nratatoskr-synthetic-vpn-v1\n"
+        socket = FakeSocket(response)
+        clock = [0.0]
+        def delayed_recv(n):
+            clock[0] += 1.0
+            head, socket.data = socket.data[:1], socket.data[1:]
+            return head
+        socket.recv = delayed_recv
+        with patch.object(witness.socket, "socket", return_value=socket), \
+             patch.object(witness.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertFalse(witness.fetch_marker(timeout=3))
+        self.assertTrue(socket.closed)
+        self.assertLessEqual(clock[0], 4.0)
+
     def test_profile_mode_and_no_cli_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "client.ovpn"
@@ -90,7 +105,7 @@ class WitnessTests(unittest.TestCase):
              patch.object(witness.time, "monotonic", side_effect=[0, 0, 0, 13]):
             self.assertEqual(witness.main([]), 0)
         self.assertEqual(seen[0][0], ["/usr/sbin/openvpn", "--config", "/etc/synthetic/client.ovpn",
-                                      "--dev", "tun0", "--dev-node", "/dev/net/tun", "--verb", "0"])
+                                      "--dev", "tun0", "--dev-node", "/dev/net/tun", "--disable-dco", "--verb", "0"])
         self.assertIs(seen[0][1]["stdout"], witness.subprocess.DEVNULL)
         self.assertIs(seen[0][1]["stderr"], witness.subprocess.DEVNULL)
         self.assertTrue(child.waited)
