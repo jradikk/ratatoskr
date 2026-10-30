@@ -583,6 +583,22 @@ Available and agent 3/3 Ready. A revised, independently verifiable namespace
 identity design—or a separately reviewed privilege policy—is required before
 M5 agent traffic, M8 compatibility or M9 release can pass.
 
+A further read-only Linux API review found **no independent PID→network-namespace
+comparison available to this agent under the observed access policy**. Opening
+or dereferencing `/proc/<sandbox PID>/ns/net` requires the denied ptrace-read
+check; `setns(pidfd, CLONE_NEWNET)` was denied in the actual agent; `pidfd_getfd`
+needs a stronger ptrace-attach check. nsfs and rtnetlink can characterize an
+already-open CRI namespace FD but cannot establish that the sandbox PID belongs
+to it. The remaining choices are to retain fail-closed rejection, review a
+permission/runtime change, or explicitly authorize a **different trust
+contract** in which the node's CRI asserts sandbox-ID→netns-path ownership.
+That last option must not be described as independent PID corroboration; it
+would require strict READY sandbox UID/IP and cgroup checks, exactly one
+openat2-confined network namespace FD (validated with nsfs type), host-anchor
+exclusion, PID liveness and in-netns Pod-IP/link validation, plus targeted
+adversarial tests. No such trust-contract switch has been implemented or used
+to award traffic coverage.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
