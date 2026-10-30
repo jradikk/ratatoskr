@@ -1,5 +1,38 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Selected restricted one-shot application helper (unexecuted)
+
+`app/Dockerfile` is a **locally built, test-only, nonroot UID 65532** image
+with fixed Python entrypoint; `app/check.py` uses no shell, exec, API token,
+credential or secret, and prints no result or error. `prepare.selected_probe_pod`
+returns three distinctly named Pods in the restricted app namespace:
+`synthetic-probe-healthy`, `-outage`, and `-recovery`. All opt into the same
+production EgressPolicy/Gateway labels; the webhook must inject its
+capability-free `-wait-agent` init, and the node agent must program the netns
+before the app starts. Each Pod has `restartPolicy: Never`, a 120-second Pod
+active deadline, no added capability, only the public read-only API CA
+ConfigMap, and a fixed mode plus parent-approved API ClusterIP argument.
+Its own PodIP comes from a Downward-API environment field.
+
+The helper verifies exact anonymous **HTTPS 403** at the known API ClusterIP
+using the public CA and hostname SAN (no `-k` or token), DNS answer and
+direct `eth0` source route **before and after** an exact `/marker` request.
+Healthy/recovery exit 0 only for the exact marker response; outage exit **42**
+only for kernel `ENETUNREACH`/`EHOSTUNREACH` to the same destination. Any
+refusal, timeout, 503, DNS/CA/API error or malformed reply exits 1, **never**
+fail-close. The Pod's UID/imageID, production init exit and Pod termination
+status/timestamps are the sole application evidence, not `kubectl exec` or
+container logs. `evidence.assert_selected_probe` performs pure Pod-status
+checks; the selected helper's absence of privileges and credentials must
+remain enforced by admission and validation. A distinct outage Pod succeeds as
+a negative test only when `exit42` lies inside verified endpoint withdrawal
+and a separate authenticated witness simultaneously proves `/marker` remains
+reachable through its own VPN. Three static/fake-only phases do **not**
+orchestrate such a test. **`run.py` remains read-only and INCOMPLETE.**
+The ninth local image (selected helper), fresh Pod UID capture from CREATE,
+and all runtime packet/agent/exclusion proofs require explicit parent preflight;
+Pod exit alone is not standalone tunnel evidence.
+
 ## Independent one-shot OpenVPN marker witness (unexecuted)
 
 `prepare.py` now requires **distinct** client and witness certificates/private

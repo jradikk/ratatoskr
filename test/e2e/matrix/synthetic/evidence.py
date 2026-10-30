@@ -173,6 +173,83 @@ def assert_restricted_client(pod, namespace, gateway_id, endpoint, tools_id):
     return status.get("podIP")
 
 
+def assert_selected_probe(pod, *, namespace, phase, expected_uid, expected_image_id,
+                          expected_api_ip, outage_started=None, outage_ended=None):
+    """UID-pinned Pod-status-only evidence; no kubectl exec/logs.
+
+    Outage Pod exit 42 means only verified network-unreachable with direct API
+    before and after; fail-close still additionally requires withdrawal and a
+    concurrent independent reachable-target witness in the caller.
+    """
+    from datetime import datetime, timedelta, timezone
+    name = "synthetic-probe-" + phase
+    if phase not in ("healthy", "outage", "recovery"):
+        raise EvidenceError("Selected probe phase not allowlisted.")
+    meta, spec, status = pod.get("metadata", {}), pod.get("spec", {}), pod.get("status", {})
+    if (meta.get("name") != name or meta.get("namespace") != namespace or
+            meta.get("uid") != expected_uid or not expected_uid or
+            meta.get("deletionTimestamp") or
+            meta.get("labels", {}).get("app") != "synthetic-client" or
+            not namespace.endswith("-apps") or
+            meta.get("labels", {}).get(PREFIX + "gateway") != "synthetic" or
+            meta.get("labels", {}).get(PREFIX + "gateway-namespace") != namespace[:-5] or
+            status.get("phase") != ("Failed" if phase == "outage" else "Succeeded") or
+            spec.get("restartPolicy") != "Never" or spec.get("automountServiceAccountToken") is not False or
+            spec.get("activeDeadlineSeconds") != 120 or spec.get("hostNetwork") is True or
+            len(spec.get("initContainers", [])) != 1 or len(spec.get("containers", [])) != 1):
+        raise EvidenceError("Selected probe Pod UID, phase or restricted admission invalid.")
+    wait = spec["initContainers"][0]
+    sc = wait.get("securityContext", {})
+    if (wait.get("name") != "ratatoskr-init" or wait.get("args") != ["-wait-agent"] or
+            sc.get("capabilities") != {"drop": ["ALL"]} or sc.get("runAsNonRoot") is not True or
+            sc.get("runAsUser") != 65532 or sc.get("allowPrivilegeEscalation") is not False or
+            len(wait.get("volumeMounts", [])) != 1 or
+            wait["volumeMounts"][0].get("name") != "ratatoskr-agent-api-shadow"):
+        raise EvidenceError("Selected probe wait-init did not match agent contract.")
+    values = [x for x in status.get("initContainerStatuses", []) if x.get("name") == "ratatoskr-init"]
+    if len(values) != 1 or values[0].get("state", {}).get("terminated", {}).get("exitCode") != 0:
+        raise EvidenceError("Selected probe wait-init did not complete.")
+    app = spec["containers"][0]
+    if (app.get("name") != "client" or app.get("image") != "ratatoskr-synthetic-client:local" or
+            app.get("imagePullPolicy") != "Never" or
+            app.get("args") != ["outage" if phase == "outage" else "healthy", expected_api_ip] or
+            app.get("securityContext", {}).get("capabilities") != {"drop": ["ALL"]} or
+            app.get("securityContext", {}).get("runAsNonRoot") is not True or
+            app.get("securityContext", {}).get("allowPrivilegeEscalation") is not False or
+            app.get("volumeMounts") != [{"name": "api-public-ca", "mountPath": "/var/run/ratatoskr/api-ca",
+                                         "readOnly": True}]):
+        raise EvidenceError("Selected probe app image/args/security differs from approved fixture.")
+    public_ca = {"name": "api-public-ca", "configMap": {"name": "kube-root-ca.crt",
+                 "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}
+    shadow = {"name": "ratatoskr-agent-api-shadow", "emptyDir": {}}
+    if (len(spec.get("volumes", [])) != 2 or public_ca not in spec["volumes"] or
+            shadow not in spec["volumes"] or
+            app.get("env") != [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}]):
+        raise EvidenceError("Selected probe API CA/agent shadow/env differs from fixture.")
+    statuses = [x for x in status.get("containerStatuses", []) if x.get("name") == "client"]
+    if len(statuses) != 1 or statuses[0].get("imageID") != expected_image_id:
+        raise EvidenceError("Selected probe runtime image ID mismatch.")
+    terminated = statuses[0].get("state", {}).get("terminated", {})
+    expected_exit = 42 if phase == "outage" else 0
+    try:
+        began = datetime.fromisoformat(terminated["startedAt"].replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(terminated["finishedAt"].replace("Z", "+00:00"))
+    except (KeyError, AttributeError, ValueError):
+        raise EvidenceError("Selected probe termination timestamps malformed.") from None
+    if (terminated.get("exitCode") != expected_exit or ended < began or
+            ended - began > timedelta(seconds=120) or ended > datetime.now(timezone.utc) + timedelta(seconds=2)):
+        raise EvidenceError("Selected probe did not terminate with expected outcome.")
+    if (meta.get("annotations", {}).get(PREFIX + "datapath-ready") != "true" or
+            not isinstance(status.get("podIP"), str)):
+        raise EvidenceError("Selected probe lacks agent readiness annotation or PodIP.")
+    if phase == "outage":
+        if (not isinstance(outage_started, datetime) or not isinstance(outage_ended, datetime) or
+                outage_started.tzinfo is None or outage_ended.tzinfo is None or
+                began < outage_started or ended > outage_ended):
+            raise EvidenceError("Selected fail-close was not bounded by verified outage.")
+    return {"phase": phase, "verifiedExit": expected_exit, "uid": expected_uid}
+
+
 def assert_selected_tunnel(before, after, marker, link, gateway_id, endpoint):
     """Only post-traffic egress counter delta AND exact GENEVE identity suffice."""
     need(marker == MARKER and link.get("ifname") == "rtk0" and link.get("linkinfo", {}).get("info_kind") == "geneve" and

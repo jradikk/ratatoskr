@@ -48,6 +48,17 @@ try:
     assert "remote-cert-tls server" in profile and "verify-x509-name synthetic-server name" in profile
     assert "remote-cert-tls client" in decode(server["data"]["server.conf"])
     assert "redirect-gateway" not in profile and "auth-user-pass" not in profile
+    selected = [module.selected_probe_pod(namespace + "-apps", namespace, phase, "10.43.0.1")
+                for phase in ("healthy", "outage", "recovery")]
+    assert len({v["metadata"]["name"] for v in selected}) == 3
+    assert all(v["spec"]["automountServiceAccountToken"] is False and
+               v["spec"]["activeDeadlineSeconds"] == 120 and
+               v["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]} and
+               v["spec"]["containers"][0]["imagePullPolicy"] == "Never" and
+               v["spec"]["containers"][0]["env"][0]["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"
+               for v in selected)
+    assert all(not any("secret" in volume or "hostPath" in volume for volume in v["spec"]["volumes"])
+               for v in selected)
     workload = objects[-1]
     assert objects[1]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
     assert workload["spec"]["automountServiceAccountToken"] is False

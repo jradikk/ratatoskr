@@ -26,7 +26,8 @@ class AdapterError(Exception):
 
 # Exact fixture names, kinds, container names; no arbitrary kubectl flags.
 RESOURCES = {
-    "pod": frozenset({"synthetic-vpn", "synthetic-client", "synthetic-witness"}),
+    "pod": frozenset({"synthetic-vpn", "synthetic-client", "synthetic-witness",
+                      "synthetic-probe-healthy", "synthetic-probe-outage", "synthetic-probe-recovery"}),
     "service": frozenset({"synthetic-vpn", "synthetic"}),
     "egressgateway": frozenset({"synthetic"}),
     "egresspolicy": frozenset({"synthetic"}),
@@ -39,7 +40,8 @@ RESOURCES = {
 CREATE = frozenset({"Secret", "Pod", "Service", "ConfigMap", "EgressGateway", "EgressPolicy"})
 FIXTURE = {"Secret": frozenset({"synthetic-server", "synthetic-client", "synthetic-witness"}),
            "ConfigMap": frozenset({"synthetic-exit-health"}),
-           "Pod": frozenset({"synthetic-vpn", "synthetic-client", "synthetic-witness"}),
+           "Pod": frozenset({"synthetic-vpn", "synthetic-client", "synthetic-witness",
+                             "synthetic-probe-healthy", "synthetic-probe-outage", "synthetic-probe-recovery"}),
            "Service": frozenset({"synthetic-vpn"}),
            "EgressGateway": frozenset({"synthetic"}),
            "EgressPolicy": frozenset({"synthetic"})}
@@ -220,6 +222,16 @@ class FixtureAPI:
                         set(meta) != {"name", "namespace", "labels"} or
                         meta.get("labels") != {lifecycle.LABEL: self.owner.token}):
                     raise ValueError()
+            if kind == "Pod" and name.startswith("synthetic-probe-"):
+                try:
+                    from . import prepare
+                except ImportError:
+                    import prepare
+                expected = prepare.selected_probe_pod(self.owner.names[1], self.owner.names[0],
+                                                      name.removeprefix("synthetic-probe-"),
+                                                      obj["spec"]["containers"][0]["args"][1])
+                if obj != expected:
+                    raise ValueError()
             if kind == "Secret":
                 keys = {"ca.crt", "server.crt", "server.key", "server.conf"} if name == "synthetic-server" else {"client.ovpn"}
                 if (obj.get("apiVersion") != "v1" or obj.get("type") != "Opaque" or
@@ -231,7 +243,7 @@ class FixtureAPI:
             payload = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
             if len(payload) > 65536:
                 raise ValueError()
-        except (KeyError, TypeError, ValueError, AttributeError):
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
             raise AdapterError("Fixture kind, namespace or payload not allowlisted.") from None
         # Suppress kubectl output entirely; response is not needed and may carry
         # bytes from admission or a misbehaving server. Recheck namespace after.

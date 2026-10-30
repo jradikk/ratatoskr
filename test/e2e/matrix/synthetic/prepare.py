@@ -70,6 +70,46 @@ def secret(namespace, name, data):
             "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
 
 
+def selected_probe_pod(namespace, gateway_namespace, phase, api_ip):
+    """Three fresh, never-reused restricted Pods; no exec or in-Pod token.
+
+    `api_ip` must be the independently preflighted Kubernetes Service IPv4.
+    The mode is immutable in complete CREATE input; no shell or user command.
+    """
+    import ipaddress
+    import re
+    if phase not in ("healthy", "outage", "recovery"):
+        raise ValueError("invalid selected application phase")
+    if (not isinstance(gateway_namespace, str) or
+            not re.fullmatch(r"rtk-syn-[0-9a-f]{16}", gateway_namespace) or
+            namespace != gateway_namespace + "-apps"):
+        raise ValueError("invalid owned selected application namespaces")
+    try:
+        address = ipaddress.ip_address(api_ip)
+        if address.version != 4 or address.is_unspecified or address.is_multicast or address.is_loopback:
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise ValueError("invalid preflighted API ClusterIP") from None
+    return {"apiVersion": "v1", "kind": "Pod", "metadata": {
+        "name": "synthetic-probe-" + phase, "namespace": namespace,
+        "labels": {"app": "synthetic-client", PREFIX + "gateway": "synthetic",
+                   PREFIX + "gateway-namespace": gateway_namespace}},
+        "spec": {"automountServiceAccountToken": False, "restartPolicy": "Never",
+                 "activeDeadlineSeconds": 120,
+                 "volumes": [{"name": "api-public-ca", "configMap": {"name": "kube-root-ca.crt",
+                     "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}],
+                 "containers": [{"name": "client", "image": "ratatoskr-synthetic-client:local",
+                     "imagePullPolicy": "Never", "args": ["outage" if phase == "outage" else "healthy",
+                                                         str(address)],
+                     "env": [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}],
+                     "volumeMounts": [{"name": "api-public-ca", "mountPath": "/var/run/ratatoskr/api-ca",
+                                       "readOnly": True}],
+                     "securityContext": {"runAsNonRoot": True, "runAsUser": 65532,
+                                         "allowPrivilegeEscalation": False,
+                                         "capabilities": {"drop": ["ALL"]},
+                                         "seccompProfile": {"type": "RuntimeDefault"}}}]}}
+
+
 def manifests(namespace, image, contents, token, witness_image="ratatoskr-synthetic-witness:local"):
     if witness_image != "ratatoskr-synthetic-witness:local":
         raise ValueError("witness image must be locally built fixture")
