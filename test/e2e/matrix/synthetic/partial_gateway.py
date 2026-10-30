@@ -62,26 +62,33 @@ def source_ready(server, service, image_id):
 
 def gateway_ready(api, gateway_uid, namespace, image_ids):
     """Read only owner-linked resources, never Secrets or raw Pod logs."""
+    step = "gateway-status"
     try:
         gateway = api.get("egressgateway", "synthetic", namespace)
         if (gateway["metadata"].get("uid") != gateway_uid or
                 not evidence.condition(gateway, "Ready", "True", gateway["metadata"]["generation"])):
             raise Blocked("Gateway UID or Ready condition not current.")
+        step = "gateway-owned-resources"
         deployment = api.get("deployment", "synthetic", namespace)
         children = [api.get(kind, "synthetic", namespace) for kind in ("service", "configmap", "networkpolicy")]
+        step = "gateway-pod-list"
         pods = api.list_owned_gateway_pods(namespace, gateway_uid)
         rs_ref = next((r for r in pods["metadata"].get("ownerReferences", [])
                        if r.get("kind") == "ReplicaSet" and r.get("controller") is True), None)
         if rs_ref is None or not rs_ref.get("name"):
             raise Blocked("Gateway ReplicaSet owner missing.")
+        step = "gateway-replicaset"
         rs = api.get("replicaset", rs_ref["name"], namespace)
         if rs["metadata"].get("uid") != rs_ref.get("uid"):
             raise Blocked("Gateway ReplicaSet UID differs from Pod owner.")
+        step = "gateway-chain-assertion"
         evidence.assert_gateway_chain(gateway, deployment, rs, pods, children, image_ids)
         return gateway, pods
     except (adapter.AdapterError, evidence.EvidenceError, KeyError, TypeError, ValueError,
             AttributeError, StopIteration):
-        raise Blocked("Owned Gateway chain, status, measured MTU or runtime IDs unverified.") from None
+        # Step is one of our own fixed non-secret checkpoint labels, never
+        # an API field, exception, address, profile or Pod log.
+        raise Blocked("Gateway verification blocked at " + step + ".") from None
 
 
 def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep):
@@ -91,6 +98,7 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
     gateway_uid = created[("EgressGateway", namespace, "synthetic")]
     deadline = min(owner.deadline, clock() + 110)
     stage = "source-pod"
+    gateway_step = "gateway-status"
     while clock() < deadline:
         try:
             if owner.closed or owner.clock() >= owner.deadline:
@@ -121,11 +129,18 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
                 raise Blocked("Gateway Pod UID absent.")
             return True
         except (adapter.AdapterError, evidence.EvidenceError, Blocked, KeyError,
-                TypeError, ValueError, AttributeError):
+                TypeError, ValueError, AttributeError) as failure:
+            if stage == "gateway-chain" and isinstance(failure, Blocked):
+                for candidate in ("gateway-status", "gateway-owned-resources", "gateway-pod-list",
+                                  "gateway-replicaset", "gateway-chain-assertion"):
+                    if str(failure) == "Gateway verification blocked at " + candidate + ".":
+                        gateway_step = candidate
+                        break
             remaining = deadline - clock()
             if remaining > 0:
                 sleep(min(2, remaining))
-    raise Blocked("Partial Gateway smoke timed out at non-secret checkpoint " + stage + ".")
+    label = gateway_step if stage == "gateway-chain" else stage
+    raise Blocked("Partial Gateway smoke timed out at non-secret checkpoint " + label + ".")
 
 
 def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapter.FixtureAPI,
