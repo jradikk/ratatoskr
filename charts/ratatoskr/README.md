@@ -1,16 +1,11 @@
 # Ratatoskr Helm chart (M6 eBPF / iproute modes)
 
-**Pre-alpha, not release-ready.** The final flannel traffic gate exposed two
-unresolved datapath failures: iproute selective TCP return is dropped by
-reverse-path validation in the NET_ADMIN-only programming init container;
-the eBPF fake echo times out after packet-correlated gateway ingress and
-client GENEVE return reception. A later healthy three-netns fixture traced
-the returned SYN-ACK to `SKB_DROP_REASON_IP_RPFILTER` on the same skb; no safe
-fix is validated on Linux 5.10. An unchanged-program test disproved intrinsic
-tc-egress metadata loss.
-The basic iproute
-full-tunnel fake proof passes, but this chart must not be represented as
-production validated. See `docs/milestones/m9/final-gate.md` for exact evidence
+**Pre-alpha, not release-ready.** Numbered client GENEVE links resolved the
+observed reverse-path failures on this kernel; both iproute and eBPF passed
+the bounded flannel/no-mesh/init/none direct-config fake subsets. Controller-
+created VPN gateways, restricted agent traffic, other CNIs/meshes, WireGuard
+runtime and Linux 5.10 remain unverified. This chart must not be represented
+as production validated. See `docs/milestones/m9/final-gate.md` for exact evidence
 and skipped compatibility/live cells; no image/chart has been published or signed.
 
 Install into one namespace (for example `helm upgrade --install ratatoskr
@@ -38,6 +33,16 @@ exclusions. The chart passes CIDRs as comma-joined environment values. It sets
 `GATEWAY_IMAGE` and `OPENVPN_IMAGE` to the matching chart image tag and forwards
 `IMAGE_PULL_POLICY` so dynamically managed gateway workloads can use the same
 local-image policy as the operator.
+
+**Operator-only upstream probe:** `dns.upstreamProbeURL` defaults to empty, so
+the OpenVPN plugin retains its external HTTPS exit-IP probe. For an isolated
+synthetic tunnel fixture an operator may set a private literal unicast IPv4
+HTTP(S) endpoint returning the observed exit IPv4. The controller rejects
+credentials, queries, fragments, invalid ports and hostnames, and passes the
+URL only as the plugin's `--probe-url` argument; workloads cannot set it in a
+Gateway CRD. The plugin independently binds and marks the probe socket to
+`upstream0` (no direct-network fallback). Do not include tokens or keys in
+this chart value; changing it rolls the controller and managed gateways.
 
 **Agent security and host compatibility:** In agent mode, each node runs a
 root-UID, `hostPID: true`, `hostNetwork: true` DaemonSet container with

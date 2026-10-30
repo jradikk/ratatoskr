@@ -105,6 +105,42 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatal("capability or secret isolation incorrect")
 	}
 }
+func TestOperatorOnlyUpstreamProbe(t *testing.T) {
+	r, gw := fixture(t)
+	gw.Status.GatewayID = 123
+	objects, err := r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := objects[2].(*appsv1.Deployment).Spec.Template.Spec.Containers[1].Args; len(args) != 0 {
+		t.Fatalf("default plugin probe must remain unchanged: %v", args)
+	}
+	r.Options.GatewayUpstreamProbeURL = "http://198.19.0.1:8080/exit"
+	objects, err = r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
+	if !reflect.DeepEqual(pod.Containers[1].Args, []string{"--probe-url", r.Options.GatewayUpstreamProbeURL}) {
+		t.Fatalf("operator probe override missing from upstream: %v", pod.Containers[1].Args)
+	}
+	if len(pod.Containers[0].Args) != 0 || pod.Containers[0].Command[0] != "/ratatoskr" || len(pod.Containers[1].SecurityContext.Capabilities.Add) != 2 {
+		t.Fatal("probe override must not change gateway privileges or command")
+	}
+	for _, endpoint := range []string{
+		"https://example.invalid/exit", "http://user:pass@198.19.0.1/exit",
+		"http://127.0.0.1/exit", "http://[::1]/exit", "http://0.0.0.0/exit",
+		"http://224.0.0.1/exit", "file:///tmp/private", "http://198.19.0.1:0/exit",
+		"http://198.19.0.1:65536/exit", "http://198.19.0.1:8080/exit?token=x",
+		"http://198.19.0.1/exit#secret", " http://198.19.0.1/exit",
+	} {
+		r.Options.GatewayUpstreamProbeURL = endpoint
+		if _, err := r.render(gw, nil); err == nil {
+			t.Errorf("unsafe operator probe accepted: %q", endpoint)
+		}
+	}
+}
+
 func TestGatewayReplicaRenderingAndEndpointRollout(t *testing.T) {
 	r, gw := fixture(t)
 	gw.Spec.Replicas = 3

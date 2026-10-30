@@ -22,6 +22,9 @@ dns:
   # External DNS questions from dns.mode=gateway go through upstream0 only.
   # Replace when a VPN provider requires a different accessible resolver.
   upstreamIP: "1.1.1.1"
+  # Operator-controlled tunnel-bound exit probe override. Empty retains the
+  # plugin's default external HTTPS probe; only unicast IPv4 URLs are allowed.
+  upstreamProbeURL: ""
 fwmarkMask: "0x00f00000"
 
 # CIDR overrides passed to the Go processes; podCIDRs may be left empty if

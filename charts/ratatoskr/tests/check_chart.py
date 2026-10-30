@@ -216,11 +216,12 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                 ["spec"]["template"]["spec"]["containers"][0]["env"]}
     for name in ("OPERATOR_NAMESPACE", "GATEWAY_IMAGE", "OPENVPN_IMAGE",
                  "IMAGE_PULL_POLICY", "DRIVER", "DATAPATH", "CLUSTER_DOMAIN",
-                 "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP"):
+                 "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP", "GATEWAY_UPSTREAM_PROBE_URL"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
     assert ctrl_env["DRIVER"]["value"] == driver
     assert ctrl_env["DATAPATH"]["value"] == datapath
+    assert ctrl_env["GATEWAY_UPSTREAM_PROBE_URL"]["value"] == ""
     for spec in (webhook["containers"][0], webhook["initContainers"][0]):
         env = {e["name"]: e for e in spec["env"]}
         assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
@@ -351,6 +352,10 @@ if __name__ == "__main__":
     check(render("--set", "driver=init"), "init")
     check(render("--set", "datapath=ebpf"), "agent", "ebpf")
     check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")
+    private_probe = render("--set", "dns.upstreamProbeURL=http://198.19.0.1:8080/exit")
+    probe_env = {e["name"]: e["value"] for e in private_probe["Deployment", "ratatoskr-controller"]
+                 ["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert probe_env["GATEWAY_UPSTREAM_PROBE_URL"] == "http://198.19.0.1:8080/exit"
     ha_args = ("--set", "controller.replicas=3", "--set", "webhook.replicas=2",
                "--set", "controller.leaderElection.enabled=true")
     helm("lint", str(CHART), "--strict", *ha_args)

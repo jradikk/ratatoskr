@@ -40,6 +40,13 @@
         "resources": {"type": "object"}
       }
     },
+    "dns": {
+      "type": "object",
+      "properties": {
+        "upstreamIP": {"type": "string"},
+        "upstreamProbeURL": {"type": "string", "maxLength": 2048}
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "properties": {"enabled": {"type": "boolean"}}

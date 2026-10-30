@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"strings"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
@@ -34,9 +35,41 @@ func gatewayAPIVolume() corev1.Volume {
 	}}}}
 }
 
+// upstreamProbeArgs is an operator-only override. Keep the default plugin
+// probe untouched unless explicitly configured; only literal unicast IPv4
+// endpoints are accepted to avoid leaking probe DNS or credentials. The plugin
+// independently validates the URL and binds/marks the probe socket to upstream0.
+func upstreamProbeArgs(endpoint string) ([]string, error) {
+	if endpoint == "" {
+		return nil, nil
+	}
+	if len(endpoint) > 2048 || strings.TrimSpace(endpoint) != endpoint {
+		return nil, fmt.Errorf("invalid upstream probe URL")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Opaque != "" || u.Fragment != "" || u.RawQuery != "" || u.ForceQuery || u.Host == "" {
+		return nil, fmt.Errorf("invalid upstream probe URL")
+	}
+	ip, err := netip.ParseAddr(u.Hostname())
+	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.String() != u.Hostname() {
+		return nil, fmt.Errorf("upstream probe requires unicast IPv4 literal")
+	}
+	if port := u.Port(); port != "" {
+		var n int
+		if _, err := fmt.Sscanf(port, "%d", &n); err != nil || n < 1 || n > 65535 || fmt.Sprint(n) != port {
+			return nil, fmt.Errorf("invalid upstream probe port")
+		}
+	}
+	return []string{"--probe-url", endpoint}, nil
+}
+
 func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clusterDNS ...string) ([]client.Object, error) {
 	if gw.Spec.Upstream.SecretRef.Name == "" {
 		return nil, fmt.Errorf("upstream secretRef.name required")
+	}
+	probeArgs, err := upstreamProbeArgs(r.Options.GatewayUpstreamProbeURL)
+	if err != nil {
+		return nil, err
 	}
 	if gw.Spec.Exclusions.AutoDetect != nil && !*gw.Spec.Exclusions.AutoDetect {
 		return nil, fmt.Errorf("disabled automatic exclusions are not supported")
@@ -98,6 +131,9 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		{Name: "gateway", Image: r.Options.GatewayImage, ImagePullPolicy: pull, Command: []string{"/ratatoskr", "-config", "/config/gateway.json"}, Env: []corev1.EnvVar{{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}}, {Name: "DATAPATH", Value: backendMode}}, Ports: []corev1.ContainerPort{{Name: "geneve", ContainerPort: datapath.GenevePort, Protocol: corev1.ProtocolUDP}, {Name: "health", ContainerPort: 9900}}, VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config", ReadOnly: true}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: gatewayCapabilities, Drop: []corev1.Capability{"ALL"}}}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(9900)}}, PeriodSeconds: 5}},
 		{Name: "upstream", Image: r.Options.OpenVPNImage, ImagePullPolicy: pull, VolumeMounts: []corev1.VolumeMount{{Name: "upstream", MountPath: "/etc/ratatoskr/upstream", ReadOnly: true}, {Name: "run", MountPath: "/run/ratatoskr"}, {Name: "dev-net", MountPath: "/dev/net"}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "MKNOD"}, Drop: []corev1.Capability{"ALL"}}}},
 	}}
+	// The upstream plugin retains its own default probe unless the operator
+	// explicitly selects a private endpoint (never configurable by a workload).
+	pod.Containers[1].Args = probeArgs
 	if mode == "wireguard" {
 		pod.ServiceAccountName = "ratatoskr-gateway"
 		pod.Volumes = append(pod.Volumes, gatewayAPIVolume())
