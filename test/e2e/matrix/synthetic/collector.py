@@ -269,6 +269,6 @@ class Collector:
         return name
 
     def final_result(self):
-        # No server interruption/recovery, authenticated TLS session capture,
-        # UID-atomic kubectl exec, or direct API TLS check exists here.
-        raise Incomplete("Full synthetic VPN final gate cannot certify PASS: missing TLS, API, safe outage/recovery and UID-atomic exec proof.")
+        # Session capture is available but not cluster-validated or orchestrated;
+        # safe server outage/recovery, UID-atomic exec and direct API TLS remain absent.
+        raise Incomplete("Full synthetic VPN final gate cannot certify PASS: missing live TLS validation, direct API TLS, safe outage/recovery and UID-atomic exec proof.")
