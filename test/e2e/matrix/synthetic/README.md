@@ -1,5 +1,20 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Pure traffic evidence contracts (not an execution path)
+
+`evidence.py` contains cluster-free, unit-tested **assertions only** for the
+future bounded runner: exact Gateway→Deployment→ReplicaSet→Pod and owned
+Service/ConfigMap/NetworkPolicy identity, measured MTU and current endpoint,
+all rendered gateway/plugin/server/tools runtime IDs, rendered private plugin
+probe, restricted agent wait-init, marker plus independently measured GENEVE
+link identity and **increasing selected-request egress bytes**, direct excluded
+DNS/API ClusterIPs, endpoint withdrawal and failure of selected traffic, and
+post-recovery status and bytes. Synthetic positive and tampered objects test
+these contracts without any API access. The collector, TLS session provenance,
+controlled server interruption/recovery and namespace/PKI orchestration are
+**not** implemented. No standalone PASS path exists; `run.py` continues to
+return INCOMPLETE and does not call these assertions.
+
 ## Private lifecycle building block (no traffic or e2e assertion)
 
 `lifecycle.py` exports `Lifecycle` as a reusable context manager; `run.py` is
@@ -54,21 +69,18 @@ blocked boundary rather than a partial positive traffic test. In particular,
 there is no unsafe namespace create with unverified cleanup and no persistent
 secret manifest in this preflight.
 
-**Unresolved full-gate blockers:** The separate lifecycle helper has not
-been wired to the read-only runner or proven on this cluster. In particular,
-the UID-conditional raw kubectl DELETE transport needs live verification before
-resource creation. The runner does not create PKI or namespaces and cannot
-compare the four fixture/runtime image IDs until trusted, externally
-built/imported Pods are created. It checks the
-controller's literal configured probe but cannot establish operator chart
-release provenance or inspect a rendered plugin's `--probe-url` without first
-creating a Gateway. There is no implemented evidence collector for the exact
-Gateway→Deployment→ReplicaSet→Pod ownership and status/MTU, wait-init and agent
-marker, independent tunnel-byte/route proof, direct ClusterIP DNS/API paths, or
-server interruption with endpoint withdrawal and recovery. An HTTP marker alone
-is insufficient; without reliable tunnel proof and both namespace/PKI teardown,
-executing even the partial fixture would risk a false pass and leave credentials.
-Therefore no full-gate invocation or e2e PASS path is present.
+**Unresolved full-gate blockers:** The lifecycle helper is not wired to the
+read-only runner or proven on this cluster; its UID-conditional raw kubectl
+DELETE transport still needs live verification before resource creation. The
+runner creates no PKI, namespace, Secret or Pod, and cannot compare the four
+fixture runtime image IDs against trusted, externally built/imported Pods. It
+checks the configured controller probe, not chart release provenance or rendered
+plugin args. The pure assertions above do not collect ownership/status/MTU,
+agent marker, independent link-byte and route evidence, direct ClusterIP
+DNS/API paths, TLS session provenance, or controlled server interruption and
+recovery. An HTTP marker alone is insufficient: without a bounded, secret-safe
+collector and verified namespace/PKI teardown, executing a partial fixture
+risks a false pass or orphaned credentials. No full-gate e2e PASS path exists.
 
 Cluster-free validation:
 
