@@ -379,6 +379,21 @@ recovery pass is claimed**. The full runtime gate and M8/M9 release remain
 blocked until a reachable same-destination outage proof and bounded verified
 orchestration can be designed and executed.
 
+A subsequent **design only** observation suggests a more discriminating outage
+fixture: leave the synthetic VPN server, authenticated session and tunnel-bound
+`/marker` active, but make only its private `/exit` readiness probe return 503
+under a non-secret, operator-owned ConfigMap flag. The plugin/controller should
+then withdraw the healthy endpoint while the marker remains reachable through
+the VPN from the gateway namespace. This requires a UID/resourceVersion-guarded
+flag update/restore and independent proof of marker reachability during
+withdrawal; neither has yet been executed. No traffic or fail-close PASS is
+claimed on this basis.
+
+`ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
+effective MTU (0 when unready/unknown). Focused race tests, lint and vet
+passed; flow counts, live peers, handshake age and external scraping remain
+unimplemented, so this does not finish M7/M8 observability acceptance.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
