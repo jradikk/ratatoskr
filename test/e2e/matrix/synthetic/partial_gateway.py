@@ -18,8 +18,12 @@ except ImportError:
     import run
 
 
-class Blocked(Exception):
-    """Static sanitized message only; never include Secret/API material."""
+class Blocked(lifecycle.LifecycleError):
+    """Static sanitized message only; never include Secret/API material.
+
+    Lifecycle preserves this typed error after verified cleanup, while cleanup
+    failures still override it. Unknown exception text remains suppressed.
+    """
 
 
 BASE = (("Secret", "synthetic-server"), ("Secret", "synthetic-client"),
