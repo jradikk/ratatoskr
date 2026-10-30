@@ -23,6 +23,10 @@ class Blocked(lifecycle.LifecycleError):
     """Static, sanitized diagnostics only."""
 
 
+class TerminalFailure(Blocked):
+    """A UID-pinned Pod has failed irreversibly; cleanup rather than poll."""
+
+
 def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic, sleep=time.sleep):
     """Status-only UID-pinned production init + nonroot one-shot helper."""
     namespace, apps = owner.names
@@ -76,6 +80,11 @@ def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic
                                 if app_statuses else None)
                     phase_detail = ("init-failed" if init_exit not in (None, 0) else
                                     "app-failed" if app_exit not in (None, 0) else "pod-failed-unknown")
+                    # Phase=Failed is terminal for this one-shot Pod. Never POST
+                    # another Pod or wait out the full deadline; exit through the
+                    # UID-scoped lifecycle cleanup without logging status details.
+                    raise TerminalFailure("Init-driver partial traffic failed at init-selected-pod-" +
+                                          phase_detail + ".")
                 raise Blocked("Init selected Pod status not converged.")
             stage = "init-evidence"
             init_evidence.assert_init_pod(pod, namespace=apps, name="synthetic-probe-healthy", uid=uid,
@@ -108,6 +117,8 @@ def selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic
                 raise Blocked("Init selected Pod UID changed during status reads.")
             return {"podUID": uid, "initImageID": ids["init"],
                     "appImageID": ids["selected"], "healthyExit": True}
+        except TerminalFailure:
+            raise
         except (adapter.AdapterError, init_evidence.Blocked, evidence.EvidenceError,
                 Blocked, KeyError, TypeError, ValueError, AttributeError):
             remaining = deadline - clock()

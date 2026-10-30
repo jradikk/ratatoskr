@@ -100,6 +100,62 @@ class InitTests(unittest.TestCase):
         with self.assertRaises(runner.Blocked):
             self.execute()
 
+    def test_uid_pinned_terminal_failure_exits_immediately_without_retry_or_status_leak(self):
+        expected = dict(INIT_IDS)
+        for phase, init_exit, app_exit, label in (
+                ("Failed", 1, None, "init-failed"),
+                ("Failed", 0, 13, "app-failed"),
+                ("Failed", None, None, "pod-failed-unknown")):
+            with self.subTest(label=label):
+                owner = InitOwner("privileged")
+                owner.deadline = float("inf")
+                owner.clock = lambda: 0
+                creations = []
+                sleeps = []
+                class PodAPI:
+                    def create(self, obj):
+                        creations.append(obj["kind"])
+                        return {"kind": "Pod", "namespace": owner.names[1],
+                                "name": "synthetic-probe-healthy", "uid": UID}
+                    def get(self, resource, name, namespace):
+                        self.assertions = (resource, name, namespace)
+                        statuses = ([] if init_exit is None else [{"name": "ratatoskr-init", "state": {
+                            "terminated": {"exitCode": init_exit}}}])
+                        app = ([] if app_exit is None else [{"name": "client", "state": {
+                            "terminated": {"exitCode": app_exit}}}])
+                        return {"metadata": {"uid": UID}, "status": {"phase": phase,
+                                "initContainerStatuses": statuses, "containerStatuses": app,
+                                "message": "sensitive remote message must not be printed"}}
+                baseline = dict(self.baseline, session={"cn": "synthetic-client",
+                              "received": 1, "sent": 1})
+                api = PodAPI()
+                with self.assertRaisesRegex(runner.TerminalFailure,
+                                            "Init-driver partial traffic failed at init-selected-pod-" + label):
+                    runner.selected(api, owner, expected,
+                                    {("EgressGateway", owner.names[0], "synthetic"): UID,
+                                     ("Pod", owner.names[0], "synthetic-vpn"): UID},
+                                    baseline, "10.43.0.1", clock=lambda: 0,
+                                    sleep=lambda duration: sleeps.append(duration))
+                self.assertEqual(creations, ["Pod"])
+                self.assertEqual(api.assertions, ("pod", "synthetic-probe-healthy", owner.names[1]))
+                self.assertEqual(sleeps, [])
+
+    def test_terminal_failure_keeps_uid_scoped_cleanup_and_failure_classification(self):
+        self.baseline["session"] = {"cn": "synthetic-client", "received": 1, "sent": 1}
+        def fail_selected(*args):
+            raise runner.TerminalFailure("Init-driver partial traffic failed at init-selected-pod-init-failed.")
+        with patch.object(runner.partial_gateway, "private_contents", return_value=("x",) * 7):
+            with self.assertRaisesRegex(runner.TerminalFailure, "init-selected-pod-init-failed"):
+                runner.execute(INIT_IDS, api_ip="10.43.0.1",
+                               lifecycle_factory=lambda **_options: self.owner,
+                               adapter_factory=lambda owner: self.adapter,
+                               observer=lambda *_args: self.baseline,
+                               selected_observer=fail_selected)
+        self.assertEqual(self.owner.calls, ["namespaces", "pki", "cleanup"])
+        self.assertTrue(self.owner.cleanup_attempted)
+        self.assertEqual([(x["kind"], x["name"]) for x in self.adapter.created],
+                         list(runner.partial_gateway.BASE))
+
     def test_fifth_sixth_guard_before_api_and_always_incomplete(self):
         ids = {"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in INIT_IDS.items()}
         env = {**ids, "RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1",
