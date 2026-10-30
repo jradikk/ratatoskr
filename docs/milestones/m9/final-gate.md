@@ -140,6 +140,23 @@ an automatic publication. A future **separately reviewed, explicitly gated**
 release workflow is required before any release tag can publish images, chart,
 SBOM or signature. This is a safety guard, not completion of M9.
 
+## October 30, 2026 — rerun after reported network repair
+
+After the reported network repair, both guarded final-gate fake subsets were
+rerun **serially** against the existing Ready flannel k3d nodes and already
+imported local images (no VM provisioning, preflight bypass, registry pull,
+Secret, or live VPN input). The iproute cell remained **FAILED** at
+`m8-selective-policy`: direct baseline, gateway readiness, client programming,
+cluster preservation, measured MTU, private metric, fake-tunnel echo, and
+4.5 MiB payload integrity passed first. The eBPF cell remained **FAILED** at
+`fake-tunnel-echo` after the same baseline, readiness, programming, cluster,
+MTU and private-metric checks passed. Both runners reported namespace cleanup
+passed; no diagnostic namespace remained. Evidence directories outside the
+repository: `/tmp/ratatoskr-m8-fake-z713hmse` (iproute) and
+`/tmp/ratatoskr-m8-fake-njoqvbjl` (eBPF). The network repair does **not**
+resolve either documented datapath blocker; skipped matrix cells remain
+untested, and the unset live profile is still a **skip**, not a pass.
+
 ## Release blockers / next gate
 
 1. Resolve selective port-qualified return with a verified fail-closed design
