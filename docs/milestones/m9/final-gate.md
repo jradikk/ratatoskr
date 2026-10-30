@@ -347,6 +347,18 @@ CREATE without a returned UID cannot be safely deleted automatically; this
 requires operator orphan inspection and cannot count as a PASS. Full runtime
 traffic and fail-close evidence remains unimplemented.
 
+Pure evidence assertions (`c4ce59c`) and a bounded, allowlisted fixture adapter
+(`4008701`) now have **32 cluster-free tests**. They check synthetic ownership,
+Gateway MTU and status, runtime image IDs, restricted-client fields, GENEVE
+identity/counter changes, direct-path evidence and withdrawal/recovery contracts;
+the adapter rechecks namespace UIDs, sends JSON on stdin and bounds commands,
+output and time. Neither is called by `run.py`. `kubectl exec` has no server-side
+Pod-UID precondition, so the adapter's before/after UID checks cannot rule out
+an intervening Pod replacement; there is no TLS session provenance or safe
+server-interruption collector. The matrix stays INCOMPLETE, and no new cluster,
+PKI, synthetic workload or traffic was executed for these assertions.
+
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
