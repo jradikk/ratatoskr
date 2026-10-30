@@ -51,7 +51,7 @@ func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, n
 			if found != nil {
 				found.Close()
 			}
-			return nil, err
+			return nil, fmt.Errorf("open verified sandbox netns: %w", err)
 		}
 		if found != nil {
 			f.Close()
@@ -90,7 +90,7 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	// including systemd's underscore-escaped form, to reject PID recycling.
 	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(details.PID) + "/cgroup")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read sandbox PID cgroup: %w", err)
 	}
 	if !strings.Contains(string(cgroup), uid) && !strings.Contains(string(cgroup), strings.ReplaceAll(uid, "-", "_")) {
 		return nil, errors.New("sandbox PID cgroup does not match Pod UID")
@@ -98,12 +98,12 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	path := "/proc/" + strconv.Itoa(details.PID) + "/ns/net"
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open sandbox PID network namespace: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), path)
 	if err := rejectHost(f); err != nil {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("verify sandbox PID network namespace: %w", err)
 	}
 	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
 		if ns.Type != "network" || ns.Path == "" {
@@ -112,7 +112,7 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 		candidate, err := openContainedNetns(ns.Path)
 		if err != nil {
 			f.Close()
-			return nil, err
+			return nil, fmt.Errorf("verify CRI-reported network namespace path: %w", err)
 		}
 		var pidStat, candidateStat unix.Stat_t
 		if err = unix.Fstat(int(f.Fd()), &pidStat); err == nil {
@@ -144,7 +144,7 @@ func openContainedNetns(path string) (*os.File, error) {
 	defer unix.Close(root)
 	fd, err := unix.Openat2(root, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open contained CRI network namespace: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), path)
 	if err := rejectHost(f); err != nil {
