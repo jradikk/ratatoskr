@@ -141,6 +141,22 @@ class AdapterProbeTests(unittest.TestCase):
                 self.assertEqual(wire.state, "true")
                 self.assertFalse(any(c[0][4] == "replace" for c in wire.calls))
 
+    def test_intervening_same_uid_writer_blocks_restore(self):
+        api, wire = fixture()
+        with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):
+            with api.exit_health_outage():
+                wire.version += 1  # same UID/label but external update
+        self.assertEqual(wire.state, "false")
+        self.assertEqual(len([c for c in wire.calls if c[0][4] == "replace"]), 1)
+
+    def test_intervening_reenable_blocks_false_success(self):
+        api, wire = fixture()
+        with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):
+            with api.exit_health_outage():
+                wire.state = "true"
+                wire.version += 1
+        self.assertEqual(len([c for c in wire.calls if c[0][4] == "replace"]), 1)
+
     def test_replacement_during_outage_blocks_restore_no_false_pass(self):
         api, wire = fixture()
         with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):

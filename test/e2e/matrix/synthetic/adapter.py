@@ -312,18 +312,22 @@ class FixtureAPI:
         uid, version, state = self.exit_health_snapshot()
         if state != "true":
             raise AdapterError("Probe-only health switch not initially enabled.")
+        disabled_version = None
         try:
-            self._replace_exit_health(uid, version, False)
+            disabled_version = self._replace_exit_health(uid, version, False)
             yield uid
         finally:
             try:
                 # A timed-out update might have reached the API. Re-read the
                 # pinned object before restoration; never overwrite a foreign
-                # UID, changed labels, or unknown state/version.
+                # UID, changed labels, or unknown state/version. If the disable
+                # succeeded, an intervening writer must not be silently adopted.
                 current_uid, current_version, current_state = self._exit_health(uid)
+                if disabled_version is not None and current_version != disabled_version:
+                    raise AdapterError("Probe-only ConfigMap changed during outage; refusing overwrite.")
                 if current_state == "false":
                     self._replace_exit_health(current_uid, current_version, True)
-                elif current_state != "true":
+                elif current_state != "true" or disabled_version is not None:
                     raise AdapterError("Probe-only restoration state invalid.")
             except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
                 raise
