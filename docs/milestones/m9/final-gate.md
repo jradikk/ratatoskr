@@ -110,16 +110,18 @@ resolves the forward metadata symptom in isolation but **does not satisfy the
 restricted-Pod return-path or Linux 5.10 acceptance gates**. No production
 implementation was retained and no host/cluster sysctl was modified.
 
-A later bounded Linux-7 disposable-netns RPDB experiment showed why a
-seemingly promising reverse-lookup exception is unsafe: an exact remote /32,
-TCP/UDP and `dport 8080` rule let selected replies pass with `rp_filter=2` and
-`src_valid_mark=0`, but a local TCP socket explicitly bound to **source** port
-8080 and connecting to **destination** port 9090 also sent packets through the
-selected tunnel (two `rtk0` TX packets). An nft route/OUTPUT bypass mark plus
-higher-priority MAIN rule still left one wrong-port tunnel TX packet. Thus
-positive reply success does **not** satisfy port-policy isolation; the candidate
-was discarded without production changes. No sysctl or security relaxation was
-used.
+A later bounded Linux-7 disposable-netns RPDB experiment found that an
+exact remote /32, TCP/UDP and `dport 8080` rule let selected replies pass with
+`rp_filter=2` and `src_valid_mark=0`. An initial inference of wrong-port TCP
+leakage from `rtk0` aggregate TX counters was **incorrect**: packet capture
+identified those increments as IPv6 multicast noise, not wrong-port TCP. With
+an nft route/OUTPUT bypass mark and higher-priority MAIN rule, the tested TCP
+SYN bound to **source** port 8080 and targeting **destination** port 9090 was
+captured only on `eth0`; nft bypass and marked-FIB counters supported direct
+routing. This does **not** yet establish that all policy/exclusion, fail-closed,
+transition or Linux 5.10 cases pass. The candidate remains unimplemented and
+unaccepted pending packet-level negative/positive verification. No sysctl or
+security relaxation was used.
 
 The current M8 matrix still implements only two direct-config flannel subsets;
 Cilium, Cilium-WireGuard, Calico, mesh, admission/CRD, restricted agent,
