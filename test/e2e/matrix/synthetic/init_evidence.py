@@ -62,8 +62,8 @@ def assert_init_pod(pod, *, namespace, name, uid, init_image, init_image_id, app
     try:
         cfg = json.loads(raw)
         if (cfg.get("gatewayID") != gateway_id or cfg.get("endpoint") != endpoint or
-                cfg.get("podIP") != status.get("podIP") or
-                cfg.get("identity", {}).get("uid") != uid or
+                cfg.get("podIP") not in (None, "") or cfg.get("mtu") != 0 or
+                cfg.get("identity", {}).get("uid") not in (None, "") or
                 cfg.get("identity", {}).get("pod") != name or
                 cfg.get("identity", {}).get("namespace") != namespace or
                 cfg.get("identity", {}).get("policy") != "synthetic" or

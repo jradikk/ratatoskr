@@ -76,7 +76,7 @@ class InitTests(unittest.TestCase):
     def test_init_pod_never_claims_restricted_and_detects_privilege_tamper(self):
         pod, _, _ = test_selected.pod("healthy")
         uid = pod["metadata"]["uid"]
-        cfg = {"gatewayID": 7, "endpoint": "10.42.1.7", "podIP": "10.42.2.5",
+        cfg = {"gatewayID": 7, "endpoint": "10.42.1.7", "podIP": None, "mtu": 0,
                "identity": {"namespace": test_selected.APP, "pod": "synthetic-probe-healthy",
                             "policy": "synthetic"},
                "policy": {"mode": "include", "rules": [{"cidrs": ["10.88.0.1/32"],
