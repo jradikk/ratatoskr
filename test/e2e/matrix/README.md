@@ -24,7 +24,9 @@ The 240-second total API budget, per-command timeouts and separate bounded clean
 cover temporary UUID-named namespaces and a Gateway whose upstream Secret is
 **deliberately nonexistent**. No Secret is created/read. Controller allocation,
 Ready=False/SecretUnavailable and absence of healthy endpoints/Deployment are
-required. All workload Pods and Policy instances remain server dry-run only.
+required. Workload CREATE/Policy checks remain dry-run; the UPDATE tier persists
+one explicitly inert, scheduling-gated Pod only after dry-run barrier checks.
+It never schedules or runs a container.
 
 Assertions cover:
 - Server dry-run of both checked-in CRDs plus complete Gateway/Policy instances.
@@ -45,8 +47,42 @@ loss still requires parent/operator cleanup.
 Evidence appears in the separate `apiAdmission` inventory section only after
 actual assertions plus successful release preflight/cleanup. It awards no traffic,
 CNI/mesh/agent coverage; full matrix remains INCOMPLETE/nonzero. Independent
-validator tamper/UPDATE checks and healthy gateway selection remain **uncovered**.
-No Pod is persisted for those missing tests. See `admission-report.md`.
+validator metadata UPDATE checks now have the separate scenario below; healthy
+gateway selection remains **uncovered**. See `admission-report.md`.
+
+### Approved inert UPDATE fixture
+
+A fresh complete Pod CREATE document adds exactly one unique schedulingGate and
+`nodeSelector: {ratatoskr-e2e-never-schedule: <unique suffix>}`. No node may have
+that label. The runner verifies the existing three-node API again, then performs
+server CREATE dry-run and requires the exact gate/selector to survive mutation,
+no nodeName/PodIP/startTime/container state, and the normal admission security
+contract. Rejected/pruned/changed scheduling fields fail closed **before Pod
+creation**; no ungated fallback exists.
+
+Only after those checks does it persist that exact original CREATE manifest
+(the already-mutated output is not resubmitted through CREATE). The persisted
+Pod must retain exact barriers and remain unassigned/unstarted. Before each of
+four UPDATE cases, it refreshes node labels and the Pod UID/resourceVersion,
+checks barriers/no execution and admission security, then submits a complete
+metadata-only `replace --dry-run=server` document. Cases:
+
+1. Benign unrelated annotation allowed and reflected in returned dry-run output.
+2. Gateway label tamper denied by exact Ratatoskr immutability reason.
+3. Gateway namespace label/annotation tamper denied by exact immutability reason.
+4. Client-config annotation tamper denied by exact config immutability reason.
+
+The registered mutator must remain CREATE-only, so these exercise independent
+Pod UPDATE validation. Conflict, timeout, unrelated API error or another webhook
+reason is not a pass. After every attempt, the Pod is re-read; exact barriers,
+no execution, UID/spec/labels/annotations must be unchanged (independent scheduler
+resourceVersion/condition updates are tolerated). Barriers are never removed.
+
+Cleanup first inspects/deletes the exact Pod with a bounded wait and checks
+absence, **before** deleting the temporary namespaces. Unsafe state, deletion
+failure or leftovers make cleanup/report FAILED even if earlier checks passed.
+This is separate `api-independent-update-validation` API evidence only; parent
+runs it at final gate, child executes cluster-free synthetic tests only.
 
 Allowed child validation: `python3 test/e2e/matrix/admission-static-check.py` uses
 synthetic complete fixtures, compiles Python and prohibits subprocess/API calls.

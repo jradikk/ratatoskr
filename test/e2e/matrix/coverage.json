@@ -238,6 +238,13 @@
       "implementation": "api-admission",
       "mode": "both",
       "assertion": "Only if existing controller DATAPATH=ebpf: complete Gateway CR is reconciled Ready=False/Unsupported before Secret lookup and no Deployment rendered; NOT webhook rejection"
+    },
+    {
+      "id": "api-independent-update-validation",
+      "milestone": "M8",
+      "implementation": "api-admission",
+      "mode": "both",
+      "assertion": "Actual API UPDATE validating-webhook: exact scheduling-gated never-match inert Pod; benign metadata dry-run allowed, gateway label/namespace and client-config metadata tamper dry-runs denied; no scheduling/container execution and exact Pod cleanup before namespaces required"
     }
   ]
 }

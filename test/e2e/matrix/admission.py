@@ -130,6 +130,108 @@ def assert_security(original, mutated, driver, datapath, image, gateway_id):
         raise Blocked("Admitted client identity differs from authorized Pod.")
 
 
+UPDATE_CHECK = "api-independent-update-validation"
+NEVER_SCHEDULE_LABEL = "ratatoskr-e2e-never-schedule"
+
+
+def inert_pod(namespace, name, gateway_name, suffix):
+    value = pod(namespace, name, gateway_name, namespace)
+    value["spec"]["schedulingGates"] = [{"name": "ratatoskr-e2e-admission/hold-" + suffix}]
+    value["spec"]["nodeSelector"] = {NEVER_SCHEDULE_LABEL: suffix}
+    return value
+
+
+def assert_inert(expected, observed):
+    """Fail before persistence/UPDATE if either barrier or no-execution state differs."""
+    spec, status = observed.get("spec", {}), observed.get("status", {})
+    wanted = expected["spec"]
+    gates = wanted.get("schedulingGates", [])
+    selector = wanted.get("nodeSelector", {})
+    if len(gates) != 1 or not gates[0].get("name", "").startswith("ratatoskr-e2e-admission/hold-") or set(selector) != {NEVER_SCHEDULE_LABEL}:
+        raise Blocked("Inert fixture definition is missing its unique scheduling barriers.")
+    if spec.get("schedulingGates") != gates or spec.get("nodeSelector") != selector:
+        raise Blocked("Scheduling gate or never-match node selector was rejected, pruned or altered.")
+    if spec.get("nodeName") or status.get("podIP") or status.get("podIPs") or status.get("startTime"):
+        raise Blocked("Inert fixture was assigned a node/address or started; stop and clean up.")
+    if status.get("phase") not in (None, "", "Pending") or any(status.get(key) for key in
+            ("containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses")):
+        raise Blocked("Inert fixture contains evidence of container execution.")
+    if any(c.get("type") == "PodScheduled" and c.get("status") == "True" for c in status.get("conditions", [])):
+        raise Blocked("Inert fixture was scheduled despite barriers.")
+    if spec.get("automountServiceAccountToken") is not False or spec.get("hostNetwork") or spec.get("hostPID"):
+        raise Blocked("Inert fixture must not acquire API credentials or host namespaces.")
+
+
+def assert_no_matching_node(nodes):
+    if len(nodes) != 3 or any(NEVER_SCHEDULE_LABEL in n.get("metadata", {}).get("labels", {}) for n in nodes):
+        raise Blocked("Never-schedule label is present or the approved three-node topology changed.")
+
+
+def update_document(current, case, suffix):
+    """Complete replacement object; changes metadata only and never removes gates."""
+    result = copy.deepcopy(current)
+    result.pop("status", None)
+    result["metadata"].pop("managedFields", None)
+    if not result["metadata"].get("resourceVersion") or not result["metadata"].get("uid"):
+        raise Blocked("UPDATE fixture requires a live UID/resourceVersion.")
+    labels = result["metadata"].setdefault("labels", {})
+    annotations = result["metadata"].setdefault("annotations", {})
+    if case == "benign":
+        annotations["ratatoskr-e2e-admission/benign"] = suffix
+    elif case == "gateway-label":
+        labels[PREFIX + "gateway"] = "different-" + suffix
+    elif case == "gateway-namespace":
+        labels[PREFIX + "gateway-namespace"] = "different-" + suffix
+        annotations[PREFIX + "gateway-namespace"] = "different-" + suffix
+    elif case == "client-config":
+        cfg = json.loads(annotations[PREFIX + "client-config"])
+        cfg["allowCloudMetadata"] = not cfg.get("allowCloudMetadata", False)
+        annotations[PREFIX + "client-config"] = json.dumps(cfg)
+    else:
+        raise Blocked("Unknown UPDATE assertion.")
+    return result
+
+
+def assert_update_response(result, case):
+    if case == "benign":
+        if result.returncode != 0:
+            raise Blocked("Benign server-dry-run UPDATE was rejected; validator availability is unproven.")
+        return
+    phrase = ("pod client config is immutable; recreate the pod to change its gateway configuration" if case == "client-config" else
+              "pod gateway opt-in and gateway namespace are immutable; change the Deployment template and recreate the pod")
+    if result.returncode == 0 or 'admission webhook "pods.ratatoskr.skaldhall.io" denied the request' not in result.stderr or phrase not in result.stderr:
+        raise Blocked("Tamper UPDATE did not receive the exact Ratatoskr validating-webhook denial.")
+
+
+def assert_unchanged_fixture(before, after):
+    # ResourceVersion and scheduler condition timestamps can change independently.
+    # Spec and submitted metadata must never change from a dry-run UPDATE.
+    if before["metadata"]["uid"] != after["metadata"]["uid"] or before["spec"] != after["spec"]:
+        raise Blocked("Fixture identity/spec changed during UPDATE dry-run.")
+    for field in ("labels", "annotations"):
+        if before["metadata"].get(field, {}) != after["metadata"].get(field, {}):
+            raise Blocked("A dry-run metadata UPDATE unexpectedly persisted or fixture metadata changed.")
+
+
+def delete_inert_fixture(api, path, namespace, name, expected):
+    """Always attempt exact Pod deletion; detect unsafe state and leftovers."""
+    clean = True
+    try:
+        result = api.call("get", "pod", name, "-n", namespace, "--ignore-not-found", "-o", "json", cleanup=True)
+        if result.stdout.strip():
+            assert_inert(expected, json.loads(result.stdout))
+    except (Blocked, ValueError, KeyError):
+        clean = False
+    try:
+        api.call("delete", "-f", path, "--ignore-not-found", "--wait=true", "--timeout=25s", cleanup=True)
+        result = api.call("get", "pod", name, "-n", namespace, "--ignore-not-found", "-o", "name", cleanup=True)
+        if result.stdout.strip():
+            clean = False
+    except Blocked:
+        clean = False
+    return clean
+
+
 def release_preflight(api, expected_ids):
     if set(expected_ids) != {"controller", "webhook"} or not all(re.fullmatch(r".*sha256:[a-fA-F0-9]{64}", value) for value in expected_ids.values()):
         raise Blocked("Expected immutable controller/webhook runtime image IDs required; mutable tags cannot prove freshness.")
@@ -155,6 +257,8 @@ def release_preflight(api, expected_ids):
         required_operations = {"CREATE"} if hook.get("clientConfig", {}).get("service", {}).get("path") == "/mutate-v1alpha1-pod" else {"CREATE", "UPDATE"}
         if not any(target in rule.get("resources", []) and required_operations <= set(rule.get("operations", [])) for rule in hook.get("rules", [])):
             raise Blocked("Webhook rules do not cover required API operations.")
+        if hook.get("clientConfig", {}).get("service", {}).get("path") == "/mutate-v1alpha1-pod" and any(set(rule.get("operations", [])) != {"CREATE"} for rule in hook.get("rules", [])):
+            raise Blocked("Pod mutation must remain CREATE-only for independent UPDATE validation evidence.")
         if target == "pods" and hook.get("objectSelector") != {"matchExpressions": [{"key": PREFIX + "gateway", "operator": "Exists"}]}:
             raise Blocked("Pod webhook selector differs from expected opt-in contract.")
     namespace = mutation["webhooks"][0]["clientConfig"]["service"]["namespace"]
@@ -199,6 +303,10 @@ def execute(directory, expected_ids):
     api = API()
     checks = []
     created = []
+    inert_path = None
+    inert_name = None
+    inert_expected = None
+    inert_uid = None
     report = {"scope": "existing-flannel-api-admission-only", "status": "FAILED", "traffic": "NOT_TESTED", "checks": checks}
     def record(name, status, detail):
         checks.append({"name": name, "status": status, "detail": detail})
@@ -262,6 +370,45 @@ def execute(directory, expected_ids):
             if result.returncode == 0 or "admission webhook" not in result.stderr or expected not in result.stderr:
                 raise Blocked("Unauthorized request was not denied by expected Ratatoskr admission assertion.")
         record(CHECKS[3], "PASSED", "Four unauthorized cases denied with expected Ratatoskr reasons, not generic API errors.")
+        # Approved inert fixture: prove API preserves both barriers BEFORE creating
+        # any Pod. Never fall back to an ungated Pod if schema/admission rejects it.
+        assert_no_matching_node(api.get("nodes")["items"])
+        inert_name = "update-inert-" + suffix
+        inert_expected = inert_pod(allowed, inert_name, name, suffix)
+        input_path = manifest("update-inert-create", inert_expected)
+        result = api.call("create", "--dry-run=server", "-f", input_path, "-o", "json")
+        admitted_inert = json.loads(result.stdout)
+        assert_inert(inert_expected, admitted_inert)
+        assert_security(inert_expected, admitted_inert, driver, datapath, init_image, g["status"]["gatewayID"])
+        assert_no_matching_node(api.get("nodes")["items"])
+        # The already-tested original complete CREATE is submitted again; do not
+        # re-submit its mutated reserved init to the mutating webhook.
+        inert_path = input_path  # Also clean up an ambiguous create timeout.
+        result = api.call("create", "-f", input_path, "-o", "json")
+        current = json.loads(result.stdout)
+        assert_inert(inert_expected, current)
+        assert_security(inert_expected, current, driver, datapath, init_image, g["status"]["gatewayID"])
+        inert_uid = current["metadata"]["uid"]
+        for case in ("benign", "gateway-label", "gateway-namespace", "client-config"):
+            assert_no_matching_node(api.get("nodes")["items"])
+            before = api.get("pod", inert_name, "-n", allowed)
+            assert_inert(inert_expected, before)
+            assert_security(inert_expected, before, driver, datapath, init_image, g["status"]["gatewayID"])
+            if before["metadata"]["uid"] != inert_uid:
+                raise Blocked("Inert fixture UID changed before UPDATE.")
+            replacement = update_document(before, case, suffix)
+            assert_inert(inert_expected, replacement)
+            result = api.call("replace", "--dry-run=server", "-f", manifest("update-" + case, replacement), "-o", "json", allow_error=True)
+            assert_update_response(result, case)
+            if case == "benign":
+                benign = json.loads(result.stdout)
+                assert_inert(inert_expected, benign)
+                if benign["metadata"].get("uid") != inert_uid or benign["metadata"].get("annotations", {}).get("ratatoskr-e2e-admission/benign") != suffix:
+                    raise Blocked("Benign UPDATE dry-run did not return the requested metadata on the exact fixture.")
+            after = api.get("pod", inert_name, "-n", allowed)
+            assert_inert(inert_expected, after)
+            assert_unchanged_fixture(before, after)
+        record(UPDATE_CHECK, "PASSED", "Scheduling-gated never-match Pod remained unassigned/unstarted; benign UPDATE allowed and three metadata tamper UPDATEs denied by exact validating-webhook reasons; all dry-runs left persisted spec/metadata unchanged.")
         if datapath == "ebpf":
             wgname = "rtk-api-wg-" + suffix
             wgpath = manifest("unsupported-wg", gateway(operator, wgname, suffix, "wireguard"))
@@ -274,19 +421,25 @@ def execute(directory, expected_ids):
             record(CHECKS[5], "PASSED", "Existing eBPF controller rejected WireGuard as Unsupported before missing-Secret lookup; no Deployment rendered.")
         else:
             record(CHECKS[5], "SKIPPED", "Deployed datapath is iproute; eBPF+WireGuard controller rejection not covered, no release reconfiguration.")
-        if api.get("pods", "-n", allowed)["items"] or api.get("deployments", "-n", allowed)["items"]:
-            raise Blocked("API-only fixture unexpectedly created workload/gateway Pods or Deployment.")
+        fixtures = api.get("pods", "-n", allowed)["items"]
+        if len(fixtures) != 1 or fixtures[0]["metadata"]["uid"] != inert_uid or api.get("deployments", "-n", allowed)["items"]:
+            raise Blocked("API-only tier contains objects other than its exact inert Pod fixture.")
+        assert_inert(inert_expected, fixtures[0])
         report["status"] = "INCOMPLETE" if datapath != "ebpf" else "PASSED"
     except (Blocked, ValueError, KeyError, StopIteration) as error:
         record("api-blocker", "FAILED", str(error) if isinstance(error, Blocked) else "Unexpected API object shape; no raw object retained.")
     finally:
         clean = True
+        # Delete the Pod before any Namespace, even after an ambiguous create
+        # timeout or assertion failure. Never remove its scheduling barriers.
+        if inert_path is not None:
+            clean = delete_inert_fixture(api, inert_path, allowed, inert_name, inert_expected)
         for path in reversed(created):
             try:
                 api.call("delete", "-f", path, "--ignore-not-found", "--wait=true", "--timeout=25s", cleanup=True)
             except Blocked:
                 clean = False
-        record(CHECKS[6], "PASSED" if clean else "FAILED", "Temporary namespaces/Gateway removed." if clean else "Fixture cleanup failed; operator cleanup required.")
+        record(CHECKS[6], "PASSED" if clean else "FAILED", "Exact inert Pod removed before temporary namespaces/Gateway; no fixture left behind." if clean else "Fixture unsafe or cleanup failed/leftovers detected; operator cleanup required.")
         if not clean:
             report["status"] = "FAILED"
         (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
