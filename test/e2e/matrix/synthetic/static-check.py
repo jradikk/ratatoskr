@@ -42,7 +42,9 @@ try:
     assert objects[6]["spec"]["upstream"]["secretRef"]["name"] == client["metadata"]["name"]
     server_pod = objects[4]
     assert server_pod["spec"]["containers"][0]["imagePullPolicy"] == "Never"
-    assert server_pod["spec"]["containers"][0]["securityContext"]["capabilities"]["add"] == ["NET_ADMIN"]
+    assert server_pod["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}
+    assert server_pod["spec"]["volumes"][1] == {"name": "dev-net", "emptyDir": {}}
+    assert not any("hostPath" in volume for volume in server_pod["spec"]["volumes"])
     assert objects[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "privileged"
     for malicious in ("example.net", "synthetic-vpn.bad/shell.svc.cluster.local", "vpn.UPPER.svc.cluster.local"):
         try:

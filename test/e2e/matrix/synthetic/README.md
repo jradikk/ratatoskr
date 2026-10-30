@@ -11,7 +11,7 @@ At the authorized final gate only, build `server/Dockerfile` into a **local**
 `ratatoskr-synthetic-openvpn:local` image and import it plus the locally built
 upstream/tools/gateway/agent/controller/webhook images into a *preflighted*
 existing three-node cluster; no registry pulls. The local server runs actual
-OpenVPN over UDP1194 with `/dev/net/tun` and NET_ADMIN; it serves a fixed marker
+OpenVPN over UDP1194 with a Pod-local emptyDir TUN device and NET_ADMIN/MKNOD (no host device mount); it serves a fixed marker
 and exit IPv4 at `http://10.88.0.1:8080/marker` and `/exit`, bound exclusively
 on its tunnel endpoint. This is *not* the older HTTP fakeupstream. Its Pod must
 run in a separate privileged-labeled namespace; only the app namespace enforces

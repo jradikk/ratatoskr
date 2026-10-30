@@ -2,6 +2,12 @@
 # The server and marker listener share this Pod's tunnel namespace.
 set -eu
 umask 077
+# Create an isolated TUN device inside this Pod's emptyDir; never mount the
+# host's device node or request privileged/SYS_ADMIN access.
+mkdir -p /dev/net
+if [ ! -e /dev/net/tun ]; then
+    mknod -m 0600 /dev/net/tun c 10 200
+fi
 /usr/sbin/openvpn --config /etc/synthetic/server.conf --verb 0 >/dev/null 2>&1 &
 vpn=$!
 trap 'kill "$vpn" 2>/dev/null || :; wait "$vpn" 2>/dev/null || :' EXIT
