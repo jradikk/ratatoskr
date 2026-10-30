@@ -72,6 +72,21 @@ privileged init, global rp_filter disable, broad routing rule or host sysctl
 workaround was introduced. A reviewed alternative architecture/runtime
 permission model is needed; **M8 selective traffic still fails**.
 
+**The independent eBPF fake subset also FAILED** at its first steered echo.
+Its client init, baseline cluster paths, gateway readiness, MTU and private
+metric checks passed, but the fake tunneled request timed out. A bounded
+isolated two-netns eBPF-client → iproute-gateway reproduction showed client
+external `gnv0` transmit drops with no gateway `gnv0` receive packets or TC
+flower hits; the client underlay route and BPF helper return counters were
+healthy. A `geneve_xmit` probe observed a transmit attempt without
+`DST_METADATA` tunnel information (`dst.flags=0`, mode/remote zero), so the
+collect_md GENEVE device discarded it before emitting outer UDP. Removing the
+TLV helper and MAC rewrite or trying clone redirect in disposable diagnostic
+builds did not repair this. Those diagnostic changes were discarded; there is
+**no verified production fix**, and the earlier isolated `gnv0` counter check
+was not proof of end-to-end gateway ingress. eBPF may not be represented as a
+passing second datapath.
+
 The current M8 matrix still implements only two direct-config flannel subsets;
 Cilium, Cilium-WireGuard, Calico, mesh, admission/CRD, restricted agent,
 WireGuard registration, HA failover and full observability scenarios remain
@@ -85,9 +100,11 @@ are prerequisites before live acceptance.
 
 1. Resolve selective port-qualified return with a verified fail-closed design
    that operates in restricted init Pods without weakening reverse-path
-   validation; rerun the extended fake subset, policy/metadata/DNS and both
-   datapaths. The basic full-tunnel return TTL problem is fixed and its direct
-   fake suite passed, but it does not imply selective or HA acceptance.
+   validation. Separately repair eBPF metadata delivery to collect_md GENEVE
+   and verify actual gateway ingress, not only BPF helper success. Rerun the
+   extended fake subset, policy/metadata/DNS and both datapaths. The basic
+   iproute full-tunnel return TTL problem is fixed and its direct fake suite
+   passed, but it does not imply selective/eBPF/HA acceptance.
 2. Implement and run the missing CNI/mesh/agent/WireGuard/HA compatibility
    scenarios under the existing mandatory resource preflight. Skipped cells
    must never be represented as passed.
