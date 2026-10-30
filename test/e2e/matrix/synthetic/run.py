@@ -39,7 +39,9 @@ class ReadOnlyAPI:
         self.clock = clock
         self.deadline = clock() + budget
 
-    def get(self, resource, name=None, namespace=None, selector=None):
+    def get(self, resource, name=None, namespace=None, selector=None, ignore_not_found=False):
+        if ignore_not_found and (resource, name) != ("daemonset", "ratatoskr-agent"):
+            raise Blocked("Ignore-not-found is permitted only for absent init-mode agent.")
         remaining = min(15, self.deadline - self.clock())
         if remaining <= 0:
             raise Blocked("Final-gate preflight total deadline exceeded.")
@@ -50,6 +52,8 @@ class ReadOnlyAPI:
             args += ["-n", namespace]
         if selector:
             args += ["-l", selector]
+        if ignore_not_found:
+            args += ["--ignore-not-found"]
         args += ["-o", "json"]
         # Never inherit provider tokens or shell tracing/debug variables. No raw API
         # stderr, Pod logs, profiles, Secret objects, or manifests are recorded.
@@ -59,6 +63,8 @@ class ReadOnlyAPI:
                                     check=False, env=env)
             if result.returncode:
                 raise Blocked("Read-only Kubernetes preflight failed.")
+            if ignore_not_found and not result.stdout.strip():
+                return None
             return json.loads(result.stdout)
         except (OSError, subprocess.TimeoutExpired, ValueError):
             raise Blocked("Read-only Kubernetes preflight unavailable or malformed.") from None
@@ -173,25 +179,103 @@ def preflight(api, ids):
     return namespace
 
 
+def init_release_preflight(api, ids):
+    """Read-only preflight for a parent-rolled init release; no mode switch.
+
+    Unlike the agent gate, the init chart does not render an agent DaemonSet.
+    Do not use this to authorize resource creation until a separate bounded
+    init traffic runner and operator restoration protocol exist.
+    """
+    namespace = preflight_basics(api)
+    controller = verify_workload(api, namespace, "deployment", "ratatoskr-controller",
+                                 "controller", ids["controller"], 1)
+    webhook = verify_workload(api, namespace, "deployment", "ratatoskr-webhook",
+                              "webhook", ids["webhook"], 1)
+    def values(workload, component):
+        containers = [c for c in workload["spec"]["template"]["spec"]["containers"]
+                      if c.get("name") == component]
+        if len(containers) != 1:
+            raise Blocked("Init release component container missing.")
+        return {v.get("name"): v.get("value") for v in containers[0].get("env", [])}
+    c, w = values(controller, "controller"), values(webhook, "webhook")
+    if (c.get("DRIVER") != "init" or w.get("DRIVER") != "init" or
+            c.get("DATAPATH") != "iproute" or w.get("DATAPATH") != "iproute" or
+            c.get("GATEWAY_UPSTREAM_PROBE_URL") != PROBE or
+            c.get("IMAGE_PULL_POLICY") != "Never" or w.get("INIT_IMAGE_PULL_POLICY") != "Never" or
+            c.get("GATEWAY_IMAGE") != "ghcr.io/skaldhall/ratatoskr-gateway:dev" or
+            c.get("OPENVPN_IMAGE") != "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev" or
+            not w.get("INIT_IMAGE")):
+        raise Blocked("Parent-rolled init release mode/probe/image settings mismatch.")
+    result = api.get("daemonset", "ratatoskr-agent", namespace, ignore_not_found=True)
+    if result is not None:
+        raise Blocked("Init release unexpectedly retains node-agent DaemonSet.")
+    return namespace
+
+
+def preflight_basics(api):
+    """Fail closed unless existing Ready three-node flannel/no-mesh context."""
+    nodes = api.get("nodes")["items"]
+    if (len(nodes) != 3 or {n["metadata"].get("name") for n in nodes} != set(node_images.NODES) or
+            {n["metadata"].get("name") for n in nodes if
+             "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {node_images.NODES[0]} or
+            not all(ready(n) for n in nodes)):
+        raise Blocked("Existing three-node cluster is not Ready.")
+    env = api.get("configmap", "ratatoskr-testenv", "kube-system").get("data", {})
+    if env.get("variant") != "flannel" or env.get("mesh") != "none":
+        raise Blocked("Existing cluster is not preflighted flannel/no-mesh.")
+    mutation = api.get("mutatingwebhookconfiguration", "ratatoskr-pods")
+    validation = api.get("validatingwebhookconfiguration", "ratatoskr-validation")
+    hooks = mutation.get("webhooks", []) + validation.get("webhooks", [])
+    required = {("pods.ratatoskr.skaldhall.io", "/mutate-v1alpha1-pod"),
+                ("pods.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
+                ("egressgateways.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
+                ("egresspolicies.ratatoskr.skaldhall.io", "/validate-v1alpha1")}
+    if (not required <= {(h.get("name"), h.get("clientConfig", {}).get("service", {}).get("path")) for h in hooks} or
+            any(h.get("failurePolicy") != "Fail" or h.get("sideEffects") != "None" or
+                not h.get("clientConfig", {}).get("caBundle") for h in hooks)):
+        raise Blocked("Fail-closed webhook registrations missing for init release.")
+    for hook in hooks:
+        target = hook.get("name", "").split(".")[0]
+        path = hook.get("clientConfig", {}).get("service", {}).get("path")
+        ops = {"CREATE"} if path == "/mutate-v1alpha1-pod" else {"CREATE", "UPDATE"}
+        if (not any(target in rule.get("resources", []) and ops <= set(rule.get("operations", []))
+                    for rule in hook.get("rules", [])) or
+                target == "pods" and hook.get("objectSelector") != {
+                    "matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway", "operator": "Exists"}]}):
+            raise Blocked("Init release webhook admission rules mismatch.")
+    namespace = mutation["webhooks"][0]["clientConfig"]["service"]["namespace"]
+    if not namespace or any(h["clientConfig"]["service"].get("namespace") != namespace for h in hooks):
+        raise Blocked("Init release webhook Service namespaces mismatch.")
+    return namespace
+
+
 def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smoke=None):
     parser = argparse.ArgumentParser(description="Read-only synthetic VPN final-gate preflight (never e2e PASS)")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--allow-partial-vpn-smoke", action="store_true")
     parser.add_argument("--execute-partial-gateway", action="store_true")
+    parser.add_argument("--execute-init-smoke", action="store_true")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     if (not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
-            args.allow_partial_vpn_smoke and env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1" or
-            args.execute_partial_gateway and not args.allow_partial_vpn_smoke):
+            (args.allow_partial_vpn_smoke or args.execute_init_smoke) and
+            env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1" or
+            args.execute_partial_gateway and not args.allow_partial_vpn_smoke or
+            args.execute_init_smoke and (not args.allow_partial_vpn_smoke or
+                                         env.get("RATATOSKR_E2E_INIT_SMOKE") != "1" or
+                                         args.execute_partial_gateway)):
         print("SKIPPED: missing explicit final-gate/partial-smoke authorization; no cluster accessed.")
         return 2
     try:
         ids = expected_ids(env)
         api = api_factory()
-        namespace = preflight(api, ids)
+        namespace = init_release_preflight(api, ids) if args.execute_init_smoke else preflight(api, ids)
         if args.allow_partial_vpn_smoke:
             verifier = node_images.verify if node_verify is None else node_verify
             verifier({component: ids[component] for component in node_images.TAGS})
+            if args.execute_init_smoke:
+                print("INCOMPLETE: init-driver/nonrestricted synthetic smoke BLOCKED before resource creation; parent must explicitly roll and restore the release and approve separate init-driver Pod evidence. No Kubernetes mutation or PKI.")
+                return 4
             if args.execute_partial_gateway:
                 deployment = api.get("deployment", "ratatoskr-controller", namespace)
                 containers = [c for c in deployment["spec"]["template"]["spec"]["containers"]

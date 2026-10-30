@@ -30,8 +30,10 @@ class Interrupted(LifecycleError):
     pass
 
 
-def _namespace(name, token, apps):
-    labels = {LABEL: token, "pod-security.kubernetes.io/enforce": "restricted" if apps else "privileged"}
+def _namespace(name, token, apps, apps_psa="restricted"):
+    if apps_psa not in ("restricted", "privileged"):
+        raise LifecycleError("Unsupported synthetic app namespace security mode.")
+    labels = {LABEL: token, "pod-security.kubernetes.io/enforce": apps_psa if apps else "privileged"}
     if apps:
         # Must match Gateway.allowedNamespaces selector in the synthetic fixture.
         labels["ratatoskr-synthetic"] = name.removesuffix("-apps")
@@ -87,10 +89,11 @@ class KubectlAPI:
         except (ValueError, TypeError, AttributeError):
             raise LifecycleError("Namespace response is malformed.") from None
 
-    def create(self, name, token, apps, timeout=12):
+    def create(self, name, token, apps, timeout=12, apps_psa="restricted"):
         if not NAME.fullmatch(name) or not re.fullmatch(r"[0-9a-f]{32}", token):
             raise LifecycleError("Invalid generated namespace identity.")
-        output = self._call("create", "-f", "-", "-o", "json", obj=_namespace(name, token, apps), timeout=timeout)
+        output = self._call("create", "-f", "-", "-o", "json",
+                            obj=_namespace(name, token, apps, apps_psa), timeout=timeout)
         try:
             result = json.loads(output)
             metadata = result["metadata"]
@@ -122,9 +125,12 @@ class Lifecycle:
     """
     def __init__(self, api=None, *, duration=240, cleanup_budget=100,
                  clock=time.monotonic, sleep=time.sleep, make_temp=tempfile.mkdtemp,
-                 token_factory=None, pki_generator=None):
+                 token_factory=None, pki_generator=None, apps_psa="restricted"):
         if not 0 < duration <= 900 or not 0 < cleanup_budget <= 180:
             raise LifecycleError("Invalid final-gate deadline.")
+        if apps_psa not in ("restricted", "privileged"):
+            raise LifecycleError("Unsupported synthetic app namespace security mode.")
+        self.apps_psa = apps_psa
         self.api = api if api is not None else KubectlAPI()
         self.clock, self.sleep, self.make_temp = clock, sleep, make_temp
         self.duration, self.cleanup_budget = duration, cleanup_budget
@@ -244,7 +250,11 @@ class Lifecycle:
             self.seen_absent.add(name)
         for index, name in enumerate(self.names):
             self.attempted.add(name)  # Timed-out CREATE may have reached API.
-            uid = self.api.create(name, self.token, index == 1, timeout=self._time(self.deadline))
+            if self.apps_psa == "privileged":
+                uid = self.api.create(name, self.token, index == 1, timeout=self._time(self.deadline),
+                                      apps_psa=self.apps_psa)
+            else:
+                uid = self.api.create(name, self.token, index == 1, timeout=self._time(self.deadline))
             if not isinstance(uid, str) or not UID.fullmatch(uid):
                 raise LifecycleError("Namespace CREATE UID unverified; refusing cleanup of unknown identity.")
             self.created[name] = uid

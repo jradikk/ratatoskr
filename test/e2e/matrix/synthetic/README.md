@@ -1,5 +1,35 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Init-driver/nonrestricted scaffold (fifth gate; NO resource execution)
+
+`run.py --execute --allow-partial-vpn-smoke --execute-init-smoke` additionally
+requires `RATATOSKR_E2E_INIT_SMOKE=1` together with the existing final-gate and
+partial-smoke environment opt-ins. This branch remains **read-only**: checks
+exact existing flannel/no-mesh three nodes, fail-closed webhook registration,
+parent-rolled controller/webhook Deployment→ReplicaSet→Pod ownership and
+approved runtime image IDs, aligned `DRIVER=init`/`DATAPATH=iproute`, exact
+operator private probe and locally imported gateway/plugin image references,
+absent agent DaemonSet and six fixed per-node CRI config IDs. On success it
+returns **4 / INCOMPLETE before namespace, PKI, Secret or Pod creation**;
+it never changes a Helm release, provisions a host, or claims restricted/agent
+coverage. The init release and subsequent **restoration to agent mode** must
+be performed and re-preflighted separately by the parent/operator; this
+scaffold does not own or automate that lifecycle.
+
+A pure `init_evidence.assert_init_pod` contract verifies a future fresh
+selected Pod's CREATE UID, exact production-injected `NET_ADMIN` programming
+init image/args/Downward-API identity/projection, successful init termination
+and controller `datapath-ready=true`, UID/Gateway PodIP/policy binding, and
+capability-free nonroot one-shot app with approved image and exit 0.
+`Lifecycle(apps_psa="privileged")` is **explicitly** required to construct
+the *disposable apps namespace* in a future init-only fixture: its NET_ADMIN
+init cannot be admitted under restricted PSA. This does not downgrade the
+production chart, server namespace or default agent-mode `Lifecycle` (whose
+apps namespace remains restricted). No init workload is created yet, and
+there is no init-driver traffic e2e or M8 PASS claim. The blocked state is
+intentional until bounded init-specific mutation/cleanup and release
+restoration have a verified operator contract.
+
 ## Healthy restricted agent one-shot traffic extension (still INCOMPLETE)
 
 The same quadruple-opt-in partial smoke now adds **only** the
