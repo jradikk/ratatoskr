@@ -56,9 +56,20 @@ def bounded_http(sock, request, *, deadline):
 
 
 def direct_api(api_ip, pod_ip):
-    # DNS output is checked against the parent-approved ClusterIP; no proxy.
-    answers = socket.getaddrinfo(HOST, 443, socket.AF_INET, socket.SOCK_STREAM)
-    if not answers or {a[4][0] for a in answers} != {api_ip}:
+    # Resolve the fixed in-cluster name in a child process with a hard timeout;
+    # socket.getaddrinfo in this process could otherwise hang indefinitely.
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    dns = subprocess.run(["/usr/bin/getent", "ahostsv4", HOST],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, timeout=3, check=False, env=env)
+    if dns.returncode or not dns.stdout or len(dns.stdout) > 2048:
+        raise Invalid()
+    try:
+        lines = dns.stdout.decode("ascii").splitlines()
+        answers = {ip4(line.split()[0]) for line in lines if line.split()}
+    except (UnicodeError, ValueError, IndexError):
+        raise Invalid() from None
+    if not answers or answers != {api_ip}:
         raise Invalid()
     cmd = ["/usr/sbin/ip", "-j", "-4", "route", "get", api_ip,
            "ipproto", "tcp", "dport", "443"]

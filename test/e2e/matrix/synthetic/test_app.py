@@ -54,6 +54,31 @@ class ProbeTests(unittest.TestCase):
                         app.marker_result()
                     self.assertNotIn("PRIVATE_PROFILE", str(ctx.exception))
 
+    def test_dns_is_bounded_and_matches_exact_api_ip(self):
+        import subprocess
+        from unittest.mock import Mock
+        getent = b"10.43.0.1 STREAM kubernetes.default.svc.cluster.local\n" * 3
+        route = json.dumps([{"dst": "10.43.0.1", "dev": "eth0", "prefsrc": "10.42.2.5"}]).encode()
+        def fake_run(argv, **kwargs):
+            self.assertFalse(kwargs.get("shell", False))
+            self.assertLessEqual(kwargs["timeout"], 3)
+            if argv[0] == "/usr/bin/getent":
+                self.assertEqual(argv, ["/usr/bin/getent", "ahostsv4", app.HOST])
+                return subprocess.CompletedProcess(argv, 0, getent)
+            return subprocess.CompletedProcess(argv, 0, route)
+        class TLS:
+            def __enter__(self): return self
+            def __exit__(self, *_): return None
+        with patch.object(app.subprocess, "run", side_effect=fake_run), \
+             patch.object(app.socket, "socket", return_value=TLS()), \
+             patch.object(app.ssl, "create_default_context", return_value=Mock(wrap_socket=lambda *_a, **_kw: TLS())), \
+             patch.object(app, "bounded_http", return_value=(b"HTTP/1.1 403 Forbidden", b"")):
+            TLS.settimeout = lambda *_: None
+            TLS.connect = lambda *_: None
+            app.direct_api("10.43.0.1", "10.42.2.5")
+        with patch.object(app.subprocess, "run", side_effect=subprocess.TimeoutExpired("getent", 3)):
+            self.assertEqual(app.main(["outage", "10.43.0.1"], {"POD_IP": "10.42.2.5"}), 1)
+
     def test_bad_invocation_no_network(self):
         for argv, env in ((["sh", "10.43.0.1"], {"POD_IP": "10.42.2.5"}),
                           (["outage", "10.43.0.1", "extra"], {"POD_IP": "10.42.2.5"}),
