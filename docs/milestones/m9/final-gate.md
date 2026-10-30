@@ -479,6 +479,41 @@ No selected workload or witness Pod was created by this partial smoke, so
 M8 compatibility, and release readiness remain untested**. Actual live VPN
 profile is still unset and remains SKIPPED, not passed.
 
+## October 30, 2026 — restricted agent runtime blocked by sandbox netns access
+
+The guarded partial smoke was extended with a **single restricted one-shot
+selected Pod** (`34f5d65`). It uses the production capability-free wait-init,
+locally imported immutable helper image, public CA-only API TLS checks, and
+CREATE-returned Pod UID. The real synthetic OpenVPN server and controller-
+created Gateway again reached healthy/Ready with measured MTU, but the selected
+Pod remained **Pending** with its wait-init running, `datapath-ready=pending`
+and no agent configuration; no selected traffic or helper exit was observed.
+Every attempt verified deletion of both temporary namespaces and private PKI.
+
+Without changing permissions, `816ad5a` and `b65c99f` added fixed operation
+labels around agent sandbox/guard/programming errors. The existing three-node
+agent DaemonSet remained 3/3 Ready after the updated image was imported and
+rolled. A subsequent bounded run still failed its selected-Pod checkpoint;
+agent errors were classified, without printing Pod identity, CRI info or
+credentials, as **`verify sandbox network namespace: open verified sandbox
+netns: open sandbox PID network namespace: permission denied`**. This is the
+`/proc/<CRI sandbox PID>/ns/net` open in `pkg/agent/sandbox_linux.go`; it occurs
+after the CRI UID/IP and cgroup UID checks and before any selected-netns
+programming or readiness marker. A healthy Gateway therefore does **not** imply
+agent-mode workload traffic works on this host/runtime.
+
+A reviewed fallback to `stat` on that proc namespace symlink was **rejected**:
+its dereference is subject to the same access check, while `lstat` does not
+identify the network namespace. Adopting the separate CRI-reported netns path
+without independently proving its identity against the sandbox PID and
+excluding host/self namespaces would weaken the agent's fail-closed ownership
+contract. No `SYS_PTRACE`, privileged Pod, host permission change, cgroup
+bypass, unverified netns adoption or guessed readiness was introduced. Agent
+traffic, fail-close, recovery, WireGuard runtime and M8/M9 remain **blocked**
+until a safe, race-resistant identity/access model is designed and tested on
+the required runtime/kernel matrix. Live provider profile remains absent and
+SKIPPED.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
