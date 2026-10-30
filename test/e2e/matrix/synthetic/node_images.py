@@ -18,11 +18,11 @@ NODES = ("k3d-ratatoskr-flannel-server-0",
          "k3d-ratatoskr-flannel-agent-0",
          "k3d-ratatoskr-flannel-agent-1")
 TAGS = {"gateway": "ghcr.io/skaldhall/ratatoskr-gateway:dev",
-        "plugin": "ratatoskr-openvpn:m1-local",
-        "server": "ratatoskr-synthetic-openvpn:local",
-        "tools": "ratatoskr-tools:m1-local",
-        "witness": "ratatoskr-synthetic-witness:local",
-        "selected": "ratatoskr-synthetic-client:local"}
+        "plugin": "docker.io/library/ratatoskr-openvpn:m1-local",
+        "server": "docker.io/library/ratatoskr-synthetic-openvpn:local",
+        "tools": "docker.io/library/ratatoskr-tools:m1-local",
+        "witness": "docker.io/library/ratatoskr-synthetic-witness:local",
+        "selected": "docker.io/library/ratatoskr-synthetic-client:local"}
 ID = re.compile(r"sha256:[a-fA-F0-9]{64}\Z")
 EXPECTED = re.compile(r"(?:containerd://)?sha256:[a-fA-F0-9]{64}\Z")
 MAX_JSON = 2_000_000
