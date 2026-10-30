@@ -128,7 +128,7 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 		if err := b.h.NeighSet(&netlink.Neigh{LinkIndex: link.Attrs().Index, IP: ip(client), HardwareAddr: mac, State: netlink.NUD_PERMANENT}); err != nil {
 			return err
 		}
-		r := netlink.Route{Family: unix.AF_INET, Table: datapath.ReturnTable, Dst: host(client), LinkIndex: link.Attrs().Index, Scope: netlink.SCOPE_LINK, Protocol: datapath.RouteProtocol, MTU: c.MTU, Encap: &ipEncap{ID: uint64(c.GatewayID), Src: c.PodIP, Dst: client}}
+		r := netlink.Route{Family: unix.AF_INET, Table: datapath.ReturnTable, Dst: host(client), LinkIndex: link.Attrs().Index, Scope: netlink.SCOPE_LINK, Protocol: datapath.RouteProtocol, MTU: c.MTU, Encap: &ipEncap{ID: uint64(c.GatewayID), Src: c.PodIP, Dst: client, TTL: 64}}
 		if err := b.h.RouteReplace(&r); err != nil {
 			return fmt.Errorf("gateway return route: %w", err)
 		}
@@ -202,11 +202,12 @@ func (b *Backend) verifier(link netlink.Link, c datapath.GatewayConfig) error {
 }
 
 // ipEncap is the kernel LWTUNNEL_ENCAP_IP metadata encoding used with an external
-// GENEVE device (equivalent to `ip route ... encap ip id ID src S dst D`). The
+// GENEVE device (equivalent to `ip route ... encap ip id ID src S dst D ttl 64`). The
 // netlink library exposes Encap but does not ship this IPv4 implementation.
 type ipEncap struct {
 	ID       uint64
 	Src, Dst netip.Addr
+	TTL      uint8
 }
 
 func (*ipEncap) Type() int                        { return 2 }
@@ -214,11 +215,16 @@ func (e *ipEncap) String() string                 { return fmt.Sprintf("ip id %d
 func (e *ipEncap) Equal(other netlink.Encap) bool { o, ok := other.(*ipEncap); return ok && *e == *o }
 func (*ipEncap) Decode([]byte) error              { return fmt.Errorf("IPv4 LWT decoding is not used") }
 func (e *ipEncap) Encode() ([]byte, error) {
+	if e.TTL == 0 {
+		return nil, fmt.Errorf("GENEVE return tunnel requires a nonzero outer TTL")
+	}
 	id := make([]byte, 8)
 	binary.BigEndian.PutUint64(id, e.ID)
-	// Attribute identifiers are from Linux uapi/linux/lwtunnel.h. Tunnel key
-	// flag is stored in network byte order (uapi/linux/if_tunnel.h).
-	attrs := []*nl.RtAttr{nl.NewRtAttr(1, id), nl.NewRtAttr(2, ip(e.Dst)), nl.NewRtAttr(3, ip(e.Src)), nl.NewRtAttr(6, []byte{0, 4})}
+	// Attribute identifiers are from Linux uapi/linux/lwtunnel.h. The
+	// outer TTL must be set explicitly: zero is not a portable inherited
+	// default and is discarded by a forwarding node before Flannel VXLAN.
+	// Tunnel key flag is network byte order (uapi/linux/if_tunnel.h).
+	attrs := []*nl.RtAttr{nl.NewRtAttr(1, id), nl.NewRtAttr(2, ip(e.Dst)), nl.NewRtAttr(3, ip(e.Src)), nl.NewRtAttr(4, []byte{e.TTL}), nl.NewRtAttr(6, []byte{0, 4})}
 	var out []byte
 	for _, a := range attrs {
 		out = append(out, a.Serialize()...)

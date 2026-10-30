@@ -28,7 +28,7 @@ func TestExclusions(t *testing.T) {
 	}
 }
 func TestIPEncap(t *testing.T) {
-	e := &ipEncap{ID: 0x123456, Src: netip.MustParseAddr("10.42.1.8"), Dst: netip.MustParseAddr("10.42.2.4")}
+	e := &ipEncap{ID: 0x123456, Src: netip.MustParseAddr("10.42.1.8"), Dst: netip.MustParseAddr("10.42.2.4"), TTL: 64}
 	buf, err := e.Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestIPEncap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attrs) != 4 || attrs[0].Attr.Type != 1 || binary.BigEndian.Uint64(attrs[0].Value) != e.ID {
+	if len(attrs) != 5 || attrs[0].Attr.Type != 1 || binary.BigEndian.Uint64(attrs[0].Value) != e.ID {
 		t.Fatal("invalid tunnel id attribute")
 	}
 	if len(attrs[1].Value) != 4 {
@@ -46,10 +46,16 @@ func TestIPEncap(t *testing.T) {
 	if got := netip.AddrFrom4([4]byte(attrs[1].Value)); got != e.Dst {
 		t.Fatalf("dst: %s", got)
 	}
-	if attrs[3].Attr.Type != 6 || binary.BigEndian.Uint16(attrs[3].Value) != 4 {
+	if attrs[3].Attr.Type != 4 || len(attrs[3].Value) != 1 || attrs[3].Value[0] != e.TTL {
+		t.Fatal("return GENEVE needs a nonzero outer TTL")
+	}
+	if attrs[4].Attr.Type != 6 || binary.BigEndian.Uint16(attrs[4].Value) != 4 {
 		t.Fatal("missing TUNNEL_KEY")
 	}
-	if !e.Equal(&ipEncap{ID: e.ID, Src: e.Src, Dst: e.Dst}) {
-		t.Fatal("equality")
+	if !e.Equal(&ipEncap{ID: e.ID, Src: e.Src, Dst: e.Dst, TTL: e.TTL}) || e.Equal(&ipEncap{ID: e.ID, Src: e.Src, Dst: e.Dst}) {
+		t.Fatal("equality must include TTL")
+	}
+	if _, err := (&ipEncap{ID: e.ID, Src: e.Src, Dst: e.Dst}).Encode(); err == nil {
+		t.Fatal("zero outer TTL accepted")
 	}
 }
