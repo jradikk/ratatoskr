@@ -270,6 +270,34 @@ Evidence directories outside the repository: agent/iproute
 INCOMPLETE / exit 4** for each run; no API assertions were counted as
 traffic/CNI/mesh compatibility. Live VPN remains skipped.
 
+## October 30, 2026 — independent Pod UPDATE admission validation
+
+Follow-up scaffold `bcf6ba2` added a real API-server validating-UPDATE tier
+without starting a workload. It first server-dry-runs and verifies an
+**inert, scheduling-gated Pod** with a never-match node selector under the
+existing missing-Secret Gateway. Only after both barriers, security fields,
+no node assignment and no container execution are checked is the inert Pod
+persisted. A benign annotation UPDATE server-dry-run must succeed; three
+separate gateway-label, gateway-namespace and client-config annotation
+changes must receive the exact Ratatoskr validating-webhook immutability
+denials. The fixture is re-read unchanged, then the exact Pod is deleted and
+its absence verified **before** namespace cleanup. No scheduling barrier is
+removed, and no workload or VPN traffic is generated.
+
+The parent ran this final-gate tier in all four existing release modes with
+fresh immutable controller/webhook image-ID preflight: agent/iproute
+`/tmp/ratatoskr-m8-fake-ccg0q9yi`, agent/eBPF
+`/tmp/ratatoskr-m8-fake-jm4snbqn`, init/iproute
+`/tmp/ratatoskr-m8-fake-9kx_0y2s`, init/eBPF
+`/tmp/ratatoskr-m8-fake-iutq0xom`. **Independent UPDATE validation PASSED**
+in every mode, alongside the earlier CREATE/security/denial and cleanup
+checks. eBPF+WireGuard controller rejection remained **SKIPPED** on the two
+iproute releases and passed on the two eBPF releases. The chart was restored
+to the prior `agent/iproute` dev mode; controller/webhook were 1/1 Available
+and the agent DaemonSet 3/3 Ready. Each outer inventory remained
+**INCOMPLETE / exit 4** because API evidence does not establish healthy VPN,
+agent-managed traffic, other CNI/mesh variants, HA, or live acceptance.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
