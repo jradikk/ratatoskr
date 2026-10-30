@@ -389,6 +389,17 @@ flag update/restore and independent proof of marker reachability during
 withdrawal; neither has yet been executed. No traffic or fail-close PASS is
 claimed on this basis.
 
+A non-secret Pod-local ConfigMap projection (`02e7ac8`) now makes `/exit`
+return 503 while leaving `/marker` and OpenVPN untouched. Its scoped API
+helper uses ConfigMap UID/resourceVersion checks and a guarded restoration;
+`92048c0` additionally refuses to overwrite an intervening writer during
+outage. **59 cluster-free synthetic tests** passed. None of these helpers is
+wired into `run.py` or exercised against the Kubernetes API. Server-session
+counter growth cannot independently prove `/marker` remained reachable:
+keepalives and failed probes can also move counters. A second, separately
+certified tunnel witness is required to establish reachability while the
+selected client is blocked; it is not yet implemented or validated.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
