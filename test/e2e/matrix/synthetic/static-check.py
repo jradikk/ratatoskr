@@ -19,12 +19,25 @@ try:
               "WITNESS_PUBLIC", "WITNESS_PRIVATE")
     namespace = "rtk-syn-" + "a" * 16
     objects = module.manifests(namespace, "ratatoskr-synthetic-openvpn:local", sample, "a" * 32)
-    assert len(objects) == 12
+    assert len(objects) == 11
     assert [(o["kind"], o["metadata"]["namespace"]) for o in objects if "namespace" in o["metadata"]] == [
         ("Secret", namespace), ("Secret", namespace), ("Secret", namespace), ("ConfigMap", namespace),
         ("Pod", namespace), ("Pod", namespace), ("Service", namespace),
-        ("EgressGateway", namespace), ("EgressPolicy", namespace + "-apps"),
-        ("Pod", namespace + "-apps")]
+        ("EgressGateway", namespace), ("EgressPolicy", namespace + "-apps")]
+    assert {("Pod", o["metadata"]["name"]) for o in objects if o["kind"] == "Pod"} == {
+        ("Pod", "synthetic-vpn"), ("Pod", "synthetic-witness")}
+    assert "synthetic-client" not in {o["metadata"]["name"] for o in objects if o["kind"] == "Pod"}
+    assert [(o["kind"], o["metadata"]["namespace"], o["metadata"]["name"])
+            for o in objects[2:] if o["metadata"].get("namespace") and
+            (o["kind"], o["metadata"]["name"]) != ("Pod", "synthetic-witness")] == [
+        ("Secret", namespace, "synthetic-server"),
+        ("Secret", namespace, "synthetic-client"),
+        ("Secret", namespace, "synthetic-witness"),
+        ("ConfigMap", namespace, "synthetic-exit-health"),
+        ("Pod", namespace, "synthetic-vpn"),
+        ("Service", namespace, "synthetic-vpn"),
+        ("EgressGateway", namespace, "synthetic"),
+        ("EgressPolicy", namespace + "-apps", "synthetic")]
     server, client = objects[2:4]
     import base64
     decode = lambda value: base64.b64decode(value).decode()
@@ -59,17 +72,17 @@ try:
                for v in selected)
     assert all(not any("secret" in volume or "hostPath" in volume for volume in v["spec"]["volumes"])
                for v in selected)
-    workload = objects[-1]
     assert objects[1]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
-    assert workload["spec"]["automountServiceAccountToken"] is False
-    assert workload["spec"]["volumes"] == [{"name": "api-public-ca", "configMap": {
-        "name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}]
-    assert workload["spec"]["containers"][0]["volumeMounts"] == [{"name": "api-public-ca",
-        "mountPath": "/var/run/ratatoskr/api-ca", "readOnly": True}]
-    assert not any("secret" in v or "projected" in v or "serviceAccountToken" in str(v)
-                   for v in workload["spec"]["volumes"])
-    assert workload["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]}
-    assert not workload["spec"].get("initContainers")  # Production webhook must inject the wait-init.
+    for workload in selected:
+        assert workload["spec"]["automountServiceAccountToken"] is False
+        assert workload["spec"]["volumes"] == [{"name": "api-public-ca", "configMap": {
+            "name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}], "defaultMode": 292}}]
+        assert workload["spec"]["containers"][0]["volumeMounts"] == [{"name": "api-public-ca",
+            "mountPath": "/var/run/ratatoskr/api-ca", "readOnly": True}]
+        assert not any("secret" in v or "projected" in v or "serviceAccountToken" in str(v)
+                       for v in workload["spec"]["volumes"])
+        assert workload["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+        assert not workload["spec"].get("initContainers")  # Production webhook must inject the wait-init.
     health = objects[5]
     assert health["data"] == {"exit-enabled": "true"}
     assert health["metadata"]["labels"] == {"ratatoskr.skaldhall.io/synthetic-lifecycle": "a" * 32}
