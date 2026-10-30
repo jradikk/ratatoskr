@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: @NAMESPACE@
+data:
+  gateway.json: |
+    {"gatewayID":7,"clients":["@CLIENT_IP@"],"mtu":1400,"encryption":"none"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gateway
+  namespace: @NAMESPACE@
+spec:
+  automountServiceAccountToken: false
+  nodeName: @GATEWAY_NODE@
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: gateway
+      image: @GATEWAY_IMAGE@
+      imagePullPolicy: Never
+      command: [/ratatoskr]
+      args: [-config, /config/gateway.json]
+      env:
+        - name: DATAPATH
+          value: ebpf
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: [ALL]
+          add: [NET_ADMIN, BPF, PERFMON]
+      volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+      readinessProbe:
+        httpGet:
+          port: 9900
+          path: /healthz
+        periodSeconds: 2
+        timeoutSeconds: 2
+        failureThreshold: 1
+    - name: upstream
+      image: @OPENVPN_IMAGE@
+      imagePullPolicy: Never
+      args: [--secret-dir, /etc/ratatoskr/upstream, --runtime-dir, /run/ratatoskr]
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: [ALL]
+          add: [NET_ADMIN, MKNOD]
+      volumeMounts:
+        - name: upstream
+          mountPath: /etc/ratatoskr/upstream
+          readOnly: true
+        - name: runtime
+          mountPath: /run/ratatoskr
+        - name: devnet
+          mountPath: /dev/net
+    - name: observer
+      image: @TOOLS_IMAGE@
+      imagePullPolicy: Never
+      command: [sleep, infinity]
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: [ALL]
+  volumes:
+    - name: config
+      configMap:
+        name: gateway-config
+    - name: upstream
+      secret:
+        secretName: m1-upstream
+        defaultMode: 256
+    - name: runtime
+      emptyDir:
+        medium: Memory
+    - name: devnet
+      emptyDir: {}

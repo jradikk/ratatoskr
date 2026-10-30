@@ -37,7 +37,7 @@ def render(path, values):
 def main():
     documents = 0
     templates = sorted((HERE / "templates").glob("*.yaml.tmpl"))
-    require(len(templates) == 5, "expected five complete YAML templates")
+    require(len(templates) == 9, "expected nine complete YAML templates including both eBPF modes")
     for path in templates:
         text = render(path, VALUES)
         require("@NAMESPACE@" not in text, "unsubstituted template")
@@ -72,11 +72,16 @@ def main():
                 require(not security.get("privileged"), "privilege escalation forbidden")
                 require(security["capabilities"]["drop"] == ["ALL"], "capability drop missing")
                 added = security["capabilities"].get("add", [])
-                require(set(added) <= {"NET_ADMIN", "MKNOD"}, "extra capabilities forbidden")
+                allowed = {"NET_ADMIN", "MKNOD"}
+                programming = container["name"] in {"gateway", "tools"} and "ebpf" in path.name
+                if programming:
+                    allowed |= {"BPF", "PERFMON"}
+                    require(container["env"][0] == {"name": "DATAPATH", "value": "ebpf"}, "explicit eBPF selector missing")
+                require(set(added) <= allowed, "extra capabilities forbidden")
                 if container["name"] == "observer":
                     require(not added, "observer must be capability-free")
                 elif container["name"] == "gateway":
-                    require(added == ["NET_ADMIN"], "gateway capability contract")
+                    require(added == (["NET_ADMIN", "BPF", "PERFMON"] if programming else ["NET_ADMIN"]), "gateway capability contract")
                     require(container["command"] == ["/ratatoskr"], "gateway command contract")
                     require(container["args"] == ["-config", "/config/gateway.json"], "gateway config flag contract")
                     require(container["readinessProbe"]["httpGet"] == {"port": 9900, "path": "/healthz"}, "cached readiness contract")
@@ -91,7 +96,7 @@ def main():
                     require(volumes["runtime"]["emptyDir"] == {"medium": "Memory"}, "runtime must be ephemeral")
                     require(volumes["upstream"]["secret"]["defaultMode"] == 0o400, "Secret mode contract")
                 else:
-                    require(added == ["NET_ADMIN"], "fake/client capability contract")
+                    require(added == (["NET_ADMIN", "BPF", "PERFMON"] if programming else ["NET_ADMIN"]), "fake/client capability contract")
             if doc["metadata"]["name"] == "client":
                 require(spec["nodeName"] == VALUES["CLIENT_NODE"], "selected client placement")
                 if "live" in path.name:

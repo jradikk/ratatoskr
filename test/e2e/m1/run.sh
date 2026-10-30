@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M1-only manual proof. No registry push/build or VM/host manipulation.
+# Direct-config M1 proof with optional M8 subset. No registry push/build or host changes.
 set +x
 set -euo pipefail
 umask 077
@@ -9,16 +9,24 @@ REPORT_DIR=
 IMPORT=yes
 SKIP=no
 HAS_TOKEN=no
+EXTENDED=no
+DATAPATH_MODE=iproute
 for arg in "$@"; do
   case "$arg" in
     --mode=fake|--mode=live) MODE=${arg#--mode=} ;;
     --no-build) : ;; # Builds are parent/operator-managed; all images are local.
     --no-import) IMPORT=no ;;
     --skip) SKIP=yes ;;
+    --extended) EXTENDED=yes ;;
+    --datapath=iproute|--datapath=ebpf) DATAPATH_MODE=${arg#--datapath=} ;;
     --report-dir=*) REPORT_DIR=${arg#--report-dir=} ;;
     *) printf '%s\n' 'unknown argument; see test/e2e/m1/README.md' >&2; exit 2 ;;
   esac
 done
+if [[ ( "$EXTENDED" == yes || "$DATAPATH_MODE" == ebpf ) && "${RATATOSKR_E2E_FINAL_GATE:-}" != 1 ]]; then
+  printf '%s\n' 'Extended traffic execution deferred; final gate authorization required.' >&2
+  exit 2
+fi
 for tool in jq python3 timeout; do
   command -v "$tool" >/dev/null || { printf 'missing local tool: %s\n' "$tool" >&2; exit 2; }
 done
@@ -51,14 +59,15 @@ export FAKE_IMAGE=${FAKE_IMAGE:-ratatoskr-fakeupstream:m1-local}
 export OPENVPN_IMAGE=${OPENVPN_IMAGE:-ratatoskr-openvpn:m1-local}
 POD_CIDR=${M1_POD_CIDR:-10.42.0.0/16}
 SERVICE_CIDR=${M1_SERVICE_CIDR:-10.43.0.0/16}
-jq -n --arg mode "$MODE" --arg namespace "$NAMESPACE" \
-  '{scope:"M1-manual-proof",mode:$mode,namespace:$namespace,status:"running",checks:[],
+jq -n --arg mode "$MODE" --arg namespace "$NAMESPACE" --arg datapath "$DATAPATH_MODE" --arg extended "$EXTENDED" \
+  '{scope:"direct-config-subset-not-full-matrix",mode:$mode,datapath:$datapath,extended:$extended,namespace:$namespace,status:"running",checks:[],
     deferred:["All end-to-end executions are deferred to final project gate",
       "Full M2-M9 scenario coverage is not implemented by this scaffold"]}' > "$REPORT"
 
 write_markdown() {
   jq -r '"# M1 manual proof\n\nStatus: **" + .status + "**\nMode: " + .mode +
-    "\nScope: M1 only; not the full end-state suite.\n\n## Checks\n" +
+    "\nDatapath: " + .datapath + "\nExtended M8 subset: " + .extended +
+    "\nScope: direct-config subset only; not the full end-state matrix.\n\n## Checks\n" +
     ([.checks[] | "- [" + .status + "] " + .name + ": " + .detail] | join("\n")) +
     "\n\n## Deferred coverage\n" + ([.deferred[] | "- " + .] | join("\n")) + "\n"' \
     "$REPORT" > "$REPORT_DIR/report.md"
@@ -249,6 +258,7 @@ fi
 STAGE=baseline-pods
 base=base.yaml.tmpl
 [[ "$MODE" != live ]] || base=base-live.yaml.tmpl
+[[ "$DATAPATH_MODE" != ebpf ]] || base=${base%.yaml.tmpl}-ebpf.yaml.tmpl
 python3 "$ROOT/test/e2e/m1/render.py" "$ROOT/test/e2e/m1/templates/$base" > "$PRIVATE/base.yaml"
 k apply -f "$PRIVATE/base.yaml" >/dev/null
 wait_pods 120 --for=condition=Ready pod/remote pod/client >/dev/null
@@ -266,7 +276,9 @@ api_before=$(client curl --ipv4 --noproxy '*' --silent --insecure --connect-time
 client_curl "http://$ORDINARY_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
 record direct-baseline passed 'Remote PodIP sees selected client PodIP on ordinary cluster path; DNS, API TCP/TLS and ClusterIP reachable.'
 STAGE=gateway-startup
-python3 "$ROOT/test/e2e/m1/render.py" "$ROOT/test/e2e/m1/templates/gateway-$MODE.yaml.tmpl" > "$PRIVATE/gateway.yaml"
+gateway_template=gateway-$MODE.yaml.tmpl
+[[ "$DATAPATH_MODE" != ebpf ]] || gateway_template=${gateway_template%.yaml.tmpl}-ebpf.yaml.tmpl
+python3 "$ROOT/test/e2e/m1/render.py" "$ROOT/test/e2e/m1/templates/$gateway_template" > "$PRIVATE/gateway.yaml"
 k apply -f "$PRIVATE/gateway.yaml" >/dev/null
 wait_pods 180 --for=condition=Ready pod/gateway >/dev/null
 GATEWAY_IP=$(k -n "$NAMESPACE" get pod gateway -o jsonpath='{.status.podIP}')
@@ -282,7 +294,7 @@ jq -n --arg pod "$CLIENT_IP" --arg endpoint "$GATEWAY_IP" --arg pods "$POD_CIDR"
 timeout --signal=TERM --kill-after=5s 30s kubectl --context "$CTX" --request-timeout=10s \
   -n "$NAMESPACE" exec -i client -c tools -- sh -c \
   'umask 077; cat > /tmp/client.json; exec /ratatoskr-init -config /tmp/client.json' < "$PRIVATE/client.json" >/dev/null 2>&1
-record client-steering passed 'Client init executed in selected pod netns with NET_ADMIN only and explicit cluster exclusions.'
+record client-steering passed "Client init executed in selected pod netns using $DATAPATH_MODE and explicit cluster exclusions; no workload netns switching."
 STAGE=cluster-preservation
 client cat /etc/resolv.conf > "$PRIVATE/resolv.after"
 cmp "$PRIVATE/resolv.before" "$PRIVATE/resolv.after"
@@ -293,11 +305,21 @@ api_after=$(client curl --ipv4 --noproxy '*' --silent --insecure --connect-timeo
 client_curl "http://$ORDINARY_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
 client_curl "http://$REMOTE_IP:8080/echo" | jq -e --arg ip "$CLIENT_IP" '.ip==$ip' >/dev/null
 record cluster-preservation passed 'DNS resolver unchanged; DNS lookup, API response and ordinary PodIP/ClusterIP paths preserved after steering.'
+if [[ "$EXTENDED" == yes ]]; then
+  # shellcheck source=test/e2e/m1/extended.sh
+  source "$ROOT/test/e2e/m1/extended.sh"
+  m8_measurements
+  m8_metric 1 m8-private-metric-ready
+fi
 if [[ "$MODE" == fake ]]; then
   STAGE=fake-tunnel-echo
   [[ "$EXIT_IP" == 198.19.0.2 ]]
   client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
   record fake-tunnel-echo passed 'Steered request reports fake upstream inner source 198.19.0.2, not ordinary client/outer PodIP.'
+  if [[ "$EXTENDED" == yes ]]; then
+    m8_fake_payload
+    m8_fake_selectors
+  fi
   STAGE=fake-fail-close
   timeout --signal=TERM --kill-after=5s 30s kubectl --context "$CTX" --request-timeout=10s \
     -n "$NAMESPACE" exec gateway -c upstream -- /fakeupstream -role down >/dev/null 2>&1
@@ -311,6 +333,10 @@ if [[ "$MODE" == fake ]]; then
   done
   observer_curl http://127.0.0.1:9900/info | jq -e '.ready==false' >/dev/null
   wait_pods 30 --for=condition=Ready=false pod/gateway >/dev/null
+  if [[ "$EXTENDED" == yes ]]; then
+    m8_metric 0 m8-private-metric-down
+  fi
+  STAGE=fake-fail-close
   if client_curl http://198.19.0.1:8080/echo >/dev/null; then
     record fake-fail-close failed 'Steered request unexpectedly succeeded with upstream down.'; exit 1
   fi
@@ -323,6 +349,9 @@ if [[ "$MODE" == fake ]]; then
   wait_pods 90 --for=condition=Ready pod/gateway >/dev/null
   client_curl http://198.19.0.1:8080/echo | jq -e '.ip=="198.19.0.2"' >/dev/null
   record fake-recovery passed 'Upstream link restored; readiness and steered request recovered.'
+  if [[ "$EXTENDED" == yes ]]; then
+    m8_metric 1 m8-private-metric-recovered
+  fi
 else
   STAGE=live-exit-check
   # At most two harness ipinfo calls, with one 10s backoff on HTTP 429.

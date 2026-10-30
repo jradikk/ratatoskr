@@ -1,5 +1,12 @@
 # M1 manual proof scaffold — executions deferred
 
+> M8 update: `test/e2e/ci/run.sh` and `test/e2e/live/run.sh` now default to the
+> incomplete **static matrix inventory**, not this original M1 execution wrapper.
+> They return exit 4 for missing coverage. See `test/e2e/matrix/README.md` and
+> `docs/milestones/m8/report.md`. `hack/m1-proof.sh` retains its M1 direct entrypoint;
+> optional `--extended` / `--datapath=ebpf` requires explicit final-gate authorization.
+> M1 interface/examples below are historical subset documentation, not a matrix pass.
+
 **Do not run any fake or live e2e now. All e2e executions are deferred to the
 final project gate.** This is initial M1 tooling, not the complete end-state
 suite. No CI workflow is enabled by these files. Full M2–M9 scenario coverage

@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: @NAMESPACE@
+  labels:
+    app.kubernetes.io/part-of: ratatoskr-m1-proof
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: remote
+  namespace: @NAMESPACE@
+  labels:
+    app: m1-remote
+spec:
+  automountServiceAccountToken: false
+  nodeName: @REMOTE_NODE@
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: remote
+      image: @FAKE_IMAGE@
+      imagePullPolicy: Never
+      command: [/fakeupstream]
+      args: [-role, remote, -local, $(POD_IP)]
+      env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: [ALL]
+          add: [NET_ADMIN]
+      readinessProbe:
+        tcpSocket:
+          port: 8080
+        periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ordinary
+  namespace: @NAMESPACE@
+spec:
+  selector:
+    app: m1-remote
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: @NAMESPACE@
+spec:
+  automountServiceAccountToken: false
+  nodeName: @CLIENT_NODE@
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: tools
+      image: @TOOLS_IMAGE@
+      imagePullPolicy: Never
+      command: [sleep, infinity]
+      env:
+        - name: DATAPATH
+          value: ebpf
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: [ALL]
+          add: [NET_ADMIN, BPF, PERFMON]
+      volumeMounts:
+        - name: ipinfo
+          mountPath: /etc/ratatoskr/ipinfo
+          readOnly: true
+  volumes:
+    - name: ipinfo
+      secret:
+        secretName: m1-ipinfo
+        optional: true
+        defaultMode: 256
