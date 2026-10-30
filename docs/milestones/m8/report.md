@@ -1,7 +1,7 @@
 # M8 — compatibility coverage inventory and deferred scenario scaffold
 
-Status: **static validation passed; later final fake gate FAILED and compatibility acceptance remains INCOMPLETE**.
-This report records the M8 *authoring-stage* static checks. At the later final gate, direct flannel iproute full-tunnel fake traffic passed after a return-TTL fix, but the extended iproute selector and independent eBPF fake subsets failed. Live VPN was skipped because its profile was unset. No complete CNI/mesh matrix cell is claimed passed; see `docs/milestones/m9/final-gate.md`.
+Status: **static validation passed; final compatibility acceptance remains INCOMPLETE**.
+This report records the M8 *authoring-stage* static checks. Initial final fake subsets failed. Subsequent numbered-client-GENEVE and fail-closed eBPF update fixes let both direct-config flannel/init positive-traffic subsets complete independently; a serial rerun marked negative selector paths **INCONCLUSIVE**, so the matrix remains nonzero/incomplete. The live VPN tier skipped because its profile was unset. No full CNI/mesh matrix cell is accepted; see `docs/milestones/m9/final-gate.md`.
 
 ## Audit and implementation
 

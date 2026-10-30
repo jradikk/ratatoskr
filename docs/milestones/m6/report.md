@@ -21,3 +21,16 @@ Status: **implementation and local component gates passed; final eBPF traffic ga
 - eBPF has no WireGuard support (use iproute for encrypted mode). Runtime seccomp/BPF permissions on a restricted node and Linux 5.10 still require validation.
 - Later commit `5aa03fb` atomically locks down the old selector before fallible policy updates, with privileged failure-injection coverage and isolated capture of outer source, destination, VNI and TLV. It does **not** establish complete eBPF traffic through a live gateway/upstream.
 - The final fake eBPF gate failed despite healthy local component checks. A disposable tc-ingress test emitted outer UDP/VNI/TLV and reached the gateway, but locally generated pod OUTPUT never traverses that ingress hook; it is **not** a production correction. Any replacement topology must be reviewed and packet-tested on the supported Linux 5.10 baseline. Missing VPN inputs count as skipped, never passed.
+
+## Later final-gate component follow-up (October 30, 2026)
+
+The initial eBPF fake echo failure and packet-correlated return RPF trace remain
+historical observations above. `508091c` numbers the owned client collect-md
+GENEVE device; `8ca9186` guards policy updates without update-time
+program-by-ID permissions. Both changes passed privileged namespace tests.
+A refreshed NET_ADMIN+BPF+PERFMON-only flannel/init client then passed the
+positive fake echo, 4.5 MiB payload, matching selector and upstream
+fail/recovery checks. The serial M8 matrix remains **INCOMPLETE**, because
+negative selector ordinary-path emission and no-endpoint prevention lack
+five-tuple-correlated proof, and Linux 5.10/other CNIs are untested. See
+`docs/milestones/m9/final-gate.md` for the exact reports.

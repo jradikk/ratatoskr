@@ -173,17 +173,56 @@ repository: `/tmp/ratatoskr-m8-fake-z713hmse` (iproute) and
 resolve either documented datapath blocker; skipped matrix cells remain
 untested, and the unset live profile is still a **skip**, not a pass.
 
+## October 30, 2026 — numbered GENEVE and guarded-update rerun
+
+Later commits `0e0b03e` and `508091c` assign an owned
+`169.254.64.2/32` to the iproute `rtk0` and eBPF collect-md `gnv0`
+interfaces before link-up. This addresses the unnumbered-ingress reverse-FIB
+case without disabling `rp_filter`, writing `src_valid_mark`, changing the
+pod's main default route or granting the programming init extra privileges.
+`8ca9186` replaces eBPF update-time program/map-by-ID access (denied by the
+NET_ADMIN+BPF+PERFMON-only k3d client) with an owned priority-419 tc drop
+guard installed before fallible replacement and removed only after the new
+selector attaches. Privileged namespace tests cover ownership, conflict,
+failed-update drops and restart verification; repository-wide race tests,
+lint, vet, build, privileged tests, Helm/chart and static inventory checks
+passed after these changes.
+
+With refreshed local client images on the existing flannel k3d cluster,
+**each direct-config fake subset ran to completion independently**: iproute
+`/tmp/ratatoskr-m8-fake-w0a8iv73`, eBPF
+`/tmp/ratatoskr-m8-fake-zvwnivar`. Matching inner TCP/8080 reached the fake
+upstream; ordinary outer PodIP and cluster paths remained reachable, payload
+size/SHA256, private metrics and upstream down/recovery checks passed. Both
+inner reports said `passed`, but the outer M8 inventory correctly returned
+**INCOMPLETE / exit 4** because other CNI/mesh/agent/WireGuard/HA cells and
+scenarios were not covered.
+
+A subsequent **serial two-cell** run exposed a false assertion: the original
+negative-selector test compared aggregate GENEVE TX packets, which also count
+unrelated IPv6 multicast, ARP and delayed TCP. A proposed nft postrouting
+counter did not prove ordinary emission (and postrouting occurs before the
+eBPF tc-egress verdict). The harness was corrected in `771854a` to record
+matching selector success separately while marking wrong-port/CIDR/exclude
+negative-path emission **INCONCLUSIVE**, not passed. The serial rerun at
+`/tmp/ratatoskr-m8-fake-341b9kdd` returned **INCOMPLETE / exit 4**, with
+both inner runs `inconclusive`: their positive fake tunnel, 4.5 MiB payload,
+matching selector, cluster-path, gateway health, failure/recovery and cleanup
+checks passed; negative inner-only requests failed but no five-tuple-correlated
+ordinary-path versus drop proof exists. The no-endpoint inner-only failure is
+also **not** evidence by itself that a reachable ordinary path was blocked.
+This is a successful component/positive-traffic step, **not M8 or M9 acceptance**.
+No new live VPN inputs were available; live remains skipped. Neither a
+Linux-5.10 runtime pass nor alternate-CNI/mesh acceptance is claimed.
+
 ## Release blockers / next gate
 
-1. Resolve selective port-qualified return with a verified fail-closed design
-   that operates in NET_ADMIN-only programming init containers without
-   weakening reverse-path validation. Diagnose the eBPF socket timeout **after
-   verified forward GENEVE and return reception** with packet-correlated
-   source-validation/drop evidence before proposing a fix; do not redesign
-   collect-md on the disproven assumption that tc egress intrinsically loses
-   metadata. Rerun the extended fake subset, policy/metadata/DNS and both
-   datapaths. The basic iproute full-tunnel return TTL problem is fixed and its
-   direct fake suite passed, but not selective/eBPF/HA acceptance.
+1. Complete five-tuple-correlated **negative** selector and no-endpoint
+   fail-close proofs on both datapaths, including a controlled reachable
+   ordinary path, without treating a timeout or aggregate link counter as
+   proof. Recheck restricted agent-mode traffic and Linux 5.10 runtime. The
+   earlier iproute and eBPF return-path component failures were resolved for
+   the flannel/init positive-flow subset, not the full policy contract.
 2. Implement and run the missing CNI/mesh/agent/WireGuard/HA compatibility
    scenarios under the existing mandatory resource preflight. Skipped cells
    must never be represented as passed.
