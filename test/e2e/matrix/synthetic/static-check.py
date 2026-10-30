@@ -16,11 +16,11 @@ subprocess.run = lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("no sub
 try:
     spec.loader.exec_module(module)
     sample = ("CA_PUBLIC", "SERVER_PUBLIC", "SERVER_PRIVATE", "CLIENT_PUBLIC", "CLIENT_PRIVATE")
-    namespace = "ratatoskr-syn-static"
-    objects = module.manifests(namespace, "ratatoskr-synthetic-openvpn:local", sample)
-    assert len(objects) == 9
+    namespace = "rtk-syn-" + "a" * 16
+    objects = module.manifests(namespace, "ratatoskr-synthetic-openvpn:local", sample, "a" * 32)
+    assert len(objects) == 10
     assert [(o["kind"], o["metadata"]["namespace"]) for o in objects if "namespace" in o["metadata"]] == [
-        ("Secret", namespace), ("Secret", namespace), ("Pod", namespace), ("Service", namespace),
+        ("Secret", namespace), ("Secret", namespace), ("ConfigMap", namespace), ("Pod", namespace), ("Service", namespace),
         ("EgressGateway", namespace), ("EgressPolicy", namespace + "-apps"),
         ("Pod", namespace + "-apps")]
     server, client = objects[2:4]
@@ -29,7 +29,7 @@ try:
     assert "SERVER_PRIVATE" in decode(server["data"]["server.key"])
     profile = decode(client["data"]["client.ovpn"])
     assert "CLIENT_PRIVATE" in profile and "SERVER_PRIVATE" not in profile
-    assert "remote synthetic-vpn.ratatoskr-syn-static.svc.cluster.local 1194" in profile
+    assert f"remote synthetic-vpn.{namespace}.svc.cluster.local 1194" in profile
     for malformed in ("synthetic-vpn.ratatoskr-syn-static.svc.cluster.local.evil",
                       "synthetic-vpn.ratatoskr-syn-static.svc.cluster.local/arg",
                       "synthetic-vpn.ratatoskr-syn-static.svc.cluster.local:1194"):
@@ -53,13 +53,20 @@ try:
                    for v in workload["spec"]["volumes"])
     assert workload["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"]}
     assert not workload["spec"].get("initContainers")  # Production webhook must inject the wait-init.
-    assert objects[7]["spec"]["gatewayRef"]["namespace"] == namespace
-    assert objects[6]["spec"]["upstream"]["secretRef"]["name"] == client["metadata"]["name"]
-    server_pod = objects[4]
+    health = objects[4]
+    assert health["data"] == {"exit-enabled": "true"}
+    assert health["metadata"]["labels"] == {"ratatoskr.skaldhall.io/synthetic-lifecycle": "a" * 32}
+    assert objects[8]["spec"]["gatewayRef"]["namespace"] == namespace
+    assert objects[7]["spec"]["upstream"]["secretRef"]["name"] == client["metadata"]["name"]
+    server_pod = objects[5]
     assert server_pod["spec"]["containers"][0]["imagePullPolicy"] == "Never"
     assert server_pod["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}
     assert server_pod["spec"]["volumes"][1] == {"name": "dev-net", "emptyDir": {}}
     assert server_pod["spec"]["volumes"][2] == {"name": "status", "emptyDir": {"medium": "Memory"}}
+    assert server_pod["spec"]["volumes"][3] == {"name": "exit-health", "configMap": {
+        "name": "synthetic-exit-health", "items": [{"key": "exit-enabled", "path": "exit-enabled"}]}}
+    assert server_pod["spec"]["containers"][0]["volumeMounts"][3] == {
+        "name": "exit-health", "mountPath": "/run/exit-health", "readOnly": True}
     assert server_pod["spec"]["containers"][0]["volumeMounts"][2] == {"name": "status", "mountPath": "/run/synthetic"}
     assert "status /run/synthetic/openvpn.status 1" in decode(server["data"]["server.conf"])
     assert "status-version 3" in decode(server["data"]["server.conf"])

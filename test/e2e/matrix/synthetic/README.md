@@ -1,5 +1,37 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Probe-only synthetic failure switch (not an executed outage)
+
+The input scaffold now includes a **non-secret** `synthetic-exit-health`
+ConfigMap bound to the Lifecycle token. Its single `exit-enabled` key is
+projected read-only into the synthetic server Pod; no credentials, host
+mounts, capabilities or HTTP control endpoint are added. The server listener
+stays bound solely to tunnel address `10.88.0.1:8080`. `/exit` returns 503
+without a body if the projection is missing, malformed or `false`, while
+`/marker` continues to serve its fixed response from the same process.
+OpenVPN itself is not signaled or restarted. ConfigMap projection can lag,
+so an API update alone is **not** evidence that the server has observed the
+new value or that the gateway withdrew its endpoint.
+
+`FixtureAPI.exit_health_outage()` requires an already-owned ConfigMap UID,
+valid resourceVersion, exact lifecycle label and initial `true`; a complete
+non-secret ConfigMap is sent through stdin using raw PUT with UID and
+resourceVersion. The server-returned UID/version/state are checked, and the
+same pinned object is re-read. On ordinary body error or signal, the context
+manager attempts restoration to `true`; an ambiguous timed-out PUT is
+re-read first and a changed UID/label is **never overwritten**. Any failed
+or unverified restoration raises, forbidding PASS. Lifecycle namespace
+cleanup remains a separate last resort when the API cannot restore.
+
+**Hard evidence gap:** with the endpoint withdrawn, the restricted client
+must fail the selected `/marker` request; that same request cannot prove the
+marker remains *reachable via VPN*. The current plugin container has no
+safe fixed, UID-atomic, independent in-tunnel HTTP observer, and a local
+server-container request would not traverse OpenVPN. Before a final gate
+could claim fail-close, an independently authenticated tunnel-side marker
+witness during the outage must be designed and bounded. No live outage or
+PASS path is enabled; `run.py` is unchanged.
+
 ## Public-CA verified direct Kubernetes API TLS path (no PASS)
 
 The restricted app Pod now mounts **only** the namespace-managed public

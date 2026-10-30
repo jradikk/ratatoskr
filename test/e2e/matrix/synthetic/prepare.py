@@ -68,7 +68,11 @@ def secret(namespace, name, data):
             "type": "Opaque", "data": {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
 
 
-def manifests(namespace, image, contents):
+def manifests(namespace, image, contents, token):
+    if (not isinstance(token, str) or len(token) != 32 or
+            any(c not in "0123456789abcdef" for c in token) or
+            namespace != "rtk-syn-" + token[:16]):
+        raise ValueError("matching owned lifecycle namespace/token required")
     ca, server_cert, server_key, client_cert, client_key = contents
     apps = namespace + "-apps"
     remote = f"synthetic-vpn.{namespace}.svc.cluster.local"
@@ -80,16 +84,23 @@ def manifests(namespace, image, contents):
         secret(namespace, "synthetic-server", {"ca.crt": ca, "server.crt": server_cert,
                "server.key": server_key, "server.conf": server_config()}),
         secret(namespace, "synthetic-client", {"client.ovpn": client_config(remote, ca, client_cert, client_key)}),
+        # Non-secret, operator-owned probe-only switch; no HTTP control surface.
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "synthetic-exit-health",
+            "namespace": namespace, "labels": {"ratatoskr.skaldhall.io/synthetic-lifecycle": token}},
+            "data": {"exit-enabled": "true"}},
         {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "synthetic-vpn", "namespace": namespace,
             "labels": {"app": "synthetic-vpn"}}, "spec": {"automountServiceAccountToken": False,
             "containers": [{"name": "server", "image": image, "imagePullPolicy": "Never",
                 "securityContext": {"capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}, "allowPrivilegeEscalation": False},
                 "volumeMounts": [{"name": "pki", "mountPath": "/etc/synthetic", "readOnly": True},
                                  {"name": "dev-net", "mountPath": "/dev/net"},
-                                 {"name": "status", "mountPath": "/run/synthetic"}]}],
+                                 {"name": "status", "mountPath": "/run/synthetic"},
+                                 {"name": "exit-health", "mountPath": "/run/exit-health", "readOnly": True}]}],
             "volumes": [{"name": "pki", "secret": {"secretName": "synthetic-server", "defaultMode": 256}},
                         {"name": "dev-net", "emptyDir": {}},
-                        {"name": "status", "emptyDir": {"medium": "Memory"}}]}},
+                        {"name": "status", "emptyDir": {"medium": "Memory"}},
+                        {"name": "exit-health", "configMap": {"name": "synthetic-exit-health",
+                            "items": [{"key": "exit-enabled", "path": "exit-enabled"}]}}]}},
         {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "synthetic-vpn", "namespace": namespace},
             "spec": {"selector": {"app": "synthetic-vpn"}, "ports": [{"port": 1194, "protocol": "UDP", "targetPort": 1194}]}},
         {"apiVersion": "ratatoskr.skaldhall.io/v1alpha1", "kind": "EgressGateway",
