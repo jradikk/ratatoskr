@@ -26,11 +26,13 @@ class Blocked(Exception):
     """Sanitized, non-secret preflight failure."""
 
 
-def expected_ids(environ):
+def expected_ids(environ, *, init=False):
     ids = {component: environ.get("EXPECTED_" + component.upper() + "_IMAGE_ID", "")
            for component in COMPONENTS}
-    if not all(ID_PATTERN.fullmatch(value) for value in ids.values()):
-        raise Blocked("Nine explicit immutable runtime image IDs are required; no mutable tag or missing ID is accepted.")
+    if init:
+        ids["init"] = environ.get("EXPECTED_INIT_IMAGE_ID", "")
+    if not all(isinstance(value, str) and ID_PATTERN.fullmatch(value) for value in ids.values()):
+        raise Blocked("Nine immutable runtime image IDs plus explicit init ID in init mode required.")
     return ids
 
 
@@ -204,7 +206,7 @@ def init_release_preflight(api, ids):
             c.get("IMAGE_PULL_POLICY") != "Never" or w.get("INIT_IMAGE_PULL_POLICY") != "Never" or
             c.get("GATEWAY_IMAGE") != "ghcr.io/skaldhall/ratatoskr-gateway:dev" or
             c.get("OPENVPN_IMAGE") != "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev" or
-            not w.get("INIT_IMAGE")):
+            w.get("INIT_IMAGE") != "ghcr.io/skaldhall/ratatoskr-init:dev"):
         raise Blocked("Parent-rolled init release mode/probe/image settings mismatch.")
     result = api.get("daemonset", "ratatoskr-agent", namespace, ignore_not_found=True)
     if result is not None:
@@ -255,25 +257,31 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
     parser.add_argument("--allow-partial-vpn-smoke", action="store_true")
     parser.add_argument("--execute-partial-gateway", action="store_true")
     parser.add_argument("--execute-init-smoke", action="store_true")
+    parser.add_argument("--execute-init-traffic", action="store_true")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     if (not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
-            (args.allow_partial_vpn_smoke or args.execute_init_smoke) and
+            (args.allow_partial_vpn_smoke or args.execute_init_smoke or args.execute_init_traffic) and
             env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1" or
             args.execute_partial_gateway and not args.allow_partial_vpn_smoke or
             args.execute_init_smoke and (not args.allow_partial_vpn_smoke or
                                          env.get("RATATOSKR_E2E_INIT_SMOKE") != "1" or
-                                         args.execute_partial_gateway)):
+                                         args.execute_partial_gateway) or
+            args.execute_init_traffic and (not args.execute_init_smoke or
+                                           env.get("RATATOSKR_E2E_INIT_TRAFFIC") != "1")):
         print("SKIPPED: missing explicit final-gate/partial-smoke authorization; no cluster accessed.")
         return 2
     try:
-        ids = expected_ids(env)
+        ids = expected_ids(env, init=args.execute_init_smoke)
         api = api_factory()
         namespace = init_release_preflight(api, ids) if args.execute_init_smoke else preflight(api, ids)
         if args.allow_partial_vpn_smoke:
             verifier = node_images.verify if node_verify is None else node_verify
-            verifier({component: ids[component] for component in node_images.TAGS})
+            images = {component: ids[component] for component in node_images.TAGS}
             if args.execute_init_smoke:
+                images["init"] = ids["init"]
+            verifier(images, init=args.execute_init_smoke)
+            if args.execute_init_smoke and not args.execute_init_traffic:
                 print("INCOMPLETE: init-driver/nonrestricted synthetic smoke BLOCKED before resource creation; parent must explicitly roll and restore the release and approve separate init-driver Pod evidence. No Kubernetes mutation or PKI.")
                 return 4
             if args.execute_partial_gateway:
@@ -292,6 +300,22 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         # API objects/errors are untrusted: never print their content.
         print("FAILED: synthetic final-gate preflight blocked; no resources created. Inspect release/operator preflight privately.")
         return 1
+    if args.execute_init_traffic:
+        try:
+            try:
+                from . import init_traffic
+            except ImportError:
+                import init_traffic
+            service_ip = init_traffic.api_service_ip(api)
+            init_traffic.execute(ids, api_ip=service_ip)
+        except (KeyboardInterrupt, SystemExit):
+            print("FAILED: init-driver/nonrestricted smoke interrupted; verify UID-owned cleanup and Helm restoration privately.")
+            return 1
+        except BaseException:
+            print("FAILED: init-driver/nonrestricted smoke or cleanup blocked; inspect private orphan state and restore parent-managed agent release.")
+            return 1
+        print("INCOMPLETE: init-driver/nonrestricted healthy OpenVPN traffic and direct API path observed; both temporary namespaces/PKI cleanup verified. Agent restriction, fail-close, witness and release restoration NOT TESTED. No M8 PASS.")
+        return 4
     if args.execute_partial_gateway:
         try:
             try:

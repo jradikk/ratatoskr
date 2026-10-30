@@ -1,5 +1,45 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Separately gated init-driver/nonrestricted partial traffic (never M8 PASS)
+
+Only `run.py --execute --allow-partial-vpn-smoke --execute-init-smoke
+--execute-init-traffic` with **all four** explicit environment opt-ins:
+`RATATOSKR_E2E_FINAL_GATE=1`, `RATATOSKR_E2E_PARTIAL_VPN_SMOKE=1`,
+`RATATOSKR_E2E_INIT_SMOKE=1` and `RATATOSKR_E2E_INIT_TRAFFIC=1` can enter
+`init_traffic.py`. The parent/operator must **first** roll an already existing
+controller/webhook release to aligned DRIVER=init DATAPATH=iproute and later
+restore the agent release independently; the fixture never runs Helm or
+changes the release. Before mutation it verifies immutable IDs for controller,
+webhook and the **tenth** `EXPECTED_INIT_IMAGE_ID` as well as six fixed local
+images via read-only CRI on all three nodes, exact private controller probe,
+fail-closed webhook rules and absence of the agent DaemonSet. Missing gates
+exit 2 without cluster access; stale mode/images fail before namespace/PKI.
+
+The init runner uses `Lifecycle(apps_psa="privileged")` **only for the apps
+namespace in its fresh disposable pair**, because production init injects NET_ADMIN,
+which PSA restricted does not allow. The default agent runner remains
+restricted and unchanged. It creates exactly eight base server/Gateway
+objects, observes real Gateway Ready/MTU/owner graph and server OpenVPN TLS
+session, then creates only `synthetic-probe-healthy` with an exact CREATE-
+returned UID. Bounded Pod-status polling requires the production-injected
+`ratatoskr-init` image/tag, approved **actual initContainerStatuses.imageID**,
+NET_ADMIN-only programming init, read-only Downward-API annotation projection
+and identity fieldRefs, successful init exit 0 and controller readiness=true.
+At CREATE admission the projected config intentionally omits UID/PodIP/MTU;
+`cmd/init` fills them after CNI using Downward API. The one-shot **application
+container** remains nonroot/capability-free and must use the approved selected
+helper imageID and exit 0 after exact marker and public-CA anonymous API
+TLS/DNS/direct path checks; server/Gateway Pod UID and endpoint stay unchanged,
+with independent authenticated session identity/counter growth as supporting
+local-only evidence (normal probe traffic may also grow those counters).
+No selected Pod exec, logs, Secret GET, host provision, Helm mutation,
+fail-close, witness or WireGuard. Both namespaces/private PKI must be verified
+removed on all ordinary exits; any uncertainty returns failure with sanitized
+diagnostics. Even after success the runner returns **4 / INCOMPLETE**, labeled
+*init-driver/nonrestricted* and **never** restricted-agent or M8 PASS.
+Only fake APIs/PKI were used during authoring; the actual parent-rolled init
+release and its restoration have not been exercised by this code.
+
 ## Init-driver/nonrestricted scaffold (fifth gate; NO resource execution)
 
 `run.py --execute --allow-partial-vpn-smoke --execute-init-smoke` additionally

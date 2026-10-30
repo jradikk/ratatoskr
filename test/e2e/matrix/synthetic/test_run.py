@@ -118,7 +118,8 @@ class GateTests(unittest.TestCase):
         env = dict(ids, RATATOSKR_E2E_FINAL_GATE="1", RATATOSKR_E2E_PARTIAL_VPN_SMOKE="1")
         out = io.StringIO()
         checked = []
-        def fake_nodes(images):
+        def fake_nodes(images, *, init):
+            self.assertFalse(init)
             checked.append(images)
             return True
         with contextlib.redirect_stdout(out):
@@ -132,7 +133,7 @@ class GateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke"], env,
                                       lambda: FakeAPI(),
-                                      lambda _ids: (_ for _ in ()).throw(run.node_images.Blocked("SECRET"))), 1)
+                                      lambda _ids, **_kw: (_ for _ in ()).throw(run.node_images.Blocked("SECRET"))), 1)
 
     def test_read_only_api_service_cluster_ip_contract(self):
         import partial_gateway
@@ -170,13 +171,13 @@ class GateTests(unittest.TestCase):
                 return super().get(resource, name, namespace, selector)
         with contextlib.redirect_stdout(output):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
-                                      env, SmokeAPI, lambda _ids: True, smoke), 4)
+                                      env, SmokeAPI, lambda _ids, **_kw: True, smoke), 4)
         self.assertEqual(seen, [("smoke", "10.43.0.1")])
         self.assertIn("INCOMPLETE", output.getvalue())
         self.assertIn("selected tunnel attribution, fail-close, witness and recovery NOT TESTED", output.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
-                                      env, SmokeAPI, lambda _ids: True,
+                                      env, SmokeAPI, lambda _ids, **_kw: True,
                                       lambda _ids, **_kw: (_ for _ in ()).throw(RuntimeError("SECRET"))), 1)
         self.assertEqual(seen, [("smoke", "10.43.0.1")])
     def test_gateway_smoke_blocks_stale_controller_image_refs_before_mutation(self):
@@ -189,7 +190,7 @@ class GateTests(unittest.TestCase):
         called = []
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
-                                      env, lambda: api, lambda _ids: True,
+                                      env, lambda: api, lambda _ids, **_kw: True,
                                       lambda _ids: called.append(True)), 1)
         self.assertEqual(called, [])
 

@@ -13,6 +13,8 @@ sys.dont_write_bytecode = True
 import test_run
 import test_selected
 from test_run import run, IDS
+INIT_ID = "containerd://sha256:" + "a" * 64
+INIT_IDS = dict(IDS, init=INIT_ID)
 spec = importlib.util.spec_from_file_location("synthetic_init_evidence", HERE / "init_evidence.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -29,6 +31,7 @@ class InitAPI(test_run.FakeAPI):
                     item["value"] = "init"
             if component == "webhook":
                 values.append({"name": "INIT_IMAGE_PULL_POLICY", "value": "Never"})
+                next(v for v in values if v["name"] == "INIT_IMAGE")["value"] = "ghcr.io/skaldhall/ratatoskr-init:dev"
         del self.objects[("daemonset", "ratatoskr-agent", "operator", None)]
         del self.objects[("pods", None, "operator", "app=agent")]
 
@@ -41,6 +44,16 @@ class InitAPI(test_run.FakeAPI):
 
 
 class InitTests(unittest.TestCase):
+    def test_init_requires_tenth_image_before_cluster_access(self):
+        import contextlib
+        import io
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1",
+               "RATATOSKR_E2E_INIT_SMOKE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-init-smoke"],
+                                      env, lambda: (_ for _ in ()).throw(AssertionError("API called"))), 1)
+
     def test_readonly_init_mode_and_absent_agent_required(self):
         api = InitAPI()
         self.assertEqual(run.init_release_preflight(api, IDS), "operator")
@@ -65,13 +78,13 @@ class InitTests(unittest.TestCase):
         uid = pod["metadata"]["uid"]
         cfg = {"gatewayID": 7, "endpoint": "10.42.1.7", "podIP": "10.42.2.5",
                "identity": {"namespace": test_selected.APP, "pod": "synthetic-probe-healthy",
-                            "uid": uid, "policy": "synthetic"},
+                            "policy": "synthetic"},
                "policy": {"mode": "include", "rules": [{"cidrs": ["10.88.0.1/32"],
                           "ports": [{"protocol": "TCP", "port": 8080}]}]}}
         pod["metadata"]["annotations"].pop(module.evidence.PREFIX + "agent-config", None)
         pod["metadata"]["annotations"][module.evidence.PREFIX + "client-config"] = json.dumps(cfg)
         init = pod["spec"]["initContainers"][0]
-        init.update(image="ratatoskr-init:local", args=["-config=/var/run/ratatoskr/client.json"],
+        init.update(image="ghcr.io/skaldhall/ratatoskr-init:dev", args=["-config=/var/run/ratatoskr/client.json"],
                     env=[{"name": k, "valueFrom": {"fieldRef": {"fieldPath": field}}}
                          for k, field in (("POD_IP", "status.podIP"), ("POD_UID", "metadata.uid"),
                                           ("POD_NAME", "metadata.name"))] +
@@ -83,14 +96,17 @@ class InitTests(unittest.TestCase):
         pod["spec"]["volumes"].append({"name": "ratatoskr-client-config", "downwardAPI": {
             "items": [{"path": "client.json", "fieldRef": {
                 "fieldPath": "metadata.annotations['ratatoskr.skaldhall.io/client-config']"}}]}})
+        pod["status"]["initContainerStatuses"][0]["imageID"] = INIT_ID
         expected = dict(namespace=test_selected.APP, name="synthetic-probe-healthy", uid=uid,
-                        init_image="ratatoskr-init:local", app_image=test_selected.IMAGE,
+                        init_image="ghcr.io/skaldhall/ratatoskr-init:dev", init_image_id=INIT_ID,
+                        app_image=test_selected.IMAGE,
                         gateway_id=7, endpoint="10.42.1.7", api_ip="10.43.0.1")
         self.assertEqual(module.assert_init_pod(pod, **expected),
                          {"uid": uid, "initDriverNonrestricted": True, "healthyExit": True})
         for change in (
             lambda p: p["spec"]["containers"][0]["securityContext"]["capabilities"].update(add=["NET_ADMIN"]),
             lambda p: p["spec"]["initContainers"][0]["securityContext"]["capabilities"].update(add=["SYS_ADMIN"]),
+            lambda p: p["status"]["initContainerStatuses"][0].update(imageID="sha256:" + "f" * 64),
             lambda p: p["spec"]["initContainers"][0].update(image="wrong"),
             lambda p: p["metadata"].update(uid="wrong"),
             lambda p: p["metadata"]["annotations"].update({module.evidence.PREFIX + "client-config": "{}"}),
@@ -107,9 +123,12 @@ class InitTests(unittest.TestCase):
         env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1",
                "RATATOSKR_E2E_INIT_SMOKE": "1"}
         env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        env["EXPECTED_INIT_IMAGE_ID"] = INIT_ID
         args = ["--execute", "--allow-partial-vpn-smoke", "--execute-init-smoke"]
         called = []
-        def node_check(_ids):
+        def node_check(_ids, *, init):
+            self.assertTrue(init)
+            self.assertEqual(_ids["init"], INIT_ID)
             called.append("node-preflight")
             return True
         def forbidden_smoke(*_args, **_kw):

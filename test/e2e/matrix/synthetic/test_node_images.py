@@ -38,6 +38,25 @@ class CRITests(unittest.TestCase):
         prefixed = {k: "containerd://" + v for k, v in APPROVED.items()}
         self.assertTrue(module.verify(prefixed, transport=transport))
 
+    def test_init_only_seventh_exact_tag_and_image_id_on_three_nodes(self):
+        approved = dict(APPROVED, init=DIGEST)
+        items = inventory()
+        items["images"].append({"id": DIGEST, "repoTags": [module.INIT_TAG]})
+        calls = []
+        def transport(argv, *, timeout, max_output):
+            calls.append(argv)
+            return json.dumps(items).encode()
+        self.assertTrue(module.verify(approved, init=True, transport=transport))
+        self.assertEqual(len(calls), 3)
+        wrong = json.loads(json.dumps(items))
+        wrong["images"][-1]["id"] = "sha256:" + "b" * 64
+        with self.assertRaises(module.Blocked):
+            module.inspect(wrong, approved, init=True)
+        with self.assertRaises(module.Blocked):
+            module.inspect(items, APPROVED, init=True)
+        with self.assertRaises(module.Blocked):
+            module.inspect(items, approved, init=False)
+
     def test_missing_duplicate_mismatch_malformed_fail_closed(self):
         wrong = []
         a = inventory()

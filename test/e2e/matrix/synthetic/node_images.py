@@ -17,6 +17,7 @@ import time
 NODES = ("k3d-ratatoskr-flannel-server-0",
          "k3d-ratatoskr-flannel-agent-0",
          "k3d-ratatoskr-flannel-agent-1")
+INIT_TAG = "ghcr.io/skaldhall/ratatoskr-init:dev"
 TAGS = {"gateway": "ghcr.io/skaldhall/ratatoskr-gateway:dev",
         "plugin": "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev",
         "server": "docker.io/library/ratatoskr-synthetic-openvpn:local",
@@ -33,23 +34,25 @@ class Blocked(Exception):
     """Never includes raw CRI JSON, host paths or runtime stderr."""
 
 
-def approved(expected):
-    if (not isinstance(expected, dict) or set(expected) != set(TAGS) or
-            not all(isinstance(expected[k], str) and EXPECTED.fullmatch(expected[k]) for k in TAGS)):
-        raise Blocked("Six approved exact CRI config IDs for local images required.")
+def approved(expected, *, init=False):
+    required = set(TAGS) | ({"init"} if init else set())
+    if (not isinstance(expected, dict) or set(expected) != required or
+            not all(isinstance(expected[k], str) and EXPECTED.fullmatch(expected[k]) for k in required)):
+        raise Blocked("Approved exact CRI config IDs for local images required.")
     return {k: v.removeprefix("containerd://") for k, v in expected.items()}
 
 
-def inspect(data, expected):
+def inspect(data, expected, *, init=False):
     """Verify exactly one image name→config-ID mapping for each fixed tag."""
-    ids = approved(expected)
+    ids = approved(expected, init=init)
+    tags_by_component = {**TAGS, **({"init": INIT_TAG} if init else {})}
     try:
         if not isinstance(data, dict) or set(data) != {"images"}:
             raise ValueError()
         images = data["images"]
         if not isinstance(images, list) or not 0 < len(images) <= 2048:
             raise ValueError()
-        found = {tag: [] for tag in TAGS.values()}
+        found = {tag: [] for tag in tags_by_component.values()}
         for entry in images:
             if not isinstance(entry, dict):
                 raise ValueError()
@@ -66,7 +69,7 @@ def inspect(data, expected):
                         raise ValueError()
                     found[tag].append(value)
         if any(len(found[tag]) != 1 or found[tag][0] != ids[component]
-               for component, tag in TAGS.items()):
+               for component, tag in tags_by_component.items()):
             raise ValueError()
     except (ValueError, TypeError, AttributeError):
         raise Blocked("Node CRI image tag/config ID missing, duplicate or mismatched.") from None
@@ -120,9 +123,9 @@ def _bounded(argv, *, timeout, max_output):
                 process.stdout.close()
 
 
-def verify(expected, *, transport=_bounded, clock=time.monotonic, budget=60):
+def verify(expected, *, init=False, transport=_bounded, clock=time.monotonic, budget=60):
     """Fixed docker exec argv; no shell, mounts, nodes outside allowlist or logs."""
-    ids = approved(expected)
+    ids = approved(expected, init=init)
     if not 0 < budget <= 90:
         raise Blocked("Node CRI verification budget invalid.")
     deadline = clock() + budget
@@ -136,7 +139,7 @@ def verify(expected, *, transport=_bounded, clock=time.monotonic, budget=60):
             response = transport(argv, timeout=timeout, max_output=MAX_JSON)
             if not isinstance(response, bytes) or len(response) > MAX_JSON:
                 raise Blocked("Node CRI output type or size invalid.")
-            inspect(json.loads(response), ids)
+            inspect(json.loads(response), ids, init=init)
         except (ValueError, TypeError, UnicodeError):
             raise Blocked("Node CRI verification response malformed.") from None
         if clock() >= deadline:

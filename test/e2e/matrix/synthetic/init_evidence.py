@@ -12,7 +12,7 @@ class Blocked(Exception):
     """Static diagnostics only; never print projected config or API response."""
 
 
-def assert_init_pod(pod, *, namespace, name, uid, init_image, app_image,
+def assert_init_pod(pod, *, namespace, name, uid, init_image, init_image_id, app_image,
                     gateway_id, endpoint, api_ip):
     """No Pod logs/exec: verify real webhook init, config and one-shot exit."""
     meta, spec, status = pod["metadata"], pod["spec"], pod.get("status", {})
@@ -76,7 +76,8 @@ def assert_init_pod(pod, *, namespace, name, uid, init_image, app_image,
     initial = [v for v in status.get("initContainerStatuses", []) if v.get("name") == "ratatoskr-init"]
     app = [v for v in spec.get("containers", []) if v.get("name") == "client"]
     runtime = [v for v in status.get("containerStatuses", []) if v.get("name") == "client"]
-    if (len(initial) != 1 or initial[0].get("state", {}).get("terminated", {}).get("exitCode") != 0 or
+    if (len(initial) != 1 or initial[0].get("imageID") != init_image_id or
+            initial[0].get("state", {}).get("terminated", {}).get("exitCode") != 0 or
             len(app) != 1 or len(runtime) != 1 or app[0].get("image") != "ratatoskr-synthetic-client:local" or
             app[0].get("args") != ["healthy", api_ip] or
             app[0].get("securityContext", {}).get("capabilities") != {"drop": ["ALL"]} or
