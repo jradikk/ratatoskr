@@ -42,9 +42,11 @@ def parse(raw):
             raise Invalid()
         row = clients[0]
         if (len(row) != 1 + len(HEADER) or row[1] != CN or row[4] != "" or
-                row[9] != "" or row[10] != "" or row[12] not in CIPHERS):
-            # The username field must be empty; only certificate-authenticated
-            # synthetic client sessions are permitted in this fixture.
+                row[9] != "UNDEF" or row[12] not in CIPHERS or
+                not (row[10] == "" or row[10].isascii() and row[10].isdecimal() and len(row[10]) <= 10)):
+            # OpenVPN 2.6 writes UNDEF when no username is authenticated.
+            # Client ID is empty without management support, decimal otherwise;
+            # neither field is emitted by this sanitized reader.
             raise Invalid()
         address = ipaddress.ip_address(row[3])
         if (address.version != 4 or address not in ipaddress.ip_network("10.88.0.0/24") or

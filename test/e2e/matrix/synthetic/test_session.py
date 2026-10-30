@@ -17,14 +17,14 @@ session = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(session)
 
 
-def status(*, common_name="synthetic-client", received="1024", sent="2048", username="",
-           connected=None, updated=None, more=""):
+def status(*, common_name="synthetic-client", received="1024", sent="2048", username="UNDEF",
+           client_id="", connected=None, updated=None, more=""):
     now = int(time.time())
     connected = now - 20 if connected is None else connected
     updated = now if updated is None else updated
     header = "HEADER\tCLIENT_LIST\t" + "\t".join(session.HEADER)
     row = ["CLIENT_LIST", common_name, "10.42.1.2:1194", "10.88.0.2", "", received, sent,
-           "today", str(connected), username, "", "7", "AES-256-GCM"]
+           "today", str(connected), username, client_id, "7", "AES-256-GCM"]
     return ("TITLE\tOpenVPN 2.6\nTIME\ttoday\t" + str(updated) + "\n" + header + "\n" +
             "\t".join(row) + "\n" + more + "END\n").encode()
 
@@ -36,6 +36,7 @@ class SessionTests(unittest.TestCase):
                                  "received": 1024, "sent": 2048, "connected": value["connected"],
                                  "peer": 7, "cipher": "AES-256-GCM"})
         self.assertNotIn("10.42.1.2", json.dumps(value))
+        self.assertEqual(session.parse(status(client_id="42")), value)
 
     def test_zero_wrong_cn_duplicate_stale_or_tampered_denied(self):
         stale = int(time.time()) - 30
@@ -43,6 +44,7 @@ class SessionTests(unittest.TestCase):
             b"TITLE\tOpenVPN\nTIME\ttoday\t1\nEND\n", status(common_name="intruder"),
             status()[:-4] + status().split(b"CLIENT_LIST\t", 1)[1],
             status(received="nan"), status(sent="-1"), status(username="user"),
+            status(username=""), status(client_id="SECRET"),
             status(updated=stale, connected=stale - 10),
             status(more="CLIENT_LIST\tsynthetic-client\tduplicate\n"),
             status().replace(b"AES-256-GCM", b"NONE"),
