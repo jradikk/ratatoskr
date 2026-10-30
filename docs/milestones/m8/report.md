@@ -1,7 +1,7 @@
 # M8 — compatibility coverage inventory and deferred scenario scaffold
 
-Status: **static validation passed; compatibility acceptance INCOMPLETE**.
-No fake/live e2e has run and no CNI/mesh matrix cell is claimed passed.
+Status: **static validation passed; later final fake gate FAILED and compatibility acceptance remains INCOMPLETE**.
+This report records the M8 *authoring-stage* static checks. At the later final gate, direct flannel iproute full-tunnel fake traffic passed after a return-TTL fix, but the extended iproute selector and independent eBPF fake subsets failed. Live VPN was skipped because its profile was unset. No complete CNI/mesh matrix cell is claimed passed; see `docs/milestones/m9/final-gate.md`.
 
 ## Audit and implementation
 
@@ -82,10 +82,13 @@ Only static validation was run:
   bytecode files. Subprocess execution is forbidden while building the inventory.
 - `git diff --check`: passed.
 
-**Not run:** runner main (even inventory/skip CLI paths), fake/live traffic,
-cluster operations, Docker/image builds/imports, real VPN/profile/token reads,
-Go/component tests or host/VM changes. Syntax/static checks do not validate
-Kubernetes admission, actual BPF loads, VPN routing, fail-close or mesh behavior.
+**Not run during M8 authoring:** runner main, fake/live traffic, cluster
+operations, Docker/image builds/imports, real VPN/profile/token reads or
+Go/component tests. Syntax/static checks alone cannot validate Kubernetes
+admission, BPF loads, VPN routing, fail-close or mesh behavior. The subsequent
+final-gate executions and their **failures/skips** are recorded separately in
+`docs/milestones/m9/final-gate.md`; they do not retroactively turn this static
+inventory into a passed compatibility matrix.
 
 ## Required final-gate extensions / blockers
 
@@ -101,9 +104,10 @@ The full M2–M8 matrix remains incomplete. Unimplemented requirements include:
 - Restricted agent workloads, healthy CRI/setns marker-up, agent adoption/restarts
   and endpoint updates without workload recreation.
 - eBPF policy-update lockdown and agent late-IPv6 quarantine were subsequently
-  implemented and component-tested (`5aa03fb`, `d5ae6af`), but real multi-pod
-  runtime safety, init-driver late IPv6, actual Linux 5.10 loading and
-  CNI-specific interface/underlay source verification remain unverified.
+  implemented and component-tested (`5aa03fb`, `d5ae6af`). The final eBPF fake
+  traffic gate later **failed before gateway ingress** with missing collect-md
+  TX metadata. Init-driver late IPv6, actual Linux 5.10 loading and CNI-specific
+  interface/underlay source verification remain unverified.
 - 1–3 gateway replicas, HA affinity/failover and endpoint churn. Existing flows
   may break across replicas; transparent continuity must not be claimed.
 - Full observability counters/handshake/peer metrics absent from components.
@@ -118,4 +122,5 @@ this task's scope.
 
 Even if both implemented direct-config subsets later pass, the matrix runner
 returns INCOMPLETE/nonzero because missing cells/scenarios remain not covered.
-All e2e execution remains deferred to the final project gate.
+At M8 authoring time, e2e execution was deferred to the final project gate.
+That later gate is documented as **failed/incomplete**, not passed.

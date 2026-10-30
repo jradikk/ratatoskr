@@ -1,6 +1,6 @@
 # M6 — tc eBPF datapath component report
 
-Status: **implementation and local component gates pass; full packet-level/5.10 e2e acceptance remains deferred to the final project gate**. No claim is made that a VPN-backed eBPF workload or Linux 5.10 runtime passed.
+Status: **implementation and local component gates passed; final eBPF traffic gate failed on October 30, 2026**. The final fake flannel eBPF client programmed successfully but the steered request timed out before gateway ingress. No VPN-backed eBPF workload or Linux 5.10 runtime pass is claimed; see `docs/milestones/m9/final-gate.md`.
 
 ## Implemented
 
@@ -12,12 +12,12 @@ Status: **implementation and local component gates pass; full packet-level/5.10 
 ## Validation on October 29, 2026
 
 - Repository-wide `make test` (race/coverage), `make lint` (0 issues), `make vet`, `make build`, `make test-privileged`, strict Helm lint and chart static render checks for both drivers × both datapaths passed after security hardening. `go generate ./pkg/datapath/ebpf` and focused eBPF unit/privileged tests also passed; generated ELF is checked in. All privileged tests used disposable network namespaces on this host's kernel 7.0.
-- eBPF component tests exercise `BPF_PROG_TEST_RUN` selectors, port/CIDR policy, no-endpoint drops, healthy tc redirect to external GENEVE, underlay source validation, tc-filter bypass rejection, attached-map verification on a fresh backend, and revocation on a failed endpoint change. They are **not** a multi-pod, full upstream or Linux 5.10 traffic proof.
-- CI and live e2e were deliberately not run per the user's final-gate-only instruction. No live VPN inputs or credentials were read into this report.
+- eBPF component tests exercise `BPF_PROG_TEST_RUN` selectors, port/CIDR policy, no-endpoint drops, tc redirect attempts, underlay source validation, tc-filter bypass rejection, attached-map verification on a fresh backend, and revocation on a failed endpoint change. The older `gnv0` transmit-count check **did not prove outer UDP delivery or gateway ingress**: the final gate observed collect-md transmit drops with tunnel metadata absent at `geneve_xmit`. These are not a multi-pod, full-upstream or Linux 5.10 traffic proof.
+- At M6 authoring time, CI and live e2e were deliberately deferred per the user's final-gate-only instruction. The later final fake gate **failed** on eBPF; the live gate **skipped** because the VPN profile was unset. No live VPN input or credential was read into this report.
 
 ## Known constraints and final-gate checks
 
 - eBPF is IPv4-only. Later commit `d5ae6af` adds an agent-mode namespace-wide IPv6 drop guard and quarantine for late dual-stack; disposable-netns tests passed. Init mode and actual multi-pod/5.10 runtime behavior remain unverified.
 - eBPF has no WireGuard support (use iproute for encrypted mode). Runtime seccomp/BPF permissions on a restricted node and Linux 5.10 still require validation.
 - Later commit `5aa03fb` atomically locks down the old selector before fallible policy updates, with privileged failure-injection coverage and isolated capture of outer source, destination, VNI and TLV. It does **not** establish complete eBPF traffic through a live gateway/upstream.
-- Final CI/live e2e must cover both datapaths; unavailable VPN inputs count as skipped, never passed.
+- The final fake eBPF gate failed despite healthy local component checks. A disposable tc-ingress test emitted outer UDP/VNI/TLV and reached the gateway, but locally generated pod OUTPUT never traverses that ingress hook; it is **not** a production correction. Any replacement topology must be reviewed and packet-tested on the supported Linux 5.10 baseline. Missing VPN inputs count as skipped, never passed.
