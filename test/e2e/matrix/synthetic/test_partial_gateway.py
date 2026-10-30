@@ -71,11 +71,18 @@ class SmokeTests(unittest.TestCase):
         self.owner = FakeOwner()
         self.adapter = FakeAdapter(self.owner)
 
-    def execute(self, observer=lambda *_a: True):
+    def execute(self, observer=None, selected_observer=None):
+        baseline = {"gatewayUID": UID, "serverUID": UID, "gatewayPodUID": UID,
+                    "gatewayID": 7, "endpoint": "10.42.1.7",
+                    "session": {"cn": "synthetic-client", "received": 100, "sent": 200}}
+        result = {"podUID": UID, "healthyExit": True, "directAPITLSAndDNS": True,
+                  "serverSessionBytesAdvanced": True}
         with patch.object(smoke, "private_contents", return_value=("x",) * 7):
             return smoke.execute(IDS, lifecycle_factory=lambda: self.owner,
                                  adapter_factory=lambda _owner: self.adapter,
-                                 observer=observer)
+                                 observer=(lambda *_a: baseline) if observer is None else observer,
+                                 selected_observer=(lambda *_a: result) if selected_observer is None else selected_observer,
+                                 api_ip="10.43.0.1")
 
     def test_base_eight_only_no_selected_or_witness_pod_and_cleanup(self):
         self.assertIs(self.execute(), False)
@@ -180,8 +187,8 @@ class SmokeTests(unittest.TestCase):
         smoke.gateway_ready(api, UID, ns, IDS)
         smoke.evidence.assert_source_endpoint(api.source_endpoint(ns, source, server), source, server)
         assert api.server_session(ns, server["metadata"]["uid"], expected_image_id=IMAGE)["sessions"][0]["received"] > 0
-        self.assertIs(smoke.observe(api, self.owner, IDS, created,
-                                    clock=clock, sleep=lambda _seconds: None), True)
+        self.assertEqual(smoke.observe(api, self.owner, IDS, created,
+                                      clock=clock, sleep=lambda _seconds: None)["gatewayUID"], UID)
         gateway_pod["status"]["containerStatuses"][1]["imageID"] = "sha256:" + "f" * 64
         now = [0]
         def clock():

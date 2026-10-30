@@ -6,6 +6,8 @@ The CLI entrypoint remains in run.py behind four explicit gates. No selected,
 witness, fail-close or recovery resources are created here.
 """
 from pathlib import Path
+from datetime import datetime, timezone
+import ipaddress
 import time
 
 try:
@@ -127,7 +129,11 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
                 raise Blocked("Authenticated server-side OpenVPN session unverified.")
             if gateway_pod["metadata"].get("uid") in (None, ""):
                 raise Blocked("Gateway Pod UID absent.")
-            return True
+            return {"gatewayUID": gateway_uid, "serverUID": server_uid,
+                    "gatewayPodUID": gateway_pod["metadata"]["uid"],
+                    "gatewayID": gateway["status"]["gatewayID"],
+                    "endpoint": gateway["status"]["endpoints"][0]["podIP"],
+                    "session": dict(sessions[0])}
         except (adapter.AdapterError, evidence.EvidenceError, Blocked, KeyError,
                 TypeError, ValueError, AttributeError) as failure:
             if stage == "gateway-chain" and isinstance(failure, Blocked):
@@ -143,14 +149,128 @@ def observe(api, owner, ids, created, *, clock=time.monotonic, sleep=time.sleep)
     raise Blocked("Partial Gateway smoke timed out at non-secret checkpoint " + label + ".")
 
 
+def api_service_ip(api):
+    """Read-only known Kubernetes Service IPv4; never infer from mutable env."""
+    try:
+        service = api.get("service", "kubernetes", "default")
+        meta, spec = service["metadata"], service["spec"]
+        addr = ipaddress.ip_address(spec["clusterIP"])
+        if (meta.get("name") != "kubernetes" or meta.get("namespace") != "default" or
+                addr.version != 4 or addr.is_unspecified or addr.is_multicast or addr.is_loopback or
+                spec.get("type") not in (None, "ClusterIP")):
+            raise ValueError()
+        return str(addr)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        raise Blocked("Preflight Kubernetes Service ClusterIP missing or invalid.") from None
+
+
+def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.monotonic, sleep=time.sleep):
+    """Pod-status-only selected proof; no workload exec, logs or Secret reads.
+
+    OpenVPN server bytes may also grow from health probes/keepalives. Counter
+    delta is supporting local evidence, NOT attributable tunnel proof alone.
+    """
+    namespace, apps = owner.names
+    if (not isinstance(baseline, dict) or
+            baseline.get("gatewayUID") != created[("EgressGateway", namespace, "synthetic")] or
+            baseline.get("serverUID") != created[("Pod", namespace, "synthetic-vpn")] or
+            not isinstance(baseline.get("gatewayID"), int) or baseline["gatewayID"] <= 0 or
+            not isinstance(baseline.get("endpoint"), str)):
+        raise Blocked("Healthy selected phase lost fixture UID provenance.")
+    before = baseline.get("session")
+    if (not isinstance(before, dict) or before.get("cn") != "synthetic-client" or
+            any(type(before.get(k)) is not int or before[k] <= 0 for k in ("received", "sent"))):
+        raise Blocked("Authenticated OpenVPN baseline session invalid.")
+    original = prepare.selected_probe_pod(apps, namespace, "healthy", api_ip)
+    result = api.create(original)
+    key = (result["kind"], result["namespace"], result["name"])
+    if key != ("Pod", apps, "synthetic-probe-healthy") or not lifecycle.UID.fullmatch(result.get("uid", "")):
+        raise Blocked("Healthy selected Pod CREATE-return UID invalid.")
+    uid = result["uid"]
+    deadline = min(owner.deadline, clock() + 115)
+    stage = "selected-pod-status"
+    while clock() < deadline:
+        try:
+            if owner.closed or owner.clock() >= owner.deadline:
+                raise Blocked("Selected Pod Lifecycle deadline exceeded.")
+            pod = api.get("pod", "synthetic-probe-healthy", apps)
+            if pod["metadata"].get("uid") != uid:
+                raise Blocked("Healthy selected Pod UID changed.")
+            if pod.get("status", {}).get("phase") != "Succeeded":
+                raise Blocked("Healthy selected Pod not completed.")
+            evidence.assert_selected_probe(pod, namespace=apps, phase="healthy",
+                                           expected_uid=uid, expected_image_id=ids["selected"],
+                                           expected_api_ip=api_ip)
+            stage = "agent-routing-config"
+            config_raw = pod["metadata"].get("annotations", {}).get(evidence.PREFIX + "agent-config", "")
+            if not isinstance(config_raw, str) or len(config_raw) > 4096:
+                raise Blocked("Selected agent routing configuration unavailable.")
+            import json
+            config = json.loads(config_raw)
+            if (not isinstance(config, dict) or config.get("gatewayID") != baseline["gatewayID"] or
+                    config.get("endpoint") != baseline["endpoint"] or
+                    config.get("identity", {}).get("uid") != uid or
+                    config.get("podIP") != pod["status"].get("podIP") or
+                    config.get("identity", {}).get("namespace") != apps or
+                    config.get("identity", {}).get("pod") != "synthetic-probe-healthy" or
+                    config.get("identity", {}).get("policy") != "synthetic" or
+                    config.get("policy", {}).get("mode") != "include" or
+                    config.get("policy", {}).get("rules") != [{
+                        "cidrs": ["10.88.0.1/32"],
+                        "ports": [{"protocol": "TCP", "port": 8080}]}]):
+                raise Blocked("Selected agent routing config does not match healthy Gateway and Pod UID.")
+            stage = "gateway-still-ready"
+            gateway = api.get("egressgateway", "synthetic", namespace)
+            if (gateway["metadata"].get("uid") != baseline["gatewayUID"] or
+                    not evidence.condition(gateway, "Ready", "True", gateway["metadata"]["generation"]) or
+                    gateway.get("status", {}).get("gatewayID") != baseline["gatewayID"] or
+                    not any(e.get("upstreamHealthy") is True and e.get("podIP") == baseline["endpoint"]
+                            for e in gateway.get("status", {}).get("endpoints", []))):
+                raise Blocked("Gateway endpoint changed during healthy selected Pod.")
+            stage = "authenticated-session-growth"
+            server = api.get("pod", "synthetic-vpn", namespace)
+            if server["metadata"].get("uid") != baseline["serverUID"]:
+                raise Blocked("Server Pod UID changed during selected Pod.")
+            observed = api.server_session(namespace, baseline["serverUID"],
+                                          expected_image_id=ids["server"])
+            sessions = observed.get("sessions")
+            if (not isinstance(sessions, list) or len(sessions) != 1 or
+                    sessions[0].get("cn") != "synthetic-client" or
+                    any(sessions[0].get(k) != before.get(k) for k in
+                        ("cn", "virtualIPv4", "connected", "peer", "cipher")) or
+                    any(type(sessions[0].get(k)) is not int or sessions[0][k] <= before[k]
+                        for k in ("received", "sent"))):
+                raise Blocked("Authenticated OpenVPN session bytes or identity did not advance.")
+            # Validate the selected Pod identity again after the separate
+            # server status API read; stale/replaced Pods cannot be adopted.
+            if api.get("pod", "synthetic-probe-healthy", apps)["metadata"].get("uid") != uid:
+                raise Blocked("Selected Pod UID changed during session read.")
+            return {"podUID": uid, "healthyExit": True, "directAPITLSAndDNS": True,
+                    "serverSessionBytesAdvanced": True}
+        except (adapter.AdapterError, evidence.EvidenceError, Blocked, KeyError,
+                TypeError, ValueError, AttributeError):
+            remaining = deadline - clock()
+            if remaining > 0:
+                sleep(min(2, remaining))
+    raise Blocked("Healthy selected traffic smoke timed out at " + stage + ".")
+
+
 def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapter.FixtureAPI,
-            observer=observe):
+            observer=observe, selected_observer=healthy_selected, api_ip=None):
     """Only call after triple-opt-in preflight+node CRI and fourth CLI gate."""
     if not isinstance(ids, dict) or set(ids) != set(run.COMPONENTS):
         raise Blocked("Nine immutable expected image IDs required.")
     for value in ids.values():
         if not isinstance(value, str) or not run.ID_PATTERN.fullmatch(value):
             raise Blocked("Mutable or malformed expected image ID.")
+    if api_ip is None:
+        raise Blocked("Preflight Kubernetes Service ClusterIP required before mutation.")
+    try:
+        addr = ipaddress.ip_address(api_ip)
+        if addr.version != 4 or addr.is_unspecified or addr.is_multicast or addr.is_loopback:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise Blocked("Preflight API ClusterIP invalid before mutation.") from None
     # `with` owns cleanup even on Secret CREATE timeout or failed observation.
     with lifecycle_factory() as owner:
         owner.create_namespaces()
@@ -174,8 +294,15 @@ def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapt
             if key in created:
                 raise Blocked("Duplicate or ambiguous fixture CREATE UID.")
             created[key] = identity["uid"]
-        if not observer(api, owner, ids, created):
-            raise Blocked("Partial Gateway smoke evidence incomplete.")
+        baseline = observer(api, owner, ids, created)
+        if not isinstance(baseline, dict) or set(baseline) != {
+                "gatewayUID", "serverUID", "gatewayPodUID", "gatewayID", "endpoint", "session"}:
+            raise Blocked("Partial Gateway baseline evidence incomplete.")
+        evidence_result = selected_observer(api, owner, ids, created, baseline, str(addr))
+        if evidence_result != {"podUID": evidence_result.get("podUID") if isinstance(evidence_result, dict) else None,
+                               "healthyExit": True, "directAPITLSAndDNS": True,
+                               "serverSessionBytesAdvanced": True} or not lifecycle.UID.fullmatch(evidence_result["podUID"]):
+            raise Blocked("Healthy restricted selected Pod evidence incomplete.")
     # Returning here requires Lifecycle-confirmed cleanup of BOTH namespaces.
     # This is a partial smoke, NEVER a full synthetic e2e PASS.
     return False

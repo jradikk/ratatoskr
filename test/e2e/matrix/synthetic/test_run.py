@@ -134,10 +134,21 @@ class GateTests(unittest.TestCase):
                                       lambda: FakeAPI(),
                                       lambda _ids: (_ for _ in ()).throw(run.node_images.Blocked("SECRET"))), 1)
 
+    def test_read_only_api_service_cluster_ip_contract(self):
+        import partial_gateway
+        class Service:
+            def get(self, kind, name, namespace):
+                self.calls = (kind, name, namespace)
+                return {"metadata": {"name": "kubernetes", "namespace": "default"},
+                        "spec": {"type": "ClusterIP", "clusterIP": "10.43.0.1"}}
+        api = Service()
+        self.assertEqual(partial_gateway.api_service_ip(api), "10.43.0.1")
+        self.assertEqual(api.calls, ("service", "kubernetes", "default"))
+
     def test_fourth_gateway_mutation_flag_requires_all_other_gates(self):
         seen = []
-        def smoke(_ids):
-            seen.append("smoke")
+        def smoke(_ids, *, api_ip):
+            seen.append(("smoke", api_ip))
             return False
         env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
         env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
@@ -151,18 +162,23 @@ class GateTests(unittest.TestCase):
                                           lambda _ids: (_ for _ in ()).throw(AssertionError("CRI called")), smoke), 2)
         self.assertEqual(seen, [])
         output = io.StringIO()
+        class SmokeAPI(FakeAPI):
+            def get(self, resource, name=None, namespace=None, selector=None):
+                if (resource, name, namespace) == ("service", "kubernetes", "default"):
+                    return {"metadata": {"name": name, "namespace": namespace},
+                            "spec": {"type": "ClusterIP", "clusterIP": "10.43.0.1"}}
+                return super().get(resource, name, namespace, selector)
         with contextlib.redirect_stdout(output):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
-                                      env, FakeAPI, lambda _ids: True, smoke), 4)
-        self.assertEqual(seen, ["smoke"])
+                                      env, SmokeAPI, lambda _ids: True, smoke), 4)
+        self.assertEqual(seen, [("smoke", "10.43.0.1")])
         self.assertIn("INCOMPLETE", output.getvalue())
-        self.assertIn("Selected/agent/fail-close/recovery NOT TESTED", output.getvalue())
+        self.assertIn("selected tunnel attribution, fail-close, witness and recovery NOT TESTED", output.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
-                                      env, FakeAPI, lambda _ids: True,
-                                      lambda _ids: (_ for _ in ()).throw(RuntimeError("SECRET"))), 1)
-        self.assertEqual(seen, ["smoke"])
-
+                                      env, SmokeAPI, lambda _ids: True,
+                                      lambda _ids, **_kw: (_ for _ in ()).throw(RuntimeError("SECRET"))), 1)
+        self.assertEqual(seen, [("smoke", "10.43.0.1")])
     def test_gateway_smoke_blocks_stale_controller_image_refs_before_mutation(self):
         env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
         env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})

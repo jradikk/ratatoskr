@@ -216,7 +216,8 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
                 import partial_gateway
             if smoke is None:
                 smoke = partial_gateway.execute
-            smoke(ids)
+            service_ip = partial_gateway.api_service_ip(api)
+            smoke(ids, api_ip=service_ip)
         except (KeyboardInterrupt, SystemExit):
             print("FAILED: partial Gateway smoke interrupted; verify cleanup and orphan state.")
             return 1
@@ -234,7 +235,7 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         except BaseException:
             print("FAILED: partial Gateway smoke or cleanup blocked; no raw API or private data retained. Inspect UID-owned namespace orphan state privately.")
             return 1
-        print("INCOMPLETE: partial synthetic OpenVPN Gateway smoke observed real healthy owner/status/TLS evidence and verified both namespace/PKI cleanup. Selected/agent/fail-close/recovery NOT TESTED; no M8 PASS.")
+        print("INCOMPLETE: partial OpenVPN smoke observed real Gateway owner/status/TLS and healthy restricted agent one-shot Pod exit0 with direct API TLS/DNS and server session counter growth; both namespaces/PKI cleanup verified. Counter growth may include probe noise; selected tunnel attribution, fail-close, witness and recovery NOT TESTED. No M8 PASS.")
     elif args.allow_partial_vpn_smoke:
         print("INCOMPLETE: read-only three-node CRI config image IDs matched explicit expectations; release and private probe preflight passed. Partial synthetic VPN smoke remains BLOCKED before resource creation pending runtime safety review. No resources, PKI or Pods created; no VPN traffic tested.")
     else:

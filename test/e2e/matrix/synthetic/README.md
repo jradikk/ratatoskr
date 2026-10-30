@@ -1,5 +1,31 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Healthy restricted agent one-shot traffic extension (still INCOMPLETE)
+
+The same quadruple-opt-in partial smoke now adds **only** the
+`synthetic-probe-healthy` one-shot Pod *after* real Gateway Ready, owned graph,
+measured MTU, plugin args/imageIDs and authenticated server session are
+observed. Before Lifecycle/PKI mutation it reads the known `default/kubernetes`
+Service ClusterIP from the existing API, validates IPv4, and supplies it to
+the fixed `prepare.selected_probe_pod` helper. The fixture's app namespace
+carries the exact Gateway namespace selector label. `FixtureAPI.create`
+returns the new Pod UID from the API CREATE response; no guessed name-based
+adoption, selected Pod exec, container logs or Secret GET occurs. Bounded
+polling requires production webhook's capability-free `-wait-agent` init to
+exit 0, agent readiness annotation plus UID/PodIP/Gateway endpoint/selector
+policy config, the **approved selected imageID**, and a Succeeded Pod whose
+helper exited 0 after exact tunnel marker plus public-CA anonymous API TLS
+403/DNS and direct route checks. The Gateway and server UIDs/endpoint must
+remain the same; an authenticated `synthetic-client` session with the same
+identity must have increased both byte counters. Because routine upstream
+health probes can also increment session bytes, this correlation is **local
+supporting evidence, not independent packet-level attribution**. The smoke
+returns **4 / INCOMPLETE** after verified namespace/PKI cleanup; it does not
+create the outage/witness/recovery Pods or assert fail-close, full tunnel
+proof, or M8 PASS. Any timeout, stale image/UID, admission mismatch or cleanup
+failure exits 1 with sanitized diagnostics. Only fake APIs were used during
+authoring, not a cluster.
+
 ## Explicit fourth-gate partial Gateway smoke (NOT an M8 e2e PASS)
 
 Only `run.py --execute --allow-partial-vpn-smoke --execute-partial-gateway`
@@ -13,11 +39,12 @@ runner never builds/imports images, upgrades a release, provisions VMs or
 changes CNI. This is intentionally separate from full M8 traffic coverage.
 
 `Lifecycle` owns two UUID namespaces, a 0700 outside-repo PKI directory, and
-bounded signal/failure cleanup. Only eight allowlisted resources are created
+bounded signal/failure cleanup. Eight allowlisted base resources are created
 using UID-returned stdin-only JSON: server/client/witness Secrets, private
 exit-health ConfigMap, actual synthetic OpenVPN server Pod, UDP1194-only
-Service, real controller EgressGateway and EgressPolicy. Neither witness nor
-selected workload Pod is created. The observer polls only API objects, checks
+Service, real controller EgressGateway and EgressPolicy. After positive
+Gateway proof, one healthy restricted selected workload Pod is also created.
+Neither witness nor outage/recovery Pod is created. The observer polls only API objects, checks
 server UID/runtime image, Service EndpointSlice target UID/IP, Gateway Ready
 observed generation and measured MTU, controlled Gateway→Deployment→RS→Pod
 owner chain plus owned Service/ConfigMap/NetworkPolicy, exact plugin probe
@@ -29,8 +56,9 @@ or OpenVPN status is printed or persisted as an artifact. The smoke exits
 An ambiguous CREATE, stale release/image, missing endpoint/status/session,
 API timeout or unverified cleanup exits **1 / FAILED** with sanitized output;
 SIGKILL, API loss or node failure still require operator orphan remediation.
-This smoke does **not** establish restricted agent routing, selected marker
-traffic, fail-close, recovery, DNS/API preservation or matrix PASS.
+This smoke does **not** establish fail-close, witness, recovery or
+full M8 tunnel attribution/PASS; selected marker and direct API/DNS checks
+are healthy-path only.
 
 During authoring, only fake API/PKI tests were run. Parent/operator must
 confirm actual Kubernetes admission, OpenVPN TUN/device behavior, image
