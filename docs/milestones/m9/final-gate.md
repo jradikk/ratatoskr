@@ -99,6 +99,17 @@ hook. Any change needs a reviewed routing/attachment topology that preserves
 local OUTPUT policy and fail-close, plus real multi-pod and Linux 5.10 packet
 evidence. No scratch implementation was retained.
 
+A second disposable-netns experiment connected locally generated OUTPUT to
+that tc-ingress hook using a same-namespace veth pair and a selected-route
+table. On kernel 7.0 it emitted the expected outer UDP/VNI/TLV, passed the
+gateway flower verifier, and reached the fake upstream with SNAT. The reply
+returned through GENEVE, but the client socket timed out under the default
+reverse-path validation. Disabling `rp_filter` **only in the isolated test**
+proved the cause, not an acceptable production remedy. This topology therefore
+resolves the forward metadata symptom in isolation but **does not satisfy the
+restricted-Pod return-path or Linux 5.10 acceptance gates**. No production
+implementation was retained and no host/cluster sysctl was modified.
+
 The current M8 matrix still implements only two direct-config flannel subsets;
 Cilium, Cilium-WireGuard, Calico, mesh, admission/CRD, restricted agent,
 WireGuard registration, HA failover and full observability scenarios remain
