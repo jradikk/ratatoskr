@@ -90,6 +90,15 @@ fix**, and the earlier isolated `gnv0` counter check
 was not proof of end-to-end gateway ingress. eBPF may not be represented as a
 passing second datapath.
 
+A follow-up **disposable-netns tc-ingress experiment** on kernel 7.0 used the
+same BPF program and successfully emitted outer UDP/6081 with expected VNI
+and identity TLV; the gateway received it. That contrast narrows the problem
+to the current tc-egress attachment path, but is **not a production fix**:
+locally generated Pod traffic does not traverse the proposed eth0 ingress
+hook. Any change needs a reviewed routing/attachment topology that preserves
+local OUTPUT policy and fail-close, plus real multi-pod and Linux 5.10 packet
+evidence. No scratch implementation was retained.
+
 The current M8 matrix still implements only two direct-config flannel subsets;
 Cilium, Cilium-WireGuard, Calico, mesh, admission/CRD, restricted agent,
 WireGuard registration, HA failover and full observability scenarios remain
