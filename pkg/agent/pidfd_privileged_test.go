@@ -20,10 +20,9 @@ func TestPIDFDNetnsHelper(t *testing.T) {
 	}
 }
 
-// PID1 may deny /proc/1/ns/net under hidepid even with hostPID. The pinned
-// pidfd check must reject PID1's namespace from a distinct sandbox netns and
-// leave the verifier thread in the sandbox after its transient host setns.
-func TestPrivilegedHostPIDFDNamespaceRejected(t *testing.T) {
+// A kubelet/API-verified agent anchors its own host network namespace.
+// A candidate equal to that pinned namespace must be rejected before entry.
+func TestPrivilegedHostNamespaceRejected(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root and CAP_SYS_ADMIN")
 	}
@@ -53,8 +52,14 @@ func TestPrivilegedHostPIDFDNamespaceRejected(t *testing.T) {
 	}
 	hostCandidate := os.NewFile(uintptr(hostFD), "original host namespace")
 	defer hostCandidate.Close()
+	var anchored unix.Stat_t
+	if err := unix.Fstat(int(hostCandidate.Fd()), &anchored); err != nil {
+		t.Fatal(err)
+	}
+	previous := verifiedHost.Swap(&hostAnchor{fd: hostCandidate, stat: anchored})
+	defer verifiedHost.Store(previous)
 	if err := rejectHost(hostCandidate); err == nil {
-		t.Fatal("host PID1 namespace accepted from a different self netns")
+		t.Fatal("pinned host network namespace accepted from a different self netns")
 	}
 	current, err := netns.Get()
 	if err != nil {
@@ -120,6 +125,18 @@ func TestPrivilegedPinnedPIDNetnsVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(fd)
+	originalFD, err := unix.Dup(int(original))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorFD := os.NewFile(uintptr(originalFD), "privileged test host anchor")
+	defer anchorFD.Close()
+	var anchorStat unix.Stat_t
+	if err := unix.Fstat(int(anchorFD.Fd()), &anchorStat); err != nil {
+		t.Fatal(err)
+	}
+	previous := verifiedHost.Swap(&hostAnchor{fd: anchorFD, stat: anchorStat})
+	defer verifiedHost.Store(previous)
 	if err := verifyPIDNetns(fd, candidate); err != nil {
 		t.Fatalf("pinned sandbox verification failed: %v", err)
 	}
