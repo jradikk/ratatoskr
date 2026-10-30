@@ -552,6 +552,37 @@ explicit host-namespace trust contract (or another safely accessible trusted
 host-netns handle), tests on the deployed runtime and Linux 5.10, then full
 selected/fail-close/recovery validation.
 
+## October 30, 2026 — authenticated self-anchor tested; sandbox pidfd still denied
+
+The agent's own Pod is now bound to Downward API namespace/name/UID/node and
+verified by an uncached API GET with the expected ServiceAccount, hostPID,
+hostNetwork and non-deleting identity (`4b3a00c`). A pinned startup thread
+netns replaces the PID1 check **only under the explicitly documented trusted
+kubelet/API hostNetwork contract**; it is not independent PID1 kernel
+attestation. Every candidate remains openat2-confined, rejects the pinned host
+namespace and must match the pinned sandbox PID via transient pidfd `setns`;
+there is no path-only adoption, chart capability expansion or bypass.
+Privileged tests initially exposed an unanchored old test setup and were
+corrected in `8ae745d`. Race, lint, vet, build, chart and privileged component
+checks passed. The updated image was imported and the same-privilege agent
+DaemonSet rolled 3/3 Ready with all four identity fieldRefs.
+
+A bounded real final-gate retry nevertheless **FAILED** after the healthy
+controller-created synthetic OpenVPN Gateway and authenticated session:
+selected restricted Pod stayed Pending with wait-init running. The agent's
+fixed-category errors now pinpoint `corroborate CRI path with pinned sandbox
+PID: enter pinned process network namespace: operation not permitted`.
+The current kernel's pidfd `setns` validates ptrace read access to the target
+process; the actual agent lacks that access despite existing NET_ADMIN and
+SYS_ADMIN. A node-container probe working outside the production container
+security context was therefore **not** proof that this operation was allowed
+inside the agent. Do not grant SYS_PTRACE, disable seccomp, trust an uncorroborated
+CRI path, fake readiness or claim selected traffic. Both fixture namespaces and
+private PKI were removed after the failed run; controller/webhook were 1/1
+Available and agent 3/3 Ready. A revised, independently verifiable namespace
+identity design—or a separately reviewed privilege policy—is required before
+M5 agent traffic, M8 compatibility or M9 release can pass.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
