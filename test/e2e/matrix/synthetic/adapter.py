@@ -57,6 +57,7 @@ COMMANDS = {
                  "--connect-timeout", "2", "--max-time", "5", "http://10.88.0.1:8080/exit"),
     "direct-dns": ("getent", "ahostsv4", "kubernetes.default.svc.cluster.local"),
 }
+SERVER_COMMAND = ("python3", "/usr/local/bin/session.py")
 
 
 def _env():
@@ -235,6 +236,46 @@ class FixtureAPI:
                 r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", image_id):
             raise AdapterError("Pod runtime image ID malformed or mutable.")
         return image_id
+
+    def server_session(self, namespace, uid, *, expected_image_id):
+        """Only sanitized status reader in exact server Pod; never cat/raw logs.
+
+        Caller MUST treat JSON as private transient evidence, never persist it.
+        Like kubectl exec generally, there is no server-side Pod UID compare;
+        a replacement between precheck and exec remains a hard full-gate block.
+        """
+        if namespace != self.owner.names[0] or not isinstance(uid, str) or not UID.fullmatch(uid):
+            raise AdapterError("Server session namespace or Pod UID invalid.")
+        if not isinstance(expected_image_id, str) or not re.fullmatch(
+                r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", expected_image_id):
+            raise AdapterError("Expected immutable server runtime image required.")
+        self._namespace(namespace)
+        pod = self.get("pod", "synthetic-vpn", namespace)
+        if (pod["metadata"].get("uid") != uid or pod["metadata"].get("deletionTimestamp") or
+                not pod.get("spec", {}).get("nodeName")):
+            raise AdapterError("Server Pod UID, scheduling or deletion invalid.")
+        spec = [c for c in pod.get("spec", {}).get("containers", []) if c.get("name") == "server"]
+        status = [c for c in pod.get("status", {}).get("containerStatuses", []) if c.get("name") == "server"]
+        if (len(spec) != 1 or len(status) != 1 or spec[0].get("imagePullPolicy") != "Never" or
+                status[0].get("ready") is not True or status[0].get("imageID") != expected_image_id):
+            raise AdapterError("Server container not Ready with expected immutable runtime image.")
+        raw = self._call(["--namespace", namespace, "exec", "synthetic-vpn", "-c", "server", "--",
+                          *SERVER_COMMAND], max_output=384)
+        self._namespace(namespace)
+        if pod["metadata"].get("uid") != self.get("pod", "synthetic-vpn", namespace)["metadata"].get("uid"):
+            raise AdapterError("Server Pod UID changed during session read.")
+        try:
+            session = json.loads(raw)
+            if (not isinstance(session, dict) or
+                    set(session) != {"cn", "virtualIPv4", "received", "sent", "connected", "peer", "cipher"} or
+                    session.get("cn") != "synthetic-client" or session.get("cipher") not in {"AES-256-GCM", "AES-128-GCM"} or
+                    any(type(session.get(key)) is not int or session[key] < 0 for key in ("received", "sent", "connected", "peer")) or
+                    not isinstance(session.get("virtualIPv4"), str) or
+                    not re.fullmatch(r"10\.88\.0\.[0-9]{1,3}", session["virtualIPv4"])):
+                raise ValueError()
+            return session
+        except (ValueError, UnicodeError, TypeError, AttributeError):
+            raise AdapterError("Sanitized server session output malformed.") from None
 
     def exec(self, namespace, name, uid, container, command, *, expected_image_id):
         if (name, container) != ("synthetic-client", "client") or namespace != self.owner.names[1]:

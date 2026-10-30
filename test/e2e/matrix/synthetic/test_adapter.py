@@ -48,6 +48,9 @@ class FakeTransport:
                                                     {"name": "server", "ready": True, "imageID": self.image}]}}
             return json.dumps(obj).encode()
         if "exec" in argv:
+            if a.SERVER_COMMAND[1] in argv:
+                return json.dumps({"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 22,
+                                   "sent": 33, "connected": 100, "peer": 7, "cipher": "AES-256-GCM"}).encode()
             return b"safe-result\n"
         return b"pod/synthetic-client\n"
 
@@ -170,6 +173,29 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(a.AdapterError):
                 adapter.exec(namespace, "synthetic-client", POD_UID, "client", "vpn-marker", expected_image_id=image)
         self.assertFalse(any("exec" in call[0] for call in fake.calls))
+
+    def test_server_session_only_pinned_sanitized_exec(self):
+        adapter, fake = make()
+        ns = adapter.owner.names[0]
+        data = adapter.server_session(ns, POD_UID, expected_image_id=IMAGE)
+        self.assertEqual((data["cn"], data["received"], data["sent"]), ("synthetic-client", 22, 33))
+        argv = next(call[0] for call in fake.calls if a.SERVER_COMMAND[1] in call[0])
+        self.assertEqual(argv[-len(a.SERVER_COMMAND):], list(a.SERVER_COMMAND))
+        self.assertNotIn("cat", argv)
+        self.assertNotIn("logs", argv)
+        with self.assertRaises(a.AdapterError):
+            adapter.server_session(adapter.owner.names[1], POD_UID, expected_image_id=IMAGE)
+        with self.assertRaises(a.AdapterError):
+            adapter.server_session(ns, POD_UID, expected_image_id="latest")
+        fake.uid = "f" * 32
+        with self.assertRaises(a.AdapterError):
+            adapter.server_session(ns, POD_UID, expected_image_id=IMAGE)
+        fake.uid = POD_UID
+        old_transport = adapter.transport
+        adapter.transport = lambda argv, **kw: b'{"cn":"synthetic-client","privateKey":"SECRET"}' if a.SERVER_COMMAND[1] in argv else old_transport(argv, **kw)
+        with self.assertRaises(a.AdapterError) as ctx:
+            adapter.server_session(ns, POD_UID, expected_image_id=IMAGE)
+        self.assertNotIn("SECRET", str(ctx.exception))
 
     def test_deadline_denies_transport(self):
         adapter, fake = make()

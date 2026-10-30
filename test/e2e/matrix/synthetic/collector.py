@@ -180,8 +180,64 @@ class Collector:
         evidence.assert_agent_marker(marker)
         return uid
 
+    def _session(self, server_uid):
+        try:
+            return self.api.server_session(self.owner.names[0], server_uid,
+                                           expected_image_id=self.ids["server"])
+        except adapter.AdapterError:
+            raise Incomplete("Authenticated server-side session evidence unavailable.") from None
+
+    def session_traffic(self, server_uid, client_uid, gateway_id, endpoint):
+        """Correlate exact authenticated server session with selected request.
+
+        Server `session.py` exports only whitelisted identity/counters; no raw
+        OpenVPN status, cert or private key leaves the Pod. This remains local
+        evidence, not a final gate PASS (see final_result()).
+        """
+        session_before = self._session(server_uid)
+        self._validate_session(session_before)
+        before_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
+        evidence.need(type(before_link.get("ifindex")) is int and before_link["ifindex"] > 0,
+                      "GENEVE device index unavailable.")
+        first = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        baseline = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        evidence.need(first == baseline, "GENEVE background traffic invalidates marker counter attribution.")
+        session_idle = self._session(server_uid)
+        self._validate_session(session_idle)
+        evidence.need(session_before == session_idle,
+                      "Server session changed without selected request; counter attribution unsafe.")
+        body = self._exec(client_uid, "vpn-marker")
+        after = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        after_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
+        session_after = self._session(server_uid)
+        self._validate_session(session_after)
+        evidence.need(before_link["ifindex"] == after_link.get("ifindex"),
+                      "GENEVE device identity changed during selected request.")
+        evidence.assert_selected_tunnel(baseline, after, body, after_link, gateway_id, endpoint)
+        identity = ("cn", "virtualIPv4", "connected", "peer", "cipher")
+        evidence.need(all(session_idle[k] == session_after[k] for k in identity) and
+                      session_after["received"] > session_idle["received"] and
+                      session_after["sent"] > session_idle["sent"],
+                      "Authenticated OpenVPN client identity/counters did not advance.")
+        return {"geneveBytesIncreased": True, "authenticatedSessionBytesIncreased": True}
+
+    @staticmethod
+    def _validate_session(value):
+        if (not isinstance(value, dict) or
+                set(value) != {"cn", "virtualIPv4", "received", "sent", "connected", "peer", "cipher"} or
+                value.get("cn") != "synthetic-client" or value.get("cipher") not in {"AES-256-GCM", "AES-128-GCM"} or
+                any(type(value.get(k)) is not int or value[k] < 0 for k in ("received", "sent", "connected", "peer")) or
+                not isinstance(value.get("virtualIPv4"), str)):
+            raise Incomplete("Sanitized authenticated server session identity invalid.")
+        try:
+            ip = ipaddress.ip_address(value["virtualIPv4"])
+            if ip.version != 4 or ip not in ipaddress.ip_network("10.88.0.0/24") or ip == ipaddress.ip_address("10.88.0.1"):
+                raise ValueError()
+        except ValueError:
+            raise Incomplete("Authenticated server virtual IPv4 identity invalid.") from None
+
     def selected_traffic(self, client_uid, gateway_id, endpoint):
-        """Success is *local evidence only*, not TLS/session or full e2e PASS."""
+        """Legacy local-only link test; use session_traffic for server proof."""
         before_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
         evidence.need(type(before_link.get("ifindex")) is int and before_link["ifindex"] > 0,
                       "GENEVE device index unavailable.")

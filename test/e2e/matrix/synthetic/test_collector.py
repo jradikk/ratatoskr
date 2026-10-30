@@ -102,6 +102,41 @@ class CollectorTests(unittest.TestCase):
             collector.assert_gateway_graph(dict(gw, metadata=dict(gw["metadata"], namespace="other")),
                                            {}, {}, {}, [])
 
+    def test_server_authenticated_session_bytes_independent_of_geneve(self):
+        collector, api = fixture()
+        original = {"cn": "synthetic-client", "virtualIPv4": "10.88.0.2", "received": 100,
+                    "sent": 200, "connected": 42, "peer": 7, "cipher": "AES-256-GCM"}
+        class ServerAPI(FakeClient):
+            def server_session(self, namespace, uid, *, expected_image_id):
+                assert namespace == self.owner.names[0] and uid == "e" * 32
+                assert expected_image_id == EXPECTED
+                return self.sessions.pop(0)
+        server_api = ServerAPI(collector.owner)
+        collector.api = server_api
+        def configure(sessions):
+            server_api.sessions = list(sessions)
+            server_api.outputs = {
+                "geneve-link": payload(LINK),
+                "geneve-bytes": [payload({"ifname": "rtk0", "stats64": {"tx": {"bytes": n}}}) for n in (100, 100, 220)],
+                "vpn-marker": mod.evidence.MARKER,
+            }
+        later = dict(original, received=320, sent=410)
+        configure([original, dict(original), later])
+        self.assertEqual(collector.session_traffic("e" * 32, UID, 7, "10.42.1.7"),
+                         {"geneveBytesIncreased": True, "authenticatedSessionBytesIncreased": True})
+        for invalid in (dict(original, received=100, sent=410),
+                        dict(original, received=320, sent=200),
+                        dict(original, received=320, sent=410, cn="intruder"),
+                        dict(original, received=320, sent=410, peer=8),
+                        dict(original, received=320, sent=410, privateKey="PRIVATE-CREDENTIAL")):
+            configure([original, dict(original), invalid])
+            with self.assertRaises((mod.Incomplete, mod.evidence.EvidenceError)) as ctx:
+                collector.session_traffic("e" * 32, UID, 7, "10.42.1.7")
+            self.assertNotIn("PRIVATE-CREDENTIAL", str(ctx.exception))
+        configure([original, dict(original, received=101), later])
+        with self.assertRaises(mod.evidence.EvidenceError):
+            collector.session_traffic("e" * 32, UID, 7, "10.42.1.7")
+
     def test_counter_background_traffic_wrong_link_or_false_marker_denied(self):
         for before, baseline, after in ((100, 101, 120), (100, 100, 100), (100, 100, 90)):
             collector, api = fixture()

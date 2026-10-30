@@ -19,7 +19,8 @@ def server_config():
             "key /etc/synthetic/server.key\ndh none\n"
             "tls-version-min 1.2\nremote-cert-tls client\n"
             "data-ciphers AES-256-GCM:AES-128-GCM\nauth SHA256\n"
-            "keepalive 5 20\npersist-key\npersist-tun\n")
+            "keepalive 5 20\npersist-key\npersist-tun\n"
+            "status /run/synthetic/openvpn.status 1\nstatus-version 3\n")
 
 
 def client_config(remote, ca, cert, key):
@@ -84,9 +85,11 @@ def manifests(namespace, image, contents):
             "containers": [{"name": "server", "image": image, "imagePullPolicy": "Never",
                 "securityContext": {"capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}, "allowPrivilegeEscalation": False},
                 "volumeMounts": [{"name": "pki", "mountPath": "/etc/synthetic", "readOnly": True},
-                                 {"name": "dev-net", "mountPath": "/dev/net"}]}],
+                                 {"name": "dev-net", "mountPath": "/dev/net"},
+                                 {"name": "status", "mountPath": "/run/synthetic"}]}],
             "volumes": [{"name": "pki", "secret": {"secretName": "synthetic-server", "defaultMode": 256}},
-                        {"name": "dev-net", "emptyDir": {}}]}},
+                        {"name": "dev-net", "emptyDir": {}},
+                        {"name": "status", "emptyDir": {"medium": "Memory"}}]}},
         {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "synthetic-vpn", "namespace": namespace},
             "spec": {"selector": {"app": "synthetic-vpn"}, "ports": [{"port": 1194, "protocol": "UDP", "targetPort": 1194}]}},
         {"apiVersion": "ratatoskr.skaldhall.io/v1alpha1", "kind": "EgressGateway",

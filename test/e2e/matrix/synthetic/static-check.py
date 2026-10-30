@@ -53,6 +53,10 @@ try:
     assert server_pod["spec"]["containers"][0]["imagePullPolicy"] == "Never"
     assert server_pod["spec"]["containers"][0]["securityContext"]["capabilities"] == {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}
     assert server_pod["spec"]["volumes"][1] == {"name": "dev-net", "emptyDir": {}}
+    assert server_pod["spec"]["volumes"][2] == {"name": "status", "emptyDir": {"medium": "Memory"}}
+    assert server_pod["spec"]["containers"][0]["volumeMounts"][2] == {"name": "status", "mountPath": "/run/synthetic"}
+    assert "status /run/synthetic/openvpn.status 1" in decode(server["data"]["server.conf"])
+    assert "status-version 3" in decode(server["data"]["server.conf"])
     assert not any("hostPath" in volume for volume in server_pod["spec"]["volumes"])
     assert objects[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "privileged"
     for malicious in ("example.net", "synthetic-vpn.bad/shell.svc.cluster.local", "vpn.UPPER.svc.cluster.local"):

@@ -5,6 +5,9 @@ umask 077
 # Create an isolated TUN device inside this Pod's emptyDir; never mount the
 # host's device node or request privileged/SYS_ADMIN access.
 mkdir -p /dev/net
+# /run/synthetic is a Pod-local memory emptyDir, not the PKI Secret volume.
+# OpenVPN's private status TSV remains on this mount and is never logged.
+chmod 0700 /run/synthetic
 if [ ! -e /dev/net/tun ]; then
     mknod -m 0600 /dev/net/tun c 10 200
 fi

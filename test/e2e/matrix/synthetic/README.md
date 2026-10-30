@@ -1,5 +1,30 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Authenticated server-side OpenVPN session evidence (no PASS)
+
+The synthetic server writes OpenVPN **status-version 3** to
+`/run/synthetic/openvpn.status` every second on a dedicated Pod-local
+memory `emptyDir` (mode 0700 directory, mode 0600 status file), never the
+Secret volume, Kubernetes Service, logs or artifacts. `server/session.py`
+reads only a no-symlink, private-mode, bounded status file and parses exactly
+one authenticated client session whose common name is `synthetic-client`,
+whose virtual IPv4 is in `10.88.0.0/24`, with an approved data cipher,
+nonnegative counters and a fresh status timestamp. It prints **only** a
+minimal whitelisted JSON identity and counters; raw status, peer real address,
+profile, keys and all errors are suppressed. The adapter permits only fixed
+`python3 /usr/local/bin/session.py` exec in the UID/image-pinned server Pod,
+not arbitrary server exec. The collector requires stable CN/peer/session and
+both OpenVPN received/sent counters to increase across the same selected
+marker request, **independent** of client GENEVE TX growth. Fake-only tests
+cover zero/wrong/duplicate sessions, stale or malformed counters, unsafe status
+paths, tampered output and non-disclosure. This is *not* a TLS packet capture or
+a final gate assertion: the source is the server's OpenVPN status after its
+certificate-authenticated TLS setup, and no live OpenVPN test ran here.
+
+`run.py` remains read-only and INCOMPLETE. No server outage/recovery, direct
+API TLS path, live image/runtime proof or atomic Pod-UID exec binding is
+implemented; no e2e PASS can be awarded.
+
 ## Isolated no-PASS evidence collector
 
 `collector.py` accepts only an active, owned `Lifecycle` and its `FixtureAPI`.
