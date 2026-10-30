@@ -157,23 +157,26 @@ func TestReadinessMarkerRequiresUp(t *testing.T) {
 }
 
 func TestHostPIDNetnsIdentity(t *testing.T) {
-	var self, host unix.Stat_t
-	if err := unix.Stat("/proc/self/ns/net", &self); err != nil {
+	var self unix.Stat_t
+	if err := unix.Stat("/proc/thread-self/ns/net", &self); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Stat("/proc/1/ns/net", &host); err != nil {
-		// Unprivileged CI may hide PID1 namespace; keep the synthetic hostPID
-		// case below and validate production fail-closed behavior explicitly.
-		f, openErr := os.Open("/proc/self/ns/net")
-		if openErr != nil {
-			t.Fatal(openErr)
-		}
-		defer f.Close()
-		if err := rejectHost(f); err == nil {
-			t.Fatal("accepted namespace without readable PID1")
-		}
-		host = unix.Stat_t{Dev: self.Dev, Ino: self.Ino + 1}
+	fd, err := unix.PidfdOpen(1, 0)
+	if err != nil {
+		t.Skipf("cannot pin host PID1 on this test host: %v", err)
 	}
+	defer unix.Close(fd)
+	// A nonprivileged test cannot enter PID1's netns. Exercise the actual
+	// rejection of our own namespace and synthetic distinct host identity.
+	f, err := os.Open("/proc/thread-self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := rejectHost(f); err == nil {
+		t.Fatal("accepted own network namespace")
+	}
+	host := unix.Stat_t{Dev: self.Dev, Ino: self.Ino + 1}
 	if err := rejectForbiddenNetns(self, self, host); err == nil {
 		t.Fatal("agent netns accepted")
 	}

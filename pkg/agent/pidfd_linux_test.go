@@ -5,6 +5,7 @@ package agent
 import (
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,6 +38,41 @@ func TestPinnedPIDExitAndCandidateGuards(t *testing.T) {
 	// The verifier rejection must not move the OS thread's namespace.
 	if err := rejectHost(self); err == nil && !errors.Is(err, unix.EACCES) {
 		t.Fatal("self netns unexpectedly accepted")
+	}
+}
+
+func TestHostPIDNamespaceSampleRestoresThread(t *testing.T) {
+	pidfd, err := unix.PidfdOpen(1, 0)
+	if err != nil {
+		t.Skipf("host PID1 unavailable in test namespace: %v", err)
+	}
+	defer unix.Close(pidfd)
+	// Nonprivileged CI cannot setns: refusal must not move this OS thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	before, err := os.Open("/proc/thread-self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer before.Close()
+	_, err = pinnedNetnsStat(pidfd)
+	if err == nil {
+		t.Skip("test process has sufficient setns privilege; privileged test covers host rejection")
+	}
+	after, err := os.Open("/proc/thread-self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer after.Close()
+	var prior, current unix.Stat_t
+	if err := unix.Fstat(int(before.Fd()), &prior); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Fstat(int(after.Fd()), &current); err != nil {
+		t.Fatal(err)
+	}
+	if !sameNetns(prior, current) {
+		t.Fatal("failed host pidfd setns changed caller thread namespace")
 	}
 }
 
