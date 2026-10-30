@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""Isolated no-PASS, no-resource-mutation synthetic evidence collector.
+
+Caller must supply an already-authorized Lifecycle/FixtureAPI with trusted
+fixture Pods. This module has NO CLI, never generates PKI or creates resources,
+and cannot certify full e2e. In particular it cannot interrupt or recover the
+server and kubectl exec has no atomic Pod UID precondition.
+"""
+import ipaddress
+import json
+import re
+import time
+
+try:
+    from . import adapter, evidence, lifecycle
+except ImportError:  # standalone import for local pure unit tests
+    import adapter
+    import evidence
+    import lifecycle
+
+
+class Incomplete(Exception):
+    """Static sanitized evidence gap; never contains live JSON or credentials."""
+
+
+def _parse_json(raw, *, limit=4096):
+    if not isinstance(raw, str) or len(raw) > limit:
+        raise Incomplete("Command output exceeds bounded JSON limit.")
+    try:
+        obj = json.loads(raw)
+        if not isinstance(obj, list) or len(obj) != 1 or not isinstance(obj[0], dict):
+            raise ValueError()
+        return obj[0]
+    except (ValueError, TypeError):
+        raise Incomplete("Command output does not match single-object JSON.") from None
+
+
+def _tx_bytes(raw):
+    link = _parse_json(raw)
+    if link.get("ifname") != "rtk0":
+        raise Incomplete("GENEVE egress counter is not from rtk0.")
+    try:
+        value = link["stats64"]["tx"]["bytes"]
+        if type(value) is not int or value < 0:
+            raise ValueError()
+        return value
+    except (KeyError, TypeError, ValueError):
+        raise Incomplete("Client GENEVE TX stats64 bytes unavailable.") from None
+
+
+def _geneve(raw, gateway_id, endpoint):
+    link = _parse_json(raw)
+    evidence.need(link.get("ifname") == "rtk0" and
+                  link.get("linkinfo", {}).get("info_kind") == "geneve" and
+                  link.get("operstate") == "UP", "Client GENEVE interface is not up.")
+    data = link.get("linkinfo", {}).get("info_data", {})
+    # Linux iproute2 `ip -j -d link`: for GENEVE info_data records
+    # `id` and `remote`; numeric VNI, literal IPv4 endpoint.
+    evidence.need(type(data.get("id")) is int and data["id"] == gateway_id and
+                  data.get("remote") == endpoint, "GENEVE remote or VNI mismatch.")
+    return link
+
+
+def _dns(raw, api_ip):
+    # getent ahostsv4 returns multiple socket-type lines for the same IP.
+    # Any different address implies DNS result poisoning, not success.
+    lines = raw.splitlines()
+    evidence.need(0 < len(lines) <= 9 and all(len(line) < 200 for line in lines),
+                  "DNS answer missing or unexpectedly large.")
+    try:
+        parsed = [ipaddress.ip_address(line.split()[0]) for line in lines]
+        if any(address.version != 4 for address in parsed):
+            raise ValueError()
+        addresses = {str(address) for address in parsed}
+    except (ValueError, IndexError):
+        raise Incomplete("DNS answer is not IPv4.") from None
+    evidence.need(addresses == {api_ip}, "DNS answer does not match API ClusterIP.")
+    return "kubernetes.default.svc.cluster.local"
+
+
+def _uid(obj):
+    uid = obj.get("metadata", {}).get("uid")
+    if not isinstance(uid, str) or not lifecycle.UID.fullmatch(uid):
+        raise Incomplete("Fixture Pod UID missing or invalid.")
+    return uid
+
+
+class Collector:
+    """Only observes independently supplied fixture references; never returns PASS."""
+    def __init__(self, owner, api, image_ids, *, clock=time.monotonic, sleep=time.sleep):
+        if (not isinstance(owner, lifecycle.Lifecycle) or
+                not isinstance(api, adapter.FixtureAPI) or getattr(api, "owner", None) is not owner or
+                owner.closed or owner.deadline is None or
+                set(owner.owned) != set(owner.names)):
+            raise Incomplete("Owned fixture Lifecycle and adapter required.")
+        if (not isinstance(image_ids, dict) or
+                set(image_ids) != {"controller", "webhook", "agent", "gateway", "plugin", "server", "tools"} or
+                not all(isinstance(v, str) and re.fullmatch(
+                    r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", v) for v in image_ids.values())):
+            raise Incomplete("Seven immutable expected runtime image IDs required.")
+        self.owner, self.api, self.ids = owner, api, dict(image_ids)
+        self.clock, self.sleep = clock, sleep
+
+    def _deadline(self, seconds):
+        end = min(self.owner.deadline, self.clock() + seconds)
+        if self.owner.closed or self.clock() >= end:
+            raise Incomplete("Synthetic evidence collection deadline exceeded.")
+        return end
+
+    def _exec(self, uid, name):
+        try:
+            return self.api.exec(self.owner.names[1], "synthetic-client", uid, "client", name,
+                                 expected_image_id=self.ids["tools"])
+        except adapter.AdapterError:
+            raise Incomplete("Bounded client command unavailable or UID/image mismatch.") from None
+
+    def _get(self, kind, name, namespace):
+        try:
+            return self.api.get(kind, name, namespace)
+        except adapter.AdapterError:
+            raise Incomplete("Owned Kubernetes object unavailable.") from None
+
+    def poll(self, probe, *, budget=35, interval=1):
+        if not 0 < budget <= 60 or not 0 < interval <= 3:
+            raise Incomplete("Polling bounds invalid.")
+        end = self._deadline(budget)
+        while self.clock() < end:
+            try:
+                result = probe()
+                if result is not None:
+                    return result
+            except (adapter.AdapterError, evidence.EvidenceError, Incomplete):
+                pass  # transient eventual consistency; never log untrusted data
+            remaining = end - self.clock()
+            if remaining > 0:
+                self.sleep(min(interval, remaining))
+        raise Incomplete("Synthetic evidence did not converge before deadline.")
+
+    def gateway_status(self, *, budget=35):
+        """Poll existing Gateway only; status alone never proves TLS/session."""
+        namespace = self.owner.names[0]
+        def observed():
+            gateway = self._get("egressgateway", "synthetic", namespace)
+            meta, status = gateway.get("metadata", {}), gateway.get("status", {})
+            if (meta.get("namespace") != namespace or meta.get("name") != "synthetic" or
+                    not isinstance(meta.get("uid"), str) or not lifecycle.UID.fullmatch(meta["uid"]) or
+                    not isinstance(meta.get("generation"), int) or
+                    status.get("observedGeneration") != meta["generation"] or
+                    not evidence.condition(gateway, "Ready", "True", meta["generation"])):
+                return None
+            return gateway
+        return self.poll(observed, budget=budget)
+
+    def assert_gateway_graph(self, gateway, deployment, replica_set, pod, children):
+        """Validate supplied owner-linked snapshot; does not GET Secrets."""
+        if gateway.get("metadata", {}).get("namespace") != self.owner.names[0]:
+            raise Incomplete("Gateway namespace is not owned by Lifecycle.")
+        return evidence.assert_gateway_chain(gateway, deployment, replica_set, pod, children, self.ids)
+
+    def source_and_client(self, server, service, endpoint_slice, client, gateway_id, endpoint):
+        ns, apps = self.owner.names
+        evidence.need(server["metadata"].get("namespace") == ns and
+                      client["metadata"].get("namespace") == apps and
+                      server["metadata"].get("uid") and client["metadata"].get("uid"),
+                      "Fixture Pod namespaces or UIDs differ from owned lifecycle.")
+        evidence.need(_uid(server) == _uid(self._get("pod", "synthetic-vpn", ns)) and
+                      _uid(client) == _uid(self._get("pod", "synthetic-client", apps)),
+                      "Fixture Pod UID changed during evidence collection.")
+        try:
+            images_match = (self.api.pod_image_id(ns, "synthetic-vpn", "server", _uid(server)) == self.ids["server"] and
+                            self.api.pod_image_id(apps, "synthetic-client", "client", _uid(client)) == self.ids["tools"])
+        except adapter.AdapterError:
+            raise Incomplete("Fixture runtime image lookup unavailable.") from None
+        evidence.need(images_match, "Live fixture Pod runtime image IDs differ from approved builds.")
+        evidence.assert_source_service(service, server, self.ids["server"])
+        evidence.assert_source_endpoint(endpoint_slice, service, server)
+        evidence.assert_restricted_client(client, apps, gateway_id, endpoint, self.ids["tools"])
+        uid = _uid(client)
+        marker = _parse_json(self._exec(uid, "agent-marker"))
+        evidence.assert_agent_marker(marker)
+        return uid
+
+    def selected_traffic(self, client_uid, gateway_id, endpoint):
+        """Success is *local evidence only*, not TLS/session or full e2e PASS."""
+        before_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
+        evidence.need(type(before_link.get("ifindex")) is int and before_link["ifindex"] > 0,
+                      "GENEVE device index unavailable.")
+        before = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        # Check that idle selected-link traffic did not already advance.
+        baseline = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        evidence.need(baseline == before, "GENEVE background traffic invalidates marker counter attribution.")
+        body = self._exec(client_uid, "vpn-marker")
+        after = _tx_bytes(self._exec(client_uid, "geneve-bytes"))
+        after_link = _geneve(self._exec(client_uid, "geneve-link"), gateway_id, endpoint)
+        evidence.need(before_link["ifindex"] == after_link["ifindex"],
+                      "GENEVE device identity changed during probe.")
+        evidence.assert_selected_tunnel(baseline, after, body, after_link, gateway_id, endpoint)
+        evidence.need(self._exec(client_uid, "vpn-exit") == evidence.EXIT,
+                      "Upstream tunnel exit marker mismatch.")
+        return after - baseline
+
+    def direct_dns(self, client_uid, api_ip, exclusions):
+        # No insecure curl to API is available in the adapter; only DNS
+        # resolution is observable here. DNS is NOT a substitute for API TLS.
+        address = str(evidence.ipv4(api_ip))
+        name = _dns(self._exec(client_uid, "direct-dns"), address)
+        try:
+            excluded = any(ipaddress.ip_address(address) in ipaddress.ip_network(x["cidr"], strict=True)
+                           for x in exclusions if x.get("source") in ("serviceCIDR", "apiserver"))
+        except (ValueError, KeyError, TypeError):
+            raise Incomplete("Gateway exclusion CIDR evidence is malformed.") from None
+        evidence.need(excluded, "API ClusterIP is not excluded from selected datapath.")
+        return name
+
+    def final_result(self):
+        # No server interruption/recovery, authenticated TLS session capture,
+        # UID-atomic kubectl exec, or direct API TLS check exists here.
+        raise Incomplete("Full synthetic VPN final gate cannot certify PASS: missing TLS, API, safe outage/recovery and UID-atomic exec proof.")

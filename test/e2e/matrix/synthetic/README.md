@@ -1,5 +1,21 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+## Isolated no-PASS evidence collector
+
+`collector.py` accepts only an active, owned `Lifecycle` and its `FixtureAPI`.
+It bounds Gateway status polling, validates UID-pinned fixture server/client
+images and owner-linked evidence, parses actual iproute2 single-object JSON
+(`linkinfo.info_data.id`/`remote`, `stats64.tx.bytes`) from fixed client
+commands, requires stable GENEVE link identity and idle TX counter before
+checking a selected marker request increased its TX bytes, and compares DNS
+answers with the excluded API ClusterIP. Its `final_result()` **always raises
+INCOMPLETE**. There is no CLI, resource creation, PKI invocation, report PASS,
+server-side exec or change to `run.py`. The module does *not* observe an
+authenticated OpenVPN TLS session, perform a direct API TLS request, interrupt
+or restart the server, prove endpoint withdrawal/recovery, or eliminate the
+kubectl exec UID race. These remain hard blockers; a marker and counter delta
+are not independently sufficient for full VPN e2e. Pure fake-adapter tests only.
+
 ## Bounded fixture adapter (not wired into execution)
 
 `adapter.py` is a **building block only**, not a runner and not an e2e PASS
