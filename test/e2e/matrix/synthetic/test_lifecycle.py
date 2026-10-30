@@ -60,6 +60,12 @@ class LifecycleTests(unittest.TestCase):
     def runner(self, api):
         return module.Lifecycle(api, token_factory=lambda: TOKEN)
 
+    def test_lifecycle_app_namespace_matches_gateway_selector(self):
+        life = self.runner(FakeAPI())
+        apps = module._namespace(life.names[1], life.token, True)
+        self.assertEqual(apps["metadata"]["labels"]["ratatoskr-synthetic"], life.names[0])
+        self.assertEqual(apps["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "restricted")
+
     def test_success_private_dir_both_namespace_deletions(self):
         api = FakeAPI()
         with self.runner(api) as life:

@@ -38,8 +38,8 @@ def deployment(component):
                          {"name": "DRIVER", "value": "agent"}, {"name": "DATAPATH", "value": "iproute"},
                          {"name": "GATEWAY_UPSTREAM_PROBE_URL", "value": run.PROBE},
                          {"name": "IMAGE_PULL_POLICY", "value": "Never"},
-                         {"name": "GATEWAY_IMAGE", "value": "gateway-local"},
-                         {"name": "OPENVPN_IMAGE", "value": "plugin-local"},
+                         {"name": "GATEWAY_IMAGE", "value": "ghcr.io/skaldhall/ratatoskr-gateway:dev"},
+                         {"name": "OPENVPN_IMAGE", "value": "ratatoskr-openvpn:m1-local"},
                          {"name": "INIT_IMAGE", "value": "ratatoskr-tools:m1-local"}]}]}}},
             "status": {"observedGeneration": 1, "availableReplicas": 1, "updatedReplicas": 1,
                        "readyReplicas": 1}}
@@ -133,6 +133,49 @@ class GateTests(unittest.TestCase):
             self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke"], env,
                                       lambda: FakeAPI(),
                                       lambda _ids: (_ for _ in ()).throw(run.node_images.Blocked("SECRET"))), 1)
+
+    def test_fourth_gateway_mutation_flag_requires_all_other_gates(self):
+        seen = []
+        def smoke(_ids):
+            seen.append("smoke")
+            return False
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        for args, vars in (
+                (["--execute", "--execute-partial-gateway"], env),
+                (["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
+                 dict(env, RATATOSKR_E2E_PARTIAL_VPN_SMOKE="0")),
+                (["--allow-partial-vpn-smoke", "--execute-partial-gateway"], env)):
+            with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run.main(args, vars, lambda: (_ for _ in ()).throw(AssertionError("API called")),
+                                          lambda _ids: (_ for _ in ()).throw(AssertionError("CRI called")), smoke), 2)
+        self.assertEqual(seen, [])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
+                                      env, FakeAPI, lambda _ids: True, smoke), 4)
+        self.assertEqual(seen, ["smoke"])
+        self.assertIn("INCOMPLETE", output.getvalue())
+        self.assertIn("Selected/agent/fail-close/recovery NOT TESTED", output.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
+                                      env, FakeAPI, lambda _ids: True,
+                                      lambda _ids: (_ for _ in ()).throw(RuntimeError("SECRET"))), 1)
+        self.assertEqual(seen, ["smoke"])
+
+    def test_gateway_smoke_blocks_stale_controller_image_refs_before_mutation(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        api = FakeAPI()
+        config = api.objects[("deployment", "ratatoskr-controller", "operator", None)]
+        values = config["spec"]["template"]["spec"]["containers"][0]["env"]
+        next(item for item in values if item["name"] == "OPENVPN_IMAGE")["value"] = "stale:local"
+        called = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--execute", "--allow-partial-vpn-smoke", "--execute-partial-gateway"],
+                                      env, lambda: api, lambda _ids: True,
+                                      lambda _ids: called.append(True)), 1)
+        self.assertEqual(called, [])
 
     def test_partial_smoke_missing_image_id_fails_before_api(self):
         env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}

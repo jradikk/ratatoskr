@@ -173,27 +173,58 @@ def preflight(api, ids):
     return namespace
 
 
-def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None):
+def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smoke=None):
     parser = argparse.ArgumentParser(description="Read-only synthetic VPN final-gate preflight (never e2e PASS)")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--allow-partial-vpn-smoke", action="store_true")
+    parser.add_argument("--execute-partial-gateway", action="store_true")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     if (not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
-            args.allow_partial_vpn_smoke and env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1"):
+            args.allow_partial_vpn_smoke and env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1" or
+            args.execute_partial_gateway and not args.allow_partial_vpn_smoke):
         print("SKIPPED: missing explicit final-gate/partial-smoke authorization; no cluster accessed.")
         return 2
     try:
         ids = expected_ids(env)
-        preflight(api_factory(), ids)
+        api = api_factory()
+        namespace = preflight(api, ids)
         if args.allow_partial_vpn_smoke:
             verifier = node_images.verify if node_verify is None else node_verify
             verifier({component: ids[component] for component in node_images.TAGS})
+            if args.execute_partial_gateway:
+                deployment = api.get("deployment", "ratatoskr-controller", namespace)
+                containers = [c for c in deployment["spec"]["template"]["spec"]["containers"]
+                              if c.get("name") == "controller"]
+                if len(containers) != 1:
+                    raise Blocked("Controller image configuration unavailable for partial Gateway.")
+                environment = {item.get("name"): item.get("value") for item in containers[0].get("env", [])}
+                if (environment.get("GATEWAY_IMAGE") != "ghcr.io/skaldhall/ratatoskr-gateway:dev" or
+                        environment.get("OPENVPN_IMAGE") != "ratatoskr-openvpn:m1-local" or
+                        environment.get("GATEWAY_UPSTREAM_PROBE_URL") != PROBE or
+                        environment.get("IMAGE_PULL_POLICY") != "Never"):
+                    raise Blocked("Controller private-probe/owned image references do not match local imports.")
     except (Blocked, node_images.Blocked, KeyError, IndexError, StopIteration, TypeError, AttributeError):
         # API objects/errors are untrusted: never print their content.
         print("FAILED: synthetic final-gate preflight blocked; no resources created. Inspect release/operator preflight privately.")
         return 1
-    if args.allow_partial_vpn_smoke:
+    if args.execute_partial_gateway:
+        try:
+            if smoke is None:
+                try:
+                    from . import partial_gateway
+                except ImportError:
+                    import partial_gateway
+                smoke = partial_gateway.execute
+            smoke(ids)
+        except (KeyboardInterrupt, SystemExit):
+            print("FAILED: partial Gateway smoke interrupted; verify cleanup and orphan state.")
+            return 1
+        except BaseException:
+            print("FAILED: partial Gateway smoke or cleanup blocked; no raw API or private data retained. Inspect UID-owned namespace orphan state privately.")
+            return 1
+        print("INCOMPLETE: partial synthetic OpenVPN Gateway smoke observed real healthy owner/status/TLS evidence and verified both namespace/PKI cleanup. Selected/agent/fail-close/recovery NOT TESTED; no M8 PASS.")
+    elif args.allow_partial_vpn_smoke:
         print("INCOMPLETE: read-only three-node CRI config image IDs matched explicit expectations; release and private probe preflight passed. Partial synthetic VPN smoke remains BLOCKED before resource creation pending runtime safety review. No resources, PKI or Pods created; no VPN traffic tested.")
     else:
         print("INCOMPLETE: existing flannel/agent release and probe preflight passed; gateway/plugin/server/tools/witness/selected runtime IDs, TLS tunnel, DNS/API, fail-close and cleanup evidence NOT TESTED. No resources created.")

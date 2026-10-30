@@ -375,6 +375,54 @@ class FixtureAPI:
             except BaseException:
                 raise AdapterError("Probe-only ConfigMap restoration unverified; no PASS permitted.") from None
 
+    def list_owned_gateway_pods(self, namespace, gateway_uid):
+        """One exact labelled Pod; caller must check Deployment→RS→Pod chain."""
+        if (namespace != self.owner.names[0] or not isinstance(gateway_uid, str) or
+                not UID.fullmatch(gateway_uid)):
+            raise AdapterError("Gateway UID or namespace invalid.")
+        self._namespace(namespace)
+        selector = "ratatoskr.skaldhall.io/gateway-name=synthetic,ratatoskr.skaldhall.io/gateway-uid=" + gateway_uid
+        raw = self._call(["get", "pods", "--namespace", namespace, "-l", selector, "-o", "json"],
+                         max_output=32768)
+        try:
+            response = json.loads(raw)
+            pods = response["items"]
+            if (response.get("kind") != "PodList" or not isinstance(pods, list) or len(pods) != 1 or
+                    pods[0].get("kind") != "Pod" or pods[0]["metadata"].get("namespace") != namespace or
+                    pods[0]["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway-uid") != gateway_uid or
+                    pods[0]["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway-name") != "synthetic" or
+                    not isinstance(pods[0]["metadata"].get("uid"), str) or
+                    not UID.fullmatch(pods[0]["metadata"]["uid"])):
+                raise ValueError()
+            return pods[0]
+        except (ValueError, KeyError, AttributeError, TypeError, IndexError):
+            raise AdapterError("Gateway Pod list identity or count invalid.") from None
+
+    def source_endpoint(self, namespace, service, server):
+        """Find one UDP EndpointSlice bound to the exact server Pod UID/IP."""
+        if namespace != self.owner.names[0] or service.get("metadata", {}).get("name") != "synthetic-vpn":
+            raise AdapterError("Synthetic source namespace or Service invalid.")
+        self._namespace(namespace)
+        raw = self._call(["get", "endpointslices", "--namespace", namespace,
+                          "-l", "kubernetes.io/service-name=synthetic-vpn", "-o", "json"],
+                         max_output=16384)
+        try:
+            listed = json.loads(raw)
+            slices = listed["items"]
+            if listed.get("kind") != "EndpointSliceList" or not isinstance(slices, list) or len(slices) != 1:
+                raise ValueError()
+        except (ValueError, KeyError, AttributeError, TypeError):
+            raise AdapterError("Synthetic source EndpointSlice list malformed.") from None
+        try:
+            from . import evidence
+        except ImportError:
+            import evidence
+        try:
+            evidence.assert_source_endpoint(slices[0], service, server)
+            return slices[0]
+        except (evidence.EvidenceError, KeyError, TypeError, AttributeError):
+            raise AdapterError("Synthetic source EndpointSlice target UID/IP invalid.") from None
+
     def pod_image_id(self, namespace, name, container, uid):
         if (name, container, namespace) not in {
                 ("synthetic-client", "client", self.owner.names[1]),

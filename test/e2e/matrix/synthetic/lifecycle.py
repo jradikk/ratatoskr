@@ -31,9 +31,11 @@ class Interrupted(LifecycleError):
 
 
 def _namespace(name, token, apps):
-    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {
-        "name": name, "labels": {LABEL: token, "pod-security.kubernetes.io/enforce":
-                             "restricted" if apps else "privileged"}}}
+    labels = {LABEL: token, "pod-security.kubernetes.io/enforce": "restricted" if apps else "privileged"}
+    if apps:
+        # Must match Gateway.allowedNamespaces selector in the synthetic fixture.
+        labels["ratatoskr-synthetic"] = name.removesuffix("-apps")
+    return {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name, "labels": labels}}
 
 
 class KubectlAPI:

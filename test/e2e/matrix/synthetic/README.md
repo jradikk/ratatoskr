@@ -1,6 +1,42 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
-## Triple-opt-in partial smoke preflight remains blocked before mutation
+## Explicit fourth-gate partial Gateway smoke (NOT an M8 e2e PASS)
+
+Only `run.py --execute --allow-partial-vpn-smoke --execute-partial-gateway`
+with both `RATATOSKR_E2E_FINAL_GATE=1` and
+`RATATOSKR_E2E_PARTIAL_VPN_SMOKE=1` can enter `partial_gateway.py`. Without
+these guards, no cluster access or mutation occurs. Existing healthy three-node
+flannel, controller/webhook/agent immutable runtime IDs, aligned agent/iproute
+release and exact private probe, plus all six fixed local images' matching
+node CRI config IDs are checked **before** generating PKI or namespaces. The
+runner never builds/imports images, upgrades a release, provisions VMs or
+changes CNI. This is intentionally separate from full M8 traffic coverage.
+
+`Lifecycle` owns two UUID namespaces, a 0700 outside-repo PKI directory, and
+bounded signal/failure cleanup. Only eight allowlisted resources are created
+using UID-returned stdin-only JSON: server/client/witness Secrets, private
+exit-health ConfigMap, actual synthetic OpenVPN server Pod, UDP1194-only
+Service, real controller EgressGateway and EgressPolicy. Neither witness nor
+selected workload Pod is created. The observer polls only API objects, checks
+server UID/runtime image, Service EndpointSlice target UID/IP, Gateway Ready
+observed generation and measured MTU, controlled Gateway→Deployment→RS→Pod
+owner chain plus owned Service/ConfigMap/NetworkPolicy, exact plugin probe
+args and gateway/plugin runtime images, and sanitized authenticated server
+OpenVPN session from a fixed UID/image-checked reader. All polls, CLI calls,
+PKI steps and cleanup are bounded. No profile, Secret, raw manifest, Pod log
+or OpenVPN status is printed or persisted as an artifact. The smoke exits
+**4 / INCOMPLETE** even if all assertions and both-namespace deletion pass.
+An ambiguous CREATE, stale release/image, missing endpoint/status/session,
+API timeout or unverified cleanup exits **1 / FAILED** with sanitized output;
+SIGKILL, API loss or node failure still require operator orphan remediation.
+This smoke does **not** establish restricted agent routing, selected marker
+traffic, fail-close, recovery, DNS/API preservation or matrix PASS.
+
+During authoring, only fake API/PKI tests were run. Parent/operator must
+confirm actual Kubernetes admission, OpenVPN TUN/device behavior, image
+runtime IDs and Secret cleanup at an explicitly authorized final gate.
+
+## Triple-opt-in partial smoke preflight remains read-only
 
 `run.py --execute --allow-partial-vpn-smoke` additionally requires both
 `RATATOSKR_E2E_FINAL_GATE=1` and `RATATOSKR_E2E_PARTIAL_VPN_SMOKE=1`.
