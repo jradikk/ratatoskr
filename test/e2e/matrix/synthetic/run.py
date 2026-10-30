@@ -311,6 +311,16 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         except (KeyboardInterrupt, SystemExit):
             print("FAILED: init-driver/nonrestricted smoke interrupted; verify UID-owned cleanup and Helm restoration privately.")
             return 1
+        except init_traffic.Blocked as err:
+            # Only fixed labels authored in the trusted fixture reach stdout.
+            print("FAILED: " + str(err) + " UID-owned cleanup was attempted; restore agent release.")
+            return 1
+        except init_traffic.lifecycle.LifecycleError:
+            print("FAILED: init-driver namespace or private PKI cleanup unverified; restore agent release.")
+            return 1
+        except init_traffic.adapter.AdapterError:
+            print("FAILED: init-driver allowlisted CREATE/API transport blocked; restore agent release.")
+            return 1
         except BaseException:
             print("FAILED: init-driver/nonrestricted smoke or cleanup blocked; inspect private orphan state and restore parent-managed agent release.")
             return 1
