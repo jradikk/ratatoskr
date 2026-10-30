@@ -322,6 +322,21 @@ owner-chain/agent/traffic/negative-path assertions and verified cleanup remains
 required before healthy controller-created Gateway acceptance. The two direct-
 config fake cells and four-mode API admission checks do not establish it.
 
+A subsequent **read-only** synthetic preflight (`75850f0`) requires both explicit
+final-gate switches and seven immutable expected runtime image IDs before
+querying an existing cluster. It verifies the three-node flannel/no-mesh
+release, fail-closed admission, controller/webhook/agent owner chains, readiness
+and runtime IDs, and the configured private probe. Even on success it exits
+**INCOMPLETE / 4**: gateway/plugin/server/tools image IDs are not compared to
+running Pods; no PKI, Secret, Gateway, synthetic Pod, tunnel, agent marker,
+withdrawal/recovery or cleanup was exercised. A follow-up hardening
+(`db49a6b`) requires updated ready rollout replicas, local image pull policies
+and aligned admission configuration. Five
+cluster-free tests and synthetic/matrix/admission static checks passed. This
+read-only check does **not** complete the bounded execution runner or count
+toward M8 compatibility.
+
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
