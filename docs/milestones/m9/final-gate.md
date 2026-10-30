@@ -416,6 +416,18 @@ OpenVPN/TUN, API TLS/ConfigMap projection, agent programming, same-interval
 witness and outage/recovery sequencing remain unverified in the cluster;
 M8/M9 stay INCOMPLETE.
 
+`f07cba3` added an import-only, no-PASS dry-run checkpoint planner for the
+nine-image fixture and ordered healthy→withdrawal→witness→recovery→cleanup
+sequence. Local synthetic server, independent witness and restricted one-shot
+client images were built on this VM without pushing or importing them into the
+cluster. The server image reports OpenVPN 2.6.14 and Python 3.13.5; the client
+image contains `getent`. All three local builds passed after an intentionally
+offline build failed because Debian package indexes were unavailable without
+network access. Docker image creation is **not** a Kubernetes runtime test:
+there was no PKI generation, Secret, Gateway, Pod, VPN session or traffic in
+this step. The planner still raises INCOMPLETE and real status-format/device,
+TLS, projected ConfigMap and cleanup behavior remain unverified.
+
 `ddb0ddf` added a second zero-label, loopback-only gateway gauge for measured
 effective MTU (0 when unready/unknown). Focused race tests, lint and vet
 passed; flow counts, live peers, handshake age and external scraping remain
