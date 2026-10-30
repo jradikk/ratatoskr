@@ -336,6 +336,16 @@ cluster-free tests and synthetic/matrix/admission static checks passed. This
 read-only check does **not** complete the bounded execution runner or count
 toward M8 compatibility.
 
+A reusable, **unwired** namespace/PKI lifecycle helper (`ebe57dd`) now provides
+random namespace prechecks, server-returned UID ownership, UID-conditional
+DELETE, verified absence, a private 0700 directory and bounded SIGINT/SIGTERM
+cleanup. Eighteen cluster-free tests cover error/race/cleanup paths, but the
+raw UID-conditional kubectl transport has **not been validated against this
+cluster**. It is not invoked by the read-only preflight, and neither actual
+credentials nor Kubernetes objects were created in authoring. An ambiguous
+CREATE without a returned UID cannot be safely deleted automatically; this
+requires operator orphan inspection and cannot count as a PASS. Full runtime
+traffic and fail-close evidence remains unimplemented.
 
 ## Release blockers / next gate
 

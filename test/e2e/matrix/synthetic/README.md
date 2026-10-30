@@ -54,11 +54,12 @@ blocked boundary rather than a partial positive traffic test. In particular,
 there is no unsafe namespace create with unverified cleanup and no persistent
 secret manifest in this preflight.
 
-**Unresolved full-gate blockers:** The existing fixture has no lifecycle/cleanup
-owner, and the current runner does not create or contain temporary mode-0700
-PKI, two UUID namespaces, API-side UID-scoped deletion, signal handling or
-verified post-delete absence. It cannot compare the four fixture/runtime image
-IDs until trusted, externally built/imported Pods are created. It checks the
+**Unresolved full-gate blockers:** The separate lifecycle helper has not
+been wired to the read-only runner or proven on this cluster. In particular,
+the UID-conditional raw kubectl DELETE transport needs live verification before
+resource creation. The runner does not create PKI or namespaces and cannot
+compare the four fixture/runtime image IDs until trusted, externally
+built/imported Pods are created. It checks the
 controller's literal configured probe but cannot establish operator chart
 release provenance or inspect a rendered plugin's `--probe-url` without first
 creating a Gateway. There is no implemented evidence collector for the exact
