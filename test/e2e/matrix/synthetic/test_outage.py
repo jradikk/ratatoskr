@@ -136,6 +136,67 @@ class OutageTests(unittest.TestCase):
                                            observer=observer, healthy=healthy))
         return owner.events
 
+    def test_selected_timeout_categories_never_include_untrusted_status_or_logs(self):
+        base = {"gatewayUID": UID, "gatewayPodUID": UID, "gatewayID": 9, "endpoint": "10.42.0.5"}
+        def pod(phase="Pending", init=None, annotations=None, image_id=None):
+            status = {"phase": phase, "podIP": "10.42.2.5", "initContainerStatuses": init or [],
+                      "containerStatuses": [{"name": "client", "ready": True,
+                                             "imageID": image_id or IMAGE}],
+                      "conditions": [{"type": "Ready", "status": "True"}],
+                      "message": "PRIVATE_ERROR_SHOULD_NOT_LEAK"}
+            return {"metadata": {"uid": UID, "annotations": annotations or {},
+                                  "message": "PRIVATE_ERROR_SHOULD_NOT_LEAK"},
+                    "spec": {"nodeName": "agent-0"}, "status": status}
+        pending = pod()
+        self.assertEqual(o.selected_wait_category(pending, UID, IMAGE, base), "wait-init-pending")
+        wrong_uid = pod()
+        wrong_uid["metadata"]["uid"] = "f" * 32
+        self.assertEqual(o.selected_wait_category(wrong_uid, UID, IMAGE, base), "uid-changed")
+        failed = pod("Failed")
+        self.assertEqual(o.selected_wait_category(failed, UID, IMAGE, base), "pod-failed")
+        terminated = [{"name": "ratatoskr-init", "state": {"terminated": {"exitCode": 1,
+                       "message": "PRIVATE_ERROR_SHOULD_NOT_LEAK"}}}]
+        self.assertEqual(o.selected_wait_category(pod(init=terminated), UID, IMAGE, base), "wait-init-failed")
+        unscheduled = pod()
+        unscheduled["spec"].pop("nodeName")
+        self.assertEqual(o.selected_wait_category(unscheduled, UID, IMAGE, base), "unscheduled")
+        gateway = {"metadata": {"uid": UID}, "status": {"endpoints": [{
+            "podIP": "10.42.0.5", "podUID": UID,
+            "appliedClientConfigHash": "0" * 64}]}}
+        self.assertEqual(o.selected_wait_category(pending, UID, IMAGE, base, gateway), "wait-init-pending")
+        gateway["status"]["endpoints"][0]["appliedClientConfigHash"] = ""
+        self.assertEqual(o.selected_wait_category(pending, UID, IMAGE, base, gateway), "gateway-ack-pending")
+        gateway["status"]["endpoints"][0]["appliedClientConfigHash"] = "0" * 64
+        gateway["metadata"]["uid"] = "e" * 32
+        self.assertEqual(o.selected_wait_category(pending, UID, IMAGE, base, gateway), "gateway-identity-changed")
+        running = pod("Running", [{"name": "ratatoskr-init", "state": {"terminated": {"exitCode": 0}}}])
+        self.assertEqual(o.selected_wait_category(running, UID, IMAGE, base), "agent-readiness-pending")
+        running["status"]["containerStatuses"][0]["imageID"] = "unknown"
+        self.assertEqual(o.selected_wait_category(running, UID, IMAGE, base), "app-image-pending")
+        self.assertTrue(all("PRIVATE_ERROR" not in label for label in (
+            o.selected_wait_category(p, UID, IMAGE, base) for p in (pending, failed, running))))
+
+    def test_running_selected_diagnosis_does_not_replace_strict_acceptance(self):
+        owner = Owner()
+        api = API(owner)
+        def pending_pod(kind, name, namespace):
+            if kind != "pod" or name != "synthetic-client" or namespace != owner.names[1]:
+                raise o.adapter.AdapterError("PRIVATE_API_ERROR")
+            return {"metadata": {"uid": UID}, "spec": {"nodeName": "agent-0"},
+                    "status": {"phase": "Pending", "podIP": "10.42.2.5"}}
+        api.get = pending_pod
+        diagnosis = {}
+        base = {"gatewayUID": UID, "gatewayPodUID": UID, "gatewayID": 9, "endpoint": "10.42.0.5"}
+        self.assertIsNone(o.observe_running_selected(api, owner.names[1], UID, IMAGE, base,
+                                                     "10.43.0.1", diagnosis))
+        self.assertEqual(diagnosis, {"category": "wait-init-pending"})
+        def malformed_pod(kind, name, namespace):
+            raise o.adapter.AdapterError("PRIVATE_API_ERROR")
+        api.get = malformed_pod
+        with self.assertRaises(o.adapter.AdapterError):
+            o.observe_running_selected(api, owner.names[1], UID, IMAGE, base, "10.43.0.1", diagnosis)
+        self.assertEqual(diagnosis, {"category": "api-unavailable"})
+
     def test_probe_body_failure_preserves_fixed_stage_after_verified_cleanup(self):
         owner = Owner()
         api = API(owner)

@@ -95,6 +95,71 @@ def selected_ready(api, apps, name, uid, image_id, baseline, *, api_ip):
     return pod
 
 
+def selected_wait_category(pod, uid, image_id, baseline, gateway=None):
+    """Fixed diagnostic only. Never turns pending status into acceptance proof.
+
+    This reads only public status/shape, not Pod logs, ConfigMap data or tokens.
+    The caller already has the Pod from the exact UID-owned namespace.
+    """
+    meta, spec, status = pod.get("metadata", {}), pod.get("spec", {}), pod.get("status", {})
+    if meta.get("uid") != uid or meta.get("deletionTimestamp"):
+        return "uid-changed"
+    if status.get("phase") == "Failed":
+        return "pod-failed"
+    init = [v for v in status.get("initContainerStatuses", []) if v.get("name") == "ratatoskr-init"]
+    if len(init) > 1:
+        return "admission-contract"
+    if init:
+        terminated = init[0].get("state", {}).get("terminated")
+        if isinstance(terminated, dict) and terminated.get("exitCode") != 0:
+            return "wait-init-failed"
+    if not spec.get("nodeName") or not status.get("podIP"):
+        return "unscheduled"
+    if not init or init[0].get("state", {}).get("terminated", {}).get("exitCode") != 0:
+        # The agent refuses to open a selected path until the Gateway confirms
+        # that this PodIP is present in its applied, UID-bound config.
+        if gateway is not None and (gateway.get("metadata", {}).get("uid") != baseline["gatewayUID"] or
+                                    gateway.get("metadata", {}).get("deletionTimestamp")):
+            return "gateway-identity-changed"
+        if gateway is None:
+            return "wait-init-pending"
+        endpoints = gateway.get("status", {}).get("endpoints", [])
+        matched = [e for e in endpoints if e.get("podIP") == baseline["endpoint"]]
+        if len(matched) != 1 or (matched[0].get("podUID") != baseline["gatewayPodUID"] or
+                                 not isinstance(matched[0].get("appliedClientConfigHash"), str) or
+                                 len(matched[0]["appliedClientConfigHash"]) != 64):
+            return "gateway-ack-pending"
+        return "wait-init-pending"
+    containers = [v for v in status.get("containerStatuses", []) if v.get("name") == "client"]
+    if len(containers) != 1 or containers[0].get("imageID") != image_id:
+        return "app-image-pending"
+    if status.get("phase") != "Running" or not containers[0].get("ready"):
+        return "app-not-ready"
+    if meta.get("annotations", {}).get(evidence.PREFIX + "datapath-ready") != "true":
+        return "agent-readiness-pending"
+    if not evidence.condition(pod, "Ready", "True"):
+        return "pod-ready-pending"
+    return "contract-or-config-mismatch"
+
+
+def observe_running_selected(api, apps, uid, image_id, baseline, api_ip, diagnosis):
+    """Keep a fixed last-seen category for a bounded timeout only."""
+    diagnosis["category"] = "api-unavailable"
+    pod = api.get("pod", "synthetic-client", apps)
+    gw = None
+    if (pod.get("status", {}).get("phase") != "Running" or
+            not any(v.get("state", {}).get("terminated", {}).get("exitCode") == 0
+                    for v in pod.get("status", {}).get("initContainerStatuses", [])
+                    if v.get("name") == "ratatoskr-init")):
+        try:
+            gw = api.get("egressgateway", "synthetic", apps[:-5])
+        except adapter.AdapterError:
+            pass  # API unavailability cannot be evidence of a missing ack.
+    diagnosis["category"] = selected_wait_category(pod, uid, image_id, baseline, gw)
+    # The strict acceptance predicate remains the sole success condition.
+    return selected_ready(api, apps, "synthetic-client", uid, image_id, baseline, api_ip=api_ip)
+
+
 def marker_ready(api, namespace, uid, image_id):
     """Only the exact selected Pod netns's UP dummy marker qualifies."""
     raw = api.exec(namespace, "synthetic-client", uid, "client", "agent-marker",
@@ -182,8 +247,17 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             if (running["kind"], running["namespace"], running["name"]) != ("Pod", apps, "synthetic-client"):
                 raise Blocked("Running selected Pod CREATE identity mismatch.")
             stage = "running-selected-ready"
-            poll(owner, "running-selected", lambda: selected_ready(api, apps, "synthetic-client", uid,
-                 ids["selected"], baseline, api_ip=str(address)), seconds=90, clock=clock, sleep=sleep)
+            diagnosis = {"category": "api-unavailable"}
+            try:
+                poll(owner, "running-selected", lambda: observe_running_selected(api, apps, uid,
+                     ids["selected"], baseline, str(address), diagnosis),
+                     seconds=90, clock=clock, sleep=sleep)
+            except Blocked as failure:
+                if str(failure) != "Outage/recovery did not converge at running-selected.":
+                    raise
+                # category comes only from our private, fixed allowlist above;
+                # never surface Kubernetes fields or underlying error strings.
+                raise Blocked("Running selected did not converge at " + diagnosis["category"] + ".") from None
             stage = "running-selected-marker"
             marker_ready(api, apps, uid, ids["selected"])
             stage = "running-selected-healthy"

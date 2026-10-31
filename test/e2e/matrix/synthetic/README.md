@@ -571,6 +571,16 @@ python3 test/e2e/matrix/synthetic/static-check.py
 sh -n test/e2e/matrix/synthetic/server/start.sh
 ```
 
+A timeout of the second, **long-lived** restricted selected workload records
+only a fixed public-status category: unscheduled, wait-init pending/failed,
+Gateway owner/ack pending, app image/start pending, agent annotation pending,
+Pod Ready pending, or contract/config mismatch. This is diagnostic only;
+`selected_ready` retains its exact admission, UID, security, image, annotation
+and policy checks, and the timeout is unchanged. No status message, Pod log,
+Secret, raw ConfigMap or API exception content reaches the report. A fresh Pod
+may need the controller→Gateway applied-client-config acknowledgment before
+its wait-init completes; the category alone cannot establish that cause.
+
 On a bounded outage runner failure, fixed checkpoint labels distinguish a
 body `AdapterError` (including the selected/witness exec return category) after
 successful UID-owned cleanup from a true namespace/private-PKI cleanup failure.
