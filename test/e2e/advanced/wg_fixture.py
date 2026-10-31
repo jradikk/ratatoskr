@@ -118,14 +118,24 @@ class OperatorFixture:
         self.attempted = set()
         self.deleted_selected_uid = None
 
-    def _call(self, args, *, payload=None, output=2048):
+    def _call(self, args, *, payload=None, output=2048, discard_output=False):
         remaining = min(10, getattr(self, "cleanup_deadline", self.owner.deadline) - self.owner.clock())
         need(remaining > 0, "WireGuard fixture deadline expired.")
         try:
-            response = self.transport(["kubectl", "--context", lifecycle.CONTEXT,
-                                       "--request-timeout=10s", *args], payload=payload,
-                                      timeout=remaining, max_output=output)
-            need(isinstance(response, bytes) and len(response) <= output,
+            argv = ["kubectl", "--context", lifecycle.CONTEXT, "--request-timeout=10s", *args]
+            if discard_output:
+                # No caller may discard GET/CREATE output: those responses
+                # carry the server-returned UID needed for safe ownership.
+                need(payload is not None and len(args) == 4 and args[0] == "delete" and
+                     args[1].startswith("--raw=/") and args[2:] == ["-f", "-"],
+                     "Discard mode only accepts UID-precondition raw DELETE.")
+                response = self.transport(argv, payload=payload, timeout=remaining,
+                                          max_output=0, discard_output=True)
+            else:
+                response = self.transport(argv, payload=payload, timeout=remaining,
+                                          max_output=output)
+            need(isinstance(response, bytes) and len(response) <= output and
+                 (not discard_output or response == b""),
                  "WireGuard fixture output bound or type violated.")
             return response
         except (adapter.AdapterError, OSError, ValueError):
@@ -272,7 +282,7 @@ class OperatorFixture:
         options = {"apiVersion": "v1", "kind": "DeleteOptions",
                    "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
         self._call(["delete", "--raw=/api/v1/namespaces/" + apps + "/pods/" + CLIENT,
-                    "-f", "-"], payload=json.dumps(options).encode(), output=1024)
+                    "-f", "-"], payload=json.dumps(options).encode(), discard_output=True)
         end = min(getattr(self, "cleanup_deadline", self.owner.deadline), self.owner.clock() + 25)
         while self.owner.clock() < end:
             try:
@@ -306,7 +316,7 @@ class OperatorFixture:
                            "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
                 phase += "-delete"
                 self._call(["delete", "--raw=" + path, "-f", "-"],
-                           payload=json.dumps(options).encode(), output=1024)
+                           payload=json.dumps(options).encode(), discard_output=True)
                 end = self.owner.clock() + 25
                 while self.owner.clock() < end:
                     if self._get(kind, allow_terminating=True) is None:
@@ -585,6 +595,10 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
                  "Encrypted peer lifecycle observation incomplete.")
         except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
             raise
+        except StageBlocked as err:
+            # Observer already classified a trusted checkpoint. Do not collapse
+            # peer-registration/revocation/source stages into peer-lifecycle.
+            failure = err
         except BaseException:
             # Never expose an exception that could contain API JSON, Secret
             # material, kubectl stderr or a profile; only authored stage names.

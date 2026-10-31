@@ -102,6 +102,27 @@ class AdapterTests(unittest.TestCase):
                         "import time;time.sleep(4)"], payload=b"x" * 65_536,
                        timeout=.2, max_output=0)
 
+    def test_discard_raw_delete_large_private_response_and_nonzero_exit(self):
+        # A raw Secret DELETE can return its entire object. Drain stdout while
+        # keeping no bytes, with a size cap/deadline and verified child exit.
+        script = ("import sys\n"
+                  "sys.stdin.buffer.read()\n"
+                  "sys.stdout.buffer.write(b'PRIVATE-SECRET'*5000)\n")
+        argv = [sys.executable, "-B", "-c", script]
+        self.assertEqual(a._bounded(argv, payload=b'{"preconditions":{"uid":"x"}}',
+                                    timeout=3, max_output=0, discard_output=True), b"")
+        with self.assertRaisesRegex(a.AdapterError, "discarded output exceeded"):
+            a._bounded(argv, payload=b'owned', timeout=3, max_output=0,
+                       discard_output=True, max_discard=4096)
+        bad = [sys.executable, "-B", "-c", "import sys;sys.stdout.write('PRIVATE-SECRET'*5000);sys.exit(7)"]
+        with self.assertRaises(a.AdapterError) as caught:
+            a._bounded(bad, timeout=3, max_output=0, discard_output=True)
+        self.assertNotIn("PRIVATE-SECRET", str(caught.exception))
+        self.assertNotIn("7", str(caught.exception))
+        with self.assertRaisesRegex(a.AdapterError, "timed out"):
+            a._bounded([sys.executable, "-B", "-c", "import time;time.sleep(5)"],
+                       timeout=.1, max_output=0, discard_output=True)
+
     def test_bounded_partial_writes_and_readiness_races(self):
         # Inject deterministic short writes and EAGAIN around local Python.
         # Patching os.write/read globally also affects subprocess internals;

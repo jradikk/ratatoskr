@@ -93,20 +93,26 @@ def _env():
     return env
 
 
-def _bounded(argv, *, payload=None, timeout, max_output):
+def _bounded(argv, *, payload=None, timeout, max_output,
+             discard_output=False, max_discard=1 << 20):
     """Bounded duplex pipe pump; no shell, output spill or unbounded wait.
 
-    Both pipe ends are nonblocking. Writable/readable readiness is only a hint:
-    interrupted/partial I/O is retried inside the one absolute deadline.
+    Raw Kubernetes DELETE can respond with an entire Secret/Gateway. Its
+    explicitly opted-in discard mode drains stdout without retaining bytes,
+    while enforcing a byte cap, successful exit, and one absolute deadline.
+    Ordinary GET/CREATE/exec keep their existing strict captured-output limit.
     """
     if (not isinstance(argv, (list, tuple)) or not argv or
             payload is not None and not isinstance(payload, bytes) or
             type(timeout) not in (int, float) or timeout <= 0 or
-            type(max_output) is not int or max_output < 0):
+            type(max_output) is not int or max_output < 0 or
+            type(discard_output) is not bool or
+            type(max_discard) is not int or not 0 < max_discard <= 1 << 20):
         raise AdapterError("Invalid bounded Kubernetes transport input.")
     process = None
     selector = selectors.DefaultSelector()
     output = bytearray()
+    discarded = 0
     end = time.monotonic() + timeout
     try:
         if end - time.monotonic() <= 0:
@@ -149,13 +155,20 @@ def _bounded(argv, *, payload=None, timeout, max_output):
                 if remaining <= 0:
                     raise AdapterError("Bounded Kubernetes operation timed out.")
                 try:
-                    chunk = os.read(key.fileobj.fileno(), min(4096, max_output + 1 - len(output)))
+                    limit = min(4096, max_discard + 1 - discarded) if discard_output else min(
+                        4096, max_output + 1 - len(output))
+                    chunk = os.read(key.fileobj.fileno(), limit)
                 except BlockingIOError:
                     continue  # readable readiness can race another reader
                 if chunk:
-                    output.extend(chunk)
-                    if len(output) > max_output:
-                        raise AdapterError("Bounded Kubernetes output exceeded limit.")
+                    if discard_output:
+                        discarded += len(chunk)
+                        if discarded > max_discard:
+                            raise AdapterError("Bounded Kubernetes discarded output exceeded limit.")
+                    else:
+                        output.extend(chunk)
+                        if len(output) > max_output:
+                            raise AdapterError("Bounded Kubernetes output exceeded limit.")
                 else:
                     selector.unregister(key.fileobj)
         remaining = end - time.monotonic()

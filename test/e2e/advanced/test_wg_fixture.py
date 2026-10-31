@@ -134,6 +134,23 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertTrue(result["encryptedStartup"] and result["peerRemoved"] and source.deleted)
         self.assertEqual(result["plainGeneve"], "not-tested")
 
+    def test_observer_typed_stage_not_replaced_by_peer_lifecycle(self):
+        owner = FakeOwner()
+        operator = FakeOperator(owner)
+        with patch.object(w, "manifests", return_value=([{"kind": k, "metadata": {
+                "name": n, "namespace": owner.names[0]}} for k, n in
+                (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                 ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
+                {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
+            def fail(*_args):
+                raise w.StageBlocked("peer-registration")
+            with self.assertRaises(w.StageBlocked) as raised:
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                          operator_factory=lambda _owner: operator, source_factory=FakeSource,
+                          observer=fail)
+        self.assertEqual(raised.exception.checkpoint, "peer-registration")
+        self.assertTrue(owner.cleaned and operator.cleaned)
+
     def test_cleanup_phase_keeps_original_trusted_body_checkpoint(self):
         owner = FakeOwner()
         operator = FakeOperator(owner)
@@ -227,9 +244,9 @@ class WireGuardFixtureTest(unittest.TestCase):
         owner = FakeOwner()
         calls = []
         identities = {}
-        def transport(argv, *, payload, timeout, max_output):
+        def transport(argv, *, payload, timeout, max_output, discard_output=False):
             self.assertEqual(argv[1:3], ["--context", w.lifecycle.CONTEXT])
-            calls.append((argv, payload))
+            calls.append((argv, payload, discard_output))
             if "--ignore-not-found" in argv:
                 kind = argv[argv.index("get") + 1]
                 name = argv[argv.index(kind) + 1]
@@ -242,6 +259,8 @@ class WireGuardFixtureTest(unittest.TestCase):
                 return (obj["apiVersion"] + "\t" + obj["kind"] + "\t" + w.SYSTEM +
                         "\t" + obj["metadata"]["name"] + "\t" + UID + "\n").encode()
             if "delete" in argv:
+                self.assertTrue(discard_output)
+                self.assertEqual(max_output, 0)
                 options = json.loads(payload)
                 self.assertEqual(options["preconditions"]["uid"], UID)
                 self.assertIn("--raw=", " ".join(argv))
@@ -256,8 +275,8 @@ class WireGuardFixtureTest(unittest.TestCase):
                 "name": name + suffix, "namespace": w.SYSTEM, "labels": {w.OWN: TOKEN}}})
         op.cleanup()
         self.assertFalse(identities)
-        self.assertEqual(sum("delete" in argv for argv, _ in calls), 2)
-        self.assertTrue(all(w.SYSTEM in str(argv) for argv, _ in calls
+        self.assertEqual(sum("delete" in argv for argv, _, _ in calls), 2)
+        self.assertTrue(all(w.SYSTEM in str(argv) for argv, _, _ in calls
                             if "get" in argv or "delete" in argv))
 
     def test_selected_pod_double_delete_after_real_create_is_idempotent(self):
@@ -265,9 +284,9 @@ class WireGuardFixtureTest(unittest.TestCase):
         calls = []
         current = {}
         owner.owned[owner.names[1]] = UID
-        op = w.OperatorFixture(owner, transport=lambda argv, *, payload, timeout, max_output:
-                               transport(argv, payload=payload, timeout=timeout, max_output=max_output))
-        def transport(argv, *, payload, timeout, max_output):
+        op = w.OperatorFixture(owner, transport=lambda argv, **kwargs:
+                               transport(argv, **kwargs))
+        def transport(argv, *, payload, timeout, max_output, discard_output=False):
             calls.append(tuple(argv))
             if "--ignore-not-found" in argv:
                 if "pod" in argv:
@@ -279,6 +298,8 @@ class WireGuardFixtureTest(unittest.TestCase):
                 current["pod"] = True
                 return ("v1\tPod\t" + owner.names[1] + "\t" + w.CLIENT + "\t" + UID).encode()
             if "delete" in argv:
+                self.assertTrue(discard_output)
+                self.assertEqual(max_output, 0)
                 self.assertEqual(json.loads(payload)["preconditions"]["uid"], UID)
                 current.pop("pod")
                 return b""
