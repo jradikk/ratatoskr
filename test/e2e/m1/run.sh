@@ -144,24 +144,13 @@ if [[ "$MODE" == live ]]; then
   STAGE=live-input
   # Never echo environment values or copy provider files into the repo.
   [[ -z "${IPINFO_TOKEN:-}" ]] || HAS_TOKEN=yes
+  python3 "$ROOT/test/e2e/m1/bundle.py" "$ROOT" "$PRIVATE"
+  # Only fixed private staged paths survive into kubectl/lifecycle commands.
+  unset RATATOSKR_E2E_OVPN RATATOSKR_E2E_OVPN_AUTH \
+    RATATOSKR_E2E_OVPN_CA RATATOSKR_E2E_OVPN_CERT RATATOSKR_E2E_OVPN_KEY
   python3 - "$ROOT" "$PRIVATE/token" <<'PY'
-from pathlib import Path
 import os
 import sys
-root = Path(sys.argv[1]).resolve()
-for name in ("RATATOSKR_E2E_OVPN", "RATATOSKR_E2E_OVPN_AUTH"):
-    value = os.environ.get(name)
-    if not value:
-        continue
-    supplied = Path(value)
-    p = supplied.resolve()
-    if not supplied.is_absolute() or not p.is_file() or p == root or root in p.parents:
-        sys.exit("upstream input must be a readable regular file outside the repository")
-    try:
-        with p.open("rb"):
-            pass
-    except OSError:
-        sys.exit("upstream input is not readable")
 country = os.environ.get("RATATOSKR_E2E_EXPECT_COUNTRY", "")
 if country and (len(country) != 2 or not country.isascii() or not country.isupper() or not country.isalpha()):
     sys.exit("expected country must be a two-letter uppercase country code")
@@ -239,20 +228,24 @@ NAMESPACE_CREATED=yes
 k apply -f "$PRIVATE/namespace.yaml" >/dev/null
 if [[ "$MODE" == live ]]; then
   STAGE=secret-creation
-  secret_args=("--from-file=client.ovpn=$RATATOSKR_E2E_OVPN")
-  [[ -z "${RATATOSKR_E2E_OVPN_AUTH:-}" ]] || secret_args+=("--from-file=auth.txt=$RATATOSKR_E2E_OVPN_AUTH")
+  secret_args=("--from-file=client.ovpn=$PRIVATE/upstream/client.ovpn")
+  for key in auth.txt ca.crt client.crt client.key; do
+    [[ ! -f "$PRIVATE/upstream/$key" ]] || secret_args+=("--from-file=$key=$PRIVATE/upstream/$key")
+  done
   # kubectl writes complete Secret YAML only into a private out-of-repo directory.
   k -n "$NAMESPACE" create secret generic m1-upstream "${secret_args[@]}" \
     --dry-run=client -o yaml > "$PRIVATE/upstream-secret.yaml" 2>/dev/null
   k create -f "$PRIVATE/upstream-secret.yaml" >/dev/null 2>&1
   rm -f "$PRIVATE/upstream-secret.yaml"
+  rm -rf "$PRIVATE/upstream"
   if [[ "$HAS_TOKEN" == yes ]]; then
     k -n "$NAMESPACE" create secret generic m1-ipinfo --from-file="token=$PRIVATE/token" \
       --dry-run=client -o yaml > "$PRIVATE/ipinfo-secret.yaml" 2>/dev/null
     k create -f "$PRIVATE/ipinfo-secret.yaml" >/dev/null 2>&1
     rm -f "$PRIVATE/token" "$PRIVATE/ipinfo-secret.yaml"
   fi
-  unset IPINFO_TOKEN RATATOSKR_E2E_OVPN RATATOSKR_E2E_OVPN_AUTH
+  unset IPINFO_TOKEN RATATOSKR_E2E_OVPN RATATOSKR_E2E_OVPN_AUTH \
+    RATATOSKR_E2E_OVPN_CA RATATOSKR_E2E_OVPN_CERT RATATOSKR_E2E_OVPN_KEY
   record secret-creation passed 'Upstream and optional token Secrets created from files; no credential output retained.'
 fi
 STAGE=baseline-pods

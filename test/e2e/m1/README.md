@@ -28,7 +28,8 @@ performed by this harness. Component capability/TUN/flower checks and image
 builds belong to the parent/operator, and remain prerequisites, not proven here.
 
 The gateway container is UID 0, overrides its entrypoint with `/ratatoskr`, and
-uses `-config /config/gateway.json`; POD_IP fills omitted gateway podIP. It shares
+uses `-config /config/gateway.json`; POD_IP fills omitted gateway podIP and
+POD_UID comes from Downward API metadata.uid for applied-config acknowledgment. It shares
 its netns with an upstream plugin and a capability-free tools observer. Gateway
 JSON selects only the client PodIP, gatewayID 7, MTU 1400, encryption `none`.
 Client JSON uses that gateway PodIP endpoint, gatewayID 7, MTU 1400, `none`, and
@@ -131,6 +132,11 @@ tracing or echoing values:
   **Unset or empty -> clear live skip before cluster, Secret or external calls.**
 - `RATATOSKR_E2E_OVPN_AUTH`: optional outside-repo auth file path (projected as
   `auth.txt`). Unset means no auth file; plugin never prompts.
+- `RATATOSKR_E2E_OVPN_CA`, `RATATOSKR_E2E_OVPN_CERT`,
+  `RATATOSKR_E2E_OVPN_KEY`: optional explicit absolute outside-repo file paths.
+  The private staged copies become `ca.crt`, `client.crt`, `client.key`. Profiles
+  with external `ca`, `cert`, `key` references require the corresponding input;
+  original reference names need not match the staged names.
 - `IPINFO_TOKEN`: optional literal environment token, read without output by
   Python into an out-of-repo 0600 file in a 0700 temporary directory. Secret
   creation uses **--from-file**, never --from-literal. Token contents are never
@@ -139,11 +145,31 @@ tracing or echoing values:
 - `RATATOSKR_E2E_EXPECT_COUNTRY`: optional uppercase two-letter country code.
 
 Do not paste provider configs/credentials/tokens/private keys into repository
-files, shell examples, reports, issues or logs. The initial harness supports
-inline provider cert/key material and optional auth only; provider profiles with
-separate referenced certificate/key/CA files need extending to project those
-files safely. Do not work around that limitation by copying them into this repo.
-Sanitizer incompatibility is a startup failure, not silently bypassed.
+files, shell examples, reports, issues or logs. Inline TLS blocks remain supported.
+`bundle.py` runs **before cluster actions** and reads only explicitly selected env
+input paths, never files inferred from the profile. It limits each input and the
+normalized profile to 1 MiB, verifies regular files/outside-repo sources, then
+normalizes relative external CA/cert/key/auth references to the fixed mount names.
+Absolute/traversal references, unsafe quoting, includes, unknown options, hooks,
+plugins, missing files and conflicting inline/external material are rejected
+without raw data or path diagnostics. Safe route/DNS/interface/log controls are
+stripped; unsupported external TLS-auth/crypt/CRL files require an explicit future
+extension instead of implicit file discovery. The plugin sanitizer still runs.
+
+Only copies enter a private 0700 temporary staging directory, in exclusive 0600
+files. Inputs are never modified or chmodded (including permissive original
+permissions). Keep supplied files immutable during staging; resolved source
+symlinks must remain outside the repo. Staged files are removed immediately after
+Secret creation and again by the existing EXIT/INT/TERM cleanup. Partial staging
+failures roll back copies; cleanup failures return a fixed failure diagnostic.
+Do not use this repository as the input or staging directory.
+
+For a separate-file provider bundle, export absolute paths through a private,
+non-traced shell session: `RATATOSKR_E2E_OVPN` selects the profile,
+`RATATOSKR_E2E_OVPN_CA/_CERT/_KEY` select its three materials, and
+`RATATOSKR_E2E_OVPN_AUTH` selects the login file. To require Germany set
+`RATATOSKR_E2E_EXPECT_COUNTRY=DE`; leave `IPINFO_TOKEN` unset for anonymous mode.
+These settings do not authorize or execute the final live gate.
 
 OpenVPN uses its default safe sanitizer and default public exit probe. The plugin
 runs with NET_ADMIN + MKNOD, a pod-local `/dev/net` emptyDir for `/dev/net/tun`, and
@@ -158,22 +184,24 @@ curl config, consumed via `curl --config <file>` with stderr discarded. Raw
 response files never leave the pod. The harness makes at most two ipinfo calls
 (one 10-second backoff on 429), emitting only IP/country/status. Persistent 429,
 service failure or malformed response -> **inconclusive**, not a pass. The
-plugin's independent periodic exit-IP health probes are additional calls; avoid
-repeated manual attempts. Expected client exit must equal gateway cached exitIP;
+plugin's independent periodic exit-IP health probes use api.ipify.org by default,
+reserving ipinfo for final live assertions; avoid repeated manual attempts. Expected client exit must equal gateway cached exitIP;
 expected country is checked only when provided. Provider egress pools changing
 between probes may fail equality; no claim of stable provider identity is made.
 Live failure injection/recovery is explicitly skipped in this initial harness.
 
 ## Allowed static validation now
 
-Only shell syntax and static rendering checks are authorized at this stage:
+Only shell syntax, static rendering and offline synthetic bundle unit checks
+are authorized at this stage:
 
 ```sh
 for script in hack/m1-proof.sh test/e2e/m1/run.sh test/e2e/ci/run.sh test/e2e/live/run.sh; do
   bash -n "$script" || exit
 done
 sh -n test/e2e/m1/ipinfo.sh
-python3 test/e2e/m1/static-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/m1/static-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/m1 -p 'test_bundle.py'
 ```
 
 The static validator uses PyYAML (validation-only local dependency), renders all

@@ -82,6 +82,8 @@ def main():
                     require(not added, "observer must be capability-free")
                 elif container["name"] == "gateway":
                     require(added == (["NET_ADMIN", "BPF", "PERFMON"] if programming else ["NET_ADMIN"]), "gateway capability contract")
+                    env = {entry["name"]: entry for entry in container["env"]}
+                    require(env["POD_UID"] == {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}, "gateway applied acknowledgment needs Downward API pod UID")
                     require(container["command"] == ["/ratatoskr"], "gateway command contract")
                     require(container["args"] == ["-config", "/config/gateway.json"], "gateway config flag contract")
                     require(container["readinessProbe"]["httpGet"] == {"port": 9900, "path": "/healthz"}, "cached readiness contract")
