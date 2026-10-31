@@ -702,6 +702,27 @@ correlated fresh-sandbox observation. Controller/webhook remain 1/1 Available,
 agent 3/3 Ready, and the release remains agent/iproute. M8/M9 are incomplete;
 live VPN input is absent/SKIPPED.
 
+## October 31, 2026 — fresh namespace propagated; agent Pod starts app, traffic still fails
+
+A subsequent fresh UID-owned retry was observed while the selected sandbox
+existed. The same selected Pod had **one matching READY CRI sandbox**; both node
+and current agent mount namespaces reported `nsfs` magic `6e736673` for its
+single reported network namespace bind mount. This supports that the chart's
+one-way propagation exposed that *fresh* child on this k3d node, without
+relaxing the nsfs/type guard. The Pod progressed `Pending → Running → Failed`.
+A tightened status-only fixture then retried once more, returning within the
+bounded run with **`selected-pod-status-app-failed`**: the restricted wait-init
+completed sufficiently for the nonroot/capability-free application to run, but
+the application exited nonzero. The exact application subcheck (marker versus
+DNS/API TLS/direct route) was deliberately not logged and remains **unknown**.
+The agent logs inspected after namespace cleanup contained only stale
+`matching ready sandbox unavailable` retries, not reliable attribution for the
+live packet failure. It would be incorrect to claim selected VPN traffic or
+fail-close from a running or failed app. Both fixture namespaces and private
+PKI were removed, the existing release remained agent/iproute and agent 3/3
+Ready. Full component tests, chart/static checks and 118 synthetic fake tests
+passed for this code; M8/M9 acceptance and live VPN input remain incomplete.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from

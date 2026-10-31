@@ -12,6 +12,10 @@ The runner now stops polling as soon as the UID-pinned one-shot Pod reports
 `phase=Failed`. It emits only `init-failed`, `app-failed` or
 `pod-failed-unknown`, then attempts the same UID-owned cleanup; waiting or
 transient API errors remain bounded and cannot become success evidence.
+In the separate agent partial smoke, a selected Pod which reaches `Failed`
+now also stops immediately with only `wait-init-failed`, `app-failed` or
+`pod-failed-unknown`; a nonzero app exit is **not** selected tunnel evidence.
+The UID-owned namespace and private PKI cleanup still run on that path.
 
 ## Separately gated init-driver/nonrestricted partial traffic (never M8 PASS)
 

@@ -104,6 +104,51 @@ class SmokeTests(unittest.TestCase):
             self.execute(observer=lambda *_a: False)
         self.assertTrue(self.owner.cleanup_attempted)
 
+    def test_uid_pinned_failed_selected_pod_exits_without_retry_or_raw_status(self):
+        for init_exit, app_exit, category in ((1, None, "wait-init-failed"),
+                                              (0, 17, "app-failed"),
+                                              (None, None, "pod-failed-unknown")):
+            with self.subTest(category=category):
+                owner = FakeOwner()
+                owner.deadline = float("inf")
+                owner.clock = lambda: 0
+                created = []
+                sleeps = []
+                class API:
+                    def create(self, obj):
+                        created.append(obj["kind"])
+                        return {"kind": "Pod", "namespace": owner.names[1],
+                                "name": "synthetic-probe-healthy", "uid": UID}
+                    def get(self, kind, name, namespace):
+                        assert (kind, name, namespace) == ("pod", "synthetic-probe-healthy", owner.names[1])
+                        init = [] if init_exit is None else [{"name": "ratatoskr-init", "state": {
+                            "terminated": {"exitCode": init_exit}}}]
+                        app = [] if app_exit is None else [{"name": "client", "state": {
+                            "terminated": {"exitCode": app_exit}}}]
+                        return {"metadata": {"uid": UID}, "status": {"phase": "Failed",
+                                "initContainerStatuses": init, "containerStatuses": app,
+                                "message": "private status details must never escape"}}
+                baseline = {"gatewayUID": UID, "serverUID": UID, "gatewayID": 7,
+                            "endpoint": "10.42.1.7", "session": {"cn": "synthetic-client",
+                            "received": 1, "sent": 1}}
+                with self.assertRaisesRegex(smoke.TerminalFailure,
+                                            "selected-pod-status-" + category):
+                    smoke.healthy_selected(API(), owner, IDS,
+                                           {("EgressGateway", owner.names[0], "synthetic"): UID,
+                                            ("Pod", owner.names[0], "synthetic-vpn"): UID},
+                                           baseline, "10.43.0.1", clock=lambda: 0,
+                                           sleep=lambda seconds: sleeps.append(seconds))
+                self.assertEqual(created, ["Pod"])
+                self.assertEqual(sleeps, [])
+
+    def test_terminal_selected_failure_preserves_uid_scoped_cleanup(self):
+        def fail_selected(*_args):
+            raise smoke.TerminalFailure("Healthy selected Pod failed at selected-pod-status-app-failed.")
+        with self.assertRaisesRegex(smoke.TerminalFailure, "selected-pod-status-app-failed"):
+            self.execute(selected_observer=fail_selected)
+        self.assertTrue(self.owner.cleanup_attempted)
+        self.assertEqual([(x["kind"], x["name"]) for x in self.adapter.created], list(smoke.BASE))
+
     def test_cleanup_failure_overrides_success(self):
         self.owner.fail_cleanup = True
         with self.assertRaises(smoke.lifecycle.LifecycleError):

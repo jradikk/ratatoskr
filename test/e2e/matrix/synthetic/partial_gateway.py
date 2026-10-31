@@ -28,6 +28,10 @@ class Blocked(lifecycle.LifecycleError):
     """
 
 
+class TerminalFailure(Blocked):
+    """UID-pinned one-shot selected Pod failed; clean up without retrying."""
+
+
 BASE = (("Secret", "synthetic-server"), ("Secret", "synthetic-client"),
         ("Secret", "synthetic-witness"), ("ConfigMap", "synthetic-exit-health"),
         ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"),
@@ -196,7 +200,18 @@ def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.m
             pod = api.get("pod", "synthetic-probe-healthy", apps)
             if pod["metadata"].get("uid") != uid:
                 raise Blocked("Healthy selected Pod UID changed.")
-            if pod.get("status", {}).get("phase") != "Succeeded":
+            status = pod.get("status", {})
+            if status.get("phase") == "Failed":
+                # Only UID-pinned terminal status and fixed exit categories are
+                # surfaced. Never print status messages, probe output or logs.
+                init = [s for s in status.get("initContainerStatuses", []) if s.get("name") == "ratatoskr-init"]
+                app = [s for s in status.get("containerStatuses", []) if s.get("name") == "client"]
+                init_exit = init[0].get("state", {}).get("terminated", {}).get("exitCode") if init else None
+                app_exit = app[0].get("state", {}).get("terminated", {}).get("exitCode") if app else None
+                label = ("wait-init-failed" if init_exit not in (None, 0) else
+                         "app-failed" if app_exit not in (None, 0) else "pod-failed-unknown")
+                raise TerminalFailure("Healthy selected Pod failed at selected-pod-status-" + label + ".")
+            if status.get("phase") != "Succeeded":
                 raise Blocked("Healthy selected Pod not completed.")
             evidence.assert_selected_probe(pod, namespace=apps, phase="healthy",
                                            expected_uid=uid, expected_image_id=ids["selected"],
@@ -247,6 +262,8 @@ def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.m
                 raise Blocked("Selected Pod UID changed during session read.")
             return {"podUID": uid, "healthyExit": True, "directAPITLSAndDNS": True,
                     "serverSessionBytesAdvanced": True}
+        except TerminalFailure:
+            raise
         except (adapter.AdapterError, evidence.EvidenceError, Blocked, KeyError,
                 TypeError, ValueError, AttributeError):
             remaining = deadline - clock()
