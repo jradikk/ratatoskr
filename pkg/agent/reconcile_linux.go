@@ -327,7 +327,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return err
 		}
 	}
-	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && existing != HashForMode(cfg, mode) {
+	if !removing && cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() && (existing != HashForMode(cfg, mode) || pod.Annotations[ReadyAnnotation] != "true") {
 		if r.Tokens == nil {
 			return errors.New("TokenRequest client unavailable")
 		}
