@@ -557,6 +557,75 @@ func TestPrivilegedWireGuardClient(t *testing.T) {
 	})
 }
 
+func TestPrivilegedGatewayTunnelAddressOwnership(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		_ = dummy(t, b, "eth0", "10.42.2.4/24")
+		cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320}
+		for i := 0; i < 2; i++ {
+			if err := b.ApplyGateway(context.Background(), cfg); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gnv, err := b.h.LinkByName(datapath.GatewayDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		addrs, err := b.h.AddrList(gnv, unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(addrs) != 1 || addrs[0].IPNet.String() != gatewayTunnelAddress.String() {
+			t.Fatalf("gateway GENEVE address not owned: %v", addrs)
+		}
+		foreign, err := netlink.ParseAddr("198.51.100.3/32")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.h.AddrAdd(gnv, foreign); err != nil {
+			t.Fatal(err)
+		}
+		if err = b.ApplyGateway(context.Background(), cfg); err == nil {
+			t.Fatal("foreign gateway GENEVE address adopted")
+		}
+		addrs, err = b.h.AddrList(gnv, unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(addrs) != 2 {
+			t.Fatal("foreign address removed")
+		}
+	})
+	isolated(t, func(b *Backend) {
+		_ = dummy(t, b, "eth0", "10.42.2.4/24")
+		foreign := &netlink.Geneve{LinkAttrs: netlink.LinkAttrs{Name: datapath.GatewayDevice}, FlowBased: true, Dport: datapath.GenevePort}
+		if err := b.h.LinkAdd(foreign); err != nil {
+			t.Fatal(err)
+		}
+		gnv, err := b.h.LinkByName(datapath.GatewayDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr, err := netlink.ParseAddr("198.51.100.3/32")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = b.h.AddrAdd(gnv, addr); err != nil {
+			t.Fatal(err)
+		}
+		cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320}
+		if err = b.ApplyGateway(context.Background(), cfg); err == nil {
+			t.Fatal("foreign preexisting GENEVE address adopted")
+		}
+		addrs, err := b.h.AddrList(gnv, unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(addrs) != 1 || addrs[0].IPNet.String() != addr.IPNet.String() {
+			t.Fatal("foreign preexisting address changed")
+		}
+	})
+}
+
 func TestPrivilegedWireGuardGatewayPeers(t *testing.T) {
 	isolated(t, func(b *Backend) {
 		eth := dummy(t, b, "eth0", "10.42.2.4/24")
@@ -614,6 +683,19 @@ func TestPrivilegedWireGuardGatewayPeers(t *testing.T) {
 			if err != nil || len(r) != 1 || r[0].LinkIndex != link.Attrs().Index || !r[0].Src.Equal(net.ParseIP("10.42.2.4")) {
 				t.Fatalf("gateway authenticated peer route/source invalid %s: %v %v", target, r, err)
 			}
+			rules, err := b.h.RuleList(unix.AF_INET)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, rule := range rules {
+				if rule.Priority == wgRoutePriority && rule.Protocol == datapath.RouteProtocol && rule.IifName == "lo" && rule.Dst != nil && rule.Dst.String() == target+"/32" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("locally sourced WG peer rule missing for %s", target)
+			}
 		}
 		if err := b.UnregisterPeer(context.Background(), client1); err != nil {
 			t.Fatal(err)
@@ -631,6 +713,62 @@ func TestPrivilegedWireGuardGatewayPeers(t *testing.T) {
 		}
 		if err == nil && len(r) == 1 && r[0].LinkIndex == link.Attrs().Index {
 			t.Fatal("removed peer still routed through WG")
+		}
+	})
+}
+
+func TestPrivilegedWireGuardGatewayPeerRuleMigration(t *testing.T) {
+	isolated(t, func(b *Backend) {
+		_ = dummy(t, b, "eth0", "10.42.2.4/24")
+		cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, MTU: 1320, Encryption: "wireguard", Clients: []netip.Addr{netip.MustParseAddr("10.42.1.8")}}
+		if err := b.ApplyGateway(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		client := cfg.Clients[0]
+		legacy := netlink.NewRule()
+		legacy.Family = unix.AF_INET
+		legacy.Priority = wgRoutePriority
+		legacy.Table = datapath.WireGuardTable
+		legacy.Protocol = datapath.RouteProtocol
+		legacy.Type = unix.RTN_UNICAST
+		legacy.Dst = host(client)
+		if err := b.h.RuleAdd(legacy); err != nil {
+			t.Fatal(err)
+		}
+		key, err := wgtypes.GeneratePrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.RegisterPeer(context.Background(), cfg.PodIP, client, key.PublicKey().String()); err != nil {
+			t.Fatal(err)
+		}
+		rules, err := b.h.RuleList(unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var owned int
+		for _, rule := range rules {
+			if rule.Priority == wgRoutePriority && rule.Dst != nil && rule.Dst.String() == host(client).String() {
+				if rule.IifName != "lo" {
+					t.Fatal("legacy unscoped peer selector remained")
+				}
+				owned++
+			}
+		}
+		if owned != 1 {
+			t.Fatalf("migrated peer selectors=%d", owned)
+		}
+		if err := b.UnregisterPeer(context.Background(), client); err != nil {
+			t.Fatal(err)
+		}
+		rules, err = b.h.RuleList(unix.AF_INET)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rule := range rules {
+			if rule.Priority == wgRoutePriority && rule.Dst != nil && rule.Dst.String() == host(client).String() {
+				t.Fatal("revoked peer selector remained")
+			}
 		}
 	})
 }

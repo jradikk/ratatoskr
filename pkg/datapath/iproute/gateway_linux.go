@@ -20,6 +20,11 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/wireguard"
 )
 
+// gatewayTunnelAddress is the gateway-owned /32 on collect-md GENEVE ingress.
+// It prevents the kernel's loose rp_filter no_addr failure after authenticated
+// WireGuard decapsulation, without changing PodIP source or CNI main routing.
+var gatewayTunnelAddress = netip.MustParsePrefix("169.254.64.3/32")
+
 // ApplyGateway keeps the pod's main routing table untouched. Forwarded packets
 // and explicitly marked upstream health probes are the only table-100 users.
 func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) error {
@@ -79,6 +84,9 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 	}
 	if err := b.h.LinkSetMTU(link, c.MTU); err != nil {
 		return err
+	}
+	if err := b.gatewayTunnelAddr(link); err != nil {
+		return fmt.Errorf("configure gateway GENEVE address: %w", err)
 	}
 	if err := b.h.LinkSetUp(link); err != nil {
 		return err
@@ -157,6 +165,30 @@ func (b *Backend) ApplyGateway(ctx context.Context, c datapath.GatewayConfig) er
 		return err
 	}
 	return ctx.Err()
+}
+
+// gatewayTunnelAddr owns only the exact link-local address on gnv0; unknown
+// addresses are neither removed nor adopted as trusted tunnel configuration.
+func (b *Backend) gatewayTunnelAddr(link netlink.Link) error {
+	addrs, err := b.h.AddrList(link, unix.AF_INET)
+	if err != nil {
+		return err
+	}
+	desired := gatewayTunnelAddress.Masked()
+	for _, addr := range addrs {
+		ip, ok := netip.AddrFromSlice(addr.IP)
+		if !ok || !ip.Is4() || addr.IPNet == nil {
+			return fmt.Errorf("unexpected IPv4 address on %s", datapath.GatewayDevice)
+		}
+		bits, total := addr.IPNet.Mask.Size()
+		if total != 32 || bits != 32 || ip != desired.Addr() {
+			return fmt.Errorf("foreign IPv4 address on %s", datapath.GatewayDevice)
+		}
+	}
+	if len(addrs) == 1 {
+		return nil
+	}
+	return b.h.AddrAdd(link, &netlink.Addr{IPNet: prefix(desired), Label: datapath.GatewayDevice})
 }
 
 func (b *Backend) verifier(link netlink.Link, c datapath.GatewayConfig) error {

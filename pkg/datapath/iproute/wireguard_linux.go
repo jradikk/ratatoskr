@@ -174,8 +174,17 @@ func (b *Backend) gatewayRoute(gatewayIP, clientIP netip.Addr) error {
 	owned := false
 	for _, r := range all {
 		if r.Priority == wgRoutePriority && r.Dst != nil && r.Dst.String() == host(clientIP).String() {
-			if r.Table != datapath.WireGuardTable || r.Protocol != datapath.RouteProtocol {
+			if r.Table != datapath.WireGuardTable || r.Protocol != datapath.RouteProtocol || r.Mark != 0 || r.OifName != "" || (r.IifName != "lo" && r.IifName != "") {
 				return fmt.Errorf("WireGuard client route priority occupied")
+			}
+			if r.IifName == "" {
+				// Migrate our old unscoped selector before installing a
+				// local-only one. The WG route remains for local GENEVE;
+				// forwarded inner replies cannot bypass table 101.
+				if err := b.h.RuleDel(&r); err != nil {
+					return err
+				}
+				continue
 			}
 			owned = true
 		}
@@ -185,6 +194,9 @@ func (b *Backend) gatewayRoute(gatewayIP, clientIP netip.Addr) error {
 		r.Priority = wgRoutePriority
 		r.Table = datapath.WireGuardTable
 		r.Dst = host(clientIP)
+		// Locally generated outer GENEVE uses this peer route; forwarded
+		// upstream replies must first take table 101 LWT GENEVE return.
+		r.IifName = "lo"
 		r.Family = unix.AF_INET
 		r.Protocol = datapath.RouteProtocol
 		r.Type = unix.RTN_UNICAST
@@ -239,7 +251,8 @@ func (b *Backend) UnregisterPeer(ctx context.Context, clientIP netip.Addr) error
 		return err
 	}
 	for _, r := range all {
-		if r.Priority == wgRoutePriority && r.Protocol == datapath.RouteProtocol && r.Dst != nil && r.Dst.String() == host(clientIP).String() {
+		if r.Priority == wgRoutePriority && r.Protocol == datapath.RouteProtocol && r.Table == datapath.WireGuardTable && r.Mark == 0 && r.OifName == "" && (r.IifName == "lo" || r.IifName == "") && r.Dst != nil && r.Dst.String() == host(clientIP).String() {
+			// Revoke the pre-upgrade unscoped rule too, never a foreign owner.
 			if err := b.h.RuleDel(&r); err != nil {
 				return err
 			}
@@ -292,7 +305,7 @@ func (b *Backend) ClearGatewayPeers(ctx context.Context) error {
 		return err
 	}
 	for _, r := range rules {
-		if r.Priority == wgRoutePriority && r.Protocol == datapath.RouteProtocol && r.Table == datapath.WireGuardTable && r.Dst != nil && r.Mark == 0 && r.IifName == "" && r.OifName == "" {
+		if r.Priority == wgRoutePriority && r.Protocol == datapath.RouteProtocol && r.Table == datapath.WireGuardTable && r.Dst != nil && r.Mark == 0 && (r.IifName == "lo" || r.IifName == "") && r.OifName == "" {
 			if err := b.h.RuleDel(&r); err != nil {
 				return err
 			}
