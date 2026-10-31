@@ -636,6 +636,33 @@ resolve the distinct agent sandbox-pidfd blocker or substitute for restricted
 workload traffic. M8 and M9 remain blocked, and the absent live VPN profile
 remains SKIPPED.
 
+## October 31, 2026 — user-reported runtime change retested, not yet effective
+
+Following the user's report that the blocker was fixed, a fresh read-only
+preflight confirmed the **existing** three-node flannel cluster, Ready
+controller/webhook (1/1 each), agent DaemonSet (3/3), agent/iproute chart
+values, and all nine explicit release/fixture image IDs including exact CRI
+config-digest mappings on every node. The checkout was unchanged; no agent
+privilege or trust-contract change was made. The guarded, UID-owned real
+synthetic OpenVPN smoke was retried with the same partial-only admission and
+image gates. Gateway baseline again advanced far enough to CREATE the selected
+Pod, but the selected Pod did **not** reach successful one-shot traffic; the
+runner failed at `selected-pod-status` and returned exit 1 after attempting
+UID-owned cleanup. Both synthetic namespaces and private PKI were verified
+absent afterward, and controller/webhook remained 1/1 with agent 3/3.
+
+A bounded read-only classification of recent agent logs, never displaying raw
+logs, found the unchanged failure on the server node: 90 recent instances
+of `corroborate CRI path with pinned sandbox PID` / `enter pinned process
+network namespace: operation not permitted`. The other two agent nodes had
+none in the same recent sample. This **does not prove** what host/runtime
+change the user attempted, but it proves the existing production agent
+security context still cannot pass this particular selected-Pod namespace
+check on the observed node. Until an effective, independently verified runtime
+change or an explicitly approved trust-contract revision exists, no selected
+traffic, M5 runtime acceptance, M8 compatibility, or M9 release PASS is
+claimed. The live VPN profile remains absent/SKIPPED.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
