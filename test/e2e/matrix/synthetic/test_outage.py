@@ -44,14 +44,17 @@ class ExitSwitch:
         self.api = api
     def __enter__(self):
         self.api.owner.events.append("disable")
+        self.api.selected_pending = True
     def __exit__(self, *_):
         self.api.owner.events.append("restore")
+        self.api.selected_pending = False
 
 
 class API:
     def __init__(self, owner):
         self.owner = owner
         self.ids = {}
+        self.selected_pending = False
     def create(self, item):
         name, namespace, kind = item["metadata"]["name"], item["metadata"]["namespace"], item["kind"]
         identity = {"kind": kind, "namespace": namespace, "name": name, "uid": UID}
@@ -60,7 +63,9 @@ class API:
         return identity
     def get(self, kind, name, namespace):
         if kind == "pod" and name == "synthetic-client":
-            return {"metadata": {"uid": UID}}
+            return {"metadata": {"uid": UID, "annotations": {
+                o.evidence.PREFIX + "datapath-ready": "pending" if self.selected_pending else "true"}},
+                "status": {"phase": "Running"}}
         raise AssertionError("Unexpected fake API GET")
     def exec(self, namespace, name, uid, container, command, *, expected_image_id):
         assert (namespace, name, uid, container, command) == (self.owner.names[1], "synthetic-client", UID,
@@ -89,11 +94,18 @@ class OutageTests(unittest.TestCase):
         def healthy(*_args):
             return {"podUID": UID, "healthyExit": True, "directAPITLSAndDNS": True,
                     "serverSessionBytesAdvanced": True}
+        def polling(_owner, stage, predicate, **_kw):
+            if stage == "withdrawn-selected-fail-close":
+                try:
+                    return predicate()
+                except o.adapter.AdapterError:
+                    raise o.Blocked("Outage/recovery did not converge at " + stage + ".") from None
+            return {}  # other stages retain their established fake behavior
         with patch.object(o.partial_gateway, "private_contents", return_value=()), \
              patch.object(o.prepare, "manifests", return_value=objects), \
              patch.object(o.prepare, "running_probe_pod", return_value={"kind": "Pod", "metadata": {
                  "name": "synthetic-client", "namespace": owner.names[1]}}), \
-             patch.object(o, "poll", return_value={}):
+             patch.object(o, "poll", side_effect=polling):
             yield lambda: o.execute({name: IMAGE for name in o.run.COMPONENTS}, api_ip="10.43.0.1",
                                     lifecycle_factory=lambda **kw: owner, adapter_factory=lambda _owner: api,
                                     observer=lambda *_args: baseline, healthy=healthy)
