@@ -19,58 +19,15 @@ import (
 )
 
 // Sandbox resolves only a READY CRI sandbox whose full Kubernetes identity matches.
-func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, name, uid, podIP string) (*os.File, error) {
-	if namespace == "" || name == "" || uid == "" || podIP == "" {
-		return nil, errors.New("incomplete pod identity")
-	}
-	list, err := service.ListPodSandbox(ctx, &cri.ListPodSandboxRequest{Filter: &cri.PodSandboxFilter{LabelSelector: map[string]string{"io.kubernetes.pod.namespace": namespace, "io.kubernetes.pod.name": name, "io.kubernetes.pod.uid": uid}}})
-	if err != nil {
-		return nil, err
-	}
-	var found *os.File
-	for _, item := range list.GetItems() {
-		md := item.GetMetadata()
-		if md == nil || md.GetNamespace() != namespace || md.GetName() != name || md.GetUid() != uid || item.GetLabels()["io.kubernetes.pod.uid"] != uid || item.GetState() != cri.PodSandboxState_SANDBOX_READY {
-			continue
-		}
-		response, err := service.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: item.GetId(), Verbose: true})
-		if err != nil {
-			if found != nil {
-				found.Close()
-			}
-			return nil, err
-		}
-		status := response.GetStatus()
-		if status == nil || status.GetId() != item.GetId() || status.GetMetadata() == nil || status.GetMetadata().GetNamespace() != namespace || status.GetMetadata().GetName() != name || status.GetMetadata().GetUid() != uid || status.GetLabels()["io.kubernetes.pod.uid"] != uid || status.GetState() != cri.PodSandboxState_SANDBOX_READY || status.GetNetwork().GetIp() != podIP {
-			if found != nil {
-				found.Close()
-			}
-			return nil, errors.New("sandbox status identity mismatch")
-		}
-		f, err := openSandboxNetns(response.GetInfo(), uid)
-		if err != nil {
-			if found != nil {
-				found.Close()
-			}
-			return nil, fmt.Errorf("open verified sandbox netns: %w", err)
-		}
-		if found != nil {
-			f.Close()
-			found.Close()
-			return nil, errors.New("multiple matching ready sandboxes")
-		}
-		found = f
-	}
-	if found == nil {
-		return nil, errors.New("matching ready sandbox unavailable")
-	}
-	return found, nil
+type sandboxProof struct {
+	id, namespace, name, uid, podIP string
+	pid                             int
+	path                            string
+	inode                           unix.Stat_t
+	pidfd                           int
 }
 
-func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
-	if _, err := hostStat(); err != nil {
-		return nil, err
-	}
+func sandboxInfo(info map[string]string) (pid int, path string, err error) {
 	var details struct {
 		PID         int `json:"pid"`
 		RuntimeSpec struct {
@@ -83,59 +40,192 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 		} `json:"runtimeSpec"`
 	}
 	if err := json.Unmarshal([]byte(info["info"]), &details); err != nil {
-		return nil, fmt.Errorf("unsupported CRI verbose info: %w", err)
+		return 0, "", fmt.Errorf("unsupported CRI verbose info: %w", err)
 	}
 	if details.PID <= 1 {
-		return nil, errors.New("sandbox PID unavailable; cannot corroborate reported netns path")
+		return 0, "", errors.New("sandbox PID unavailable")
 	}
-	// Pin the reported sandbox process before reading its cgroup. The pidfd
-	// prevents PID reuse between UID verification and namespace comparison.
-	pidfd, err := unix.PidfdOpen(details.PID, 0)
+	count := 0
+	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
+		if ns.Type == "network" {
+			count++
+			path = ns.Path
+		}
+	}
+	if count != 1 || path == "" {
+		return 0, "", errors.New("exactly one CRI network namespace path required")
+	}
+	return details.PID, path, nil
+}
+func matchingSandbox(item *cri.PodSandbox, namespace, name, uid string) bool {
+	md := item.GetMetadata()
+	return md != nil && md.GetNamespace() == namespace && md.GetName() == name && md.GetUid() == uid && item.GetLabels()["io.kubernetes.pod.uid"] == uid && item.GetState() == cri.PodSandboxState_SANDBOX_READY
+}
+func matchingStatus(status *cri.PodSandboxStatus, id, namespace, name, uid, podIP string) bool {
+	md := status.GetMetadata()
+	return status != nil && status.GetId() == id && md != nil && md.GetNamespace() == namespace && md.GetName() == name && md.GetUid() == uid && status.GetLabels()["io.kubernetes.pod.uid"] == uid && status.GetState() == cri.PodSandboxState_SANDBOX_READY && status.GetNetwork().GetIp() == podIP
+}
+
+// Sandbox trusts CRI for sandbox ID -> nsfs path while independently checking
+// its READY Pod identity and pinning a UID-owned live sandbox process.
+func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, name, uid, podIP string) (*os.File, sandboxProof, error) {
+	proof := sandboxProof{pidfd: -1}
+	if namespace == "" || name == "" || uid == "" || podIP == "" {
+		return nil, proof, errors.New("incomplete pod identity")
+	}
+	list, err := service.ListPodSandbox(ctx, &cri.ListPodSandboxRequest{Filter: &cri.PodSandboxFilter{LabelSelector: map[string]string{"io.kubernetes.pod.namespace": namespace, "io.kubernetes.pod.name": name, "io.kubernetes.pod.uid": uid}}})
+	if err != nil {
+		return nil, proof, fmt.Errorf("list CRI sandboxes: %w", err)
+	}
+	var item *cri.PodSandbox
+	for _, candidate := range list.GetItems() {
+		if !matchingSandbox(candidate, namespace, name, uid) {
+			continue
+		}
+		if item != nil {
+			return nil, proof, errors.New("multiple matching ready sandboxes")
+		}
+		item = candidate
+	}
+	if item == nil {
+		return nil, proof, errors.New("matching ready sandbox unavailable")
+	}
+	resp, err := service.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: item.GetId(), Verbose: true})
+	if err != nil {
+		return nil, proof, fmt.Errorf("CRI sandbox status: %w", err)
+	}
+	if !matchingStatus(resp.GetStatus(), item.GetId(), namespace, name, uid, podIP) {
+		return nil, proof, errors.New("sandbox status identity mismatch")
+	}
+	pid, path, err := sandboxInfo(resp.GetInfo())
+	if err != nil {
+		return nil, proof, err
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return nil, proof, fmt.Errorf("pin sandbox PID: %w", err)
+	}
+	proof.pidfd = fd
+	fail := func(err error) (*os.File, sandboxProof, error) {
+		unix.Close(fd)
+		return nil, sandboxProof{pidfd: -1}, err
+	}
+	if err = checkPIDCgroup(fd, pid, uid); err != nil {
+		return fail(err)
+	}
+	f, err := openContainedNetns(path)
+	if err != nil {
+		return fail(fmt.Errorf("open verified sandbox netns: %w", err))
+	}
+	if err = unix.Fstat(int(f.Fd()), &proof.inode); err != nil {
+		f.Close()
+		return fail(err)
+	}
+	proof.id, proof.namespace, proof.name, proof.uid, proof.podIP, proof.pid, proof.path = item.GetId(), namespace, name, uid, podIP, pid, path
+	if err = recheckSandbox(ctx, service, proof, f); err != nil {
+		f.Close()
+		return fail(err)
+	}
+	return f, proof, nil
+}
+
+// openSandboxNetns is retained as a safety-test entry point for CRI verbose
+// payloads; production keeps the pidfd open across every recheck via Sandbox.
+func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
+	pid, path, err := sandboxInfo(info)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
 	if err != nil {
 		return nil, fmt.Errorf("pin sandbox PID: %w", err)
 	}
-	defer unix.Close(pidfd)
-	// A PID alone is not a sandbox identity: require its cgroup to contain
-	// the Kubernetes Pod UID (including systemd's underscore-escaped form).
-	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(details.PID) + "/cgroup")
+	defer unix.Close(fd)
+	if err = checkPIDCgroup(fd, pid, uid); err != nil {
+		return nil, err
+	}
+	f, err := openContainedNetns(path)
 	if err != nil {
-		return nil, fmt.Errorf("read sandbox PID cgroup: %w", err)
+		return nil, err
+	}
+	if err = checkPIDCgroup(fd, pid, uid); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func checkPIDCgroup(fd, pid int, uid string) error {
+	if err := checkPIDAlive(fd); err != nil {
+		return fmt.Errorf("sandbox PID exited: %w", err)
+	}
+	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
+	if err != nil {
+		return fmt.Errorf("read sandbox PID cgroup: %w", err)
 	}
 	if !strings.Contains(string(cgroup), uid) && !strings.Contains(string(cgroup), strings.ReplaceAll(uid, "-", "_")) {
-		return nil, errors.New("sandbox PID cgroup does not match Pod UID")
+		return errors.New("sandbox PID cgroup does not match Pod UID")
 	}
-	if err := checkPIDAlive(pidfd); err != nil {
-		return nil, fmt.Errorf("sandbox PID exited during cgroup verification: %w", err)
+	return checkPIDAlive(fd)
+}
+func recheckSandbox(ctx context.Context, service cri.RuntimeServiceClient, p sandboxProof, f *os.File) error {
+	if f == nil || p.id == "" || p.uid == "" || p.pid <= 1 || p.path == "" || p.pidfd < 0 {
+		return errors.New("incomplete pinned CRI sandbox proof")
 	}
-	// The CRI path is mandatory, confined by openat2, and never followed via
-	// symlinks. Transient setns(pidfd) corroborates this pinned candidate even
-	// when hidepid/Yama forbids opening /proc/<PID>/ns/net directly.
-	var candidate *os.File
-	for _, ns := range details.RuntimeSpec.Linux.Namespaces {
-		if ns.Type != "network" {
+	var current unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &current); err != nil {
+		return err
+	}
+	if !sameNetns(current, p.inode) {
+		return errors.New("pinned CRI namespace FD changed")
+	}
+	if err := checkPIDCgroup(p.pidfd, p.pid, p.uid); err != nil {
+		return err
+	}
+	resp, err := service.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: p.id, Verbose: true})
+	if err != nil {
+		return fmt.Errorf("recheck CRI sandbox status: %w", err)
+	}
+	if !matchingStatus(resp.GetStatus(), p.id, p.namespace, p.name, p.uid, p.podIP) {
+		return errors.New("rechecked sandbox status identity changed")
+	}
+	pid, path, err := sandboxInfo(resp.GetInfo())
+	if err != nil {
+		return err
+	}
+	if pid != p.pid || path != p.path {
+		return errors.New("rechecked sandbox PID or network namespace path changed")
+	}
+	list, err := service.ListPodSandbox(ctx, &cri.ListPodSandboxRequest{Filter: &cri.PodSandboxFilter{LabelSelector: map[string]string{"io.kubernetes.pod.namespace": p.namespace, "io.kubernetes.pod.name": p.name, "io.kubernetes.pod.uid": p.uid}}})
+	if err != nil {
+		return fmt.Errorf("recheck CRI sandbox list: %w", err)
+	}
+	count := 0
+	for _, item := range list.GetItems() {
+		if !matchingSandbox(item, p.namespace, p.name, p.uid) {
 			continue
 		}
-		if candidate != nil {
-			candidate.Close()
-			return nil, errors.New("multiple CRI network namespace paths")
-		}
-		candidate, err = openContainedNetns(ns.Path)
-		if err != nil {
-			return nil, fmt.Errorf("verify CRI-reported network namespace path: %w", err)
+		count++
+		if item.GetId() != p.id {
+			return errors.New("rechecked CRI sandbox ID changed")
 		}
 	}
-	if candidate == nil {
-		return nil, errors.New("CRI network namespace path unavailable")
+	if count != 1 {
+		return errors.New("rechecked CRI ready sandbox missing or duplicated")
 	}
-	if err := verifyPIDNetns(pidfd, candidate); err != nil {
-		candidate.Close()
-		return nil, fmt.Errorf("corroborate CRI path with pinned sandbox PID: %w", err)
+	fresh, err := openContainedNetns(path)
+	if err != nil {
+		return err
 	}
-	if err := checkPIDAlive(pidfd); err != nil {
-		candidate.Close()
-		return nil, fmt.Errorf("sandbox PID exited after namespace comparison: %w", err)
+	defer fresh.Close()
+	var observed unix.Stat_t
+	if err = unix.Fstat(int(fresh.Fd()), &observed); err != nil {
+		return err
 	}
-	return candidate, nil
+	if !sameNetns(observed, p.inode) {
+		return errors.New("rechecked CRI netns path no longer matches pinned FD")
+	}
+	return checkPIDCgroup(p.pidfd, p.pid, p.uid)
 }
 
 // Polling a pidfd distinguishes a live sandbox process from a dead process
@@ -156,87 +246,25 @@ func checkPIDAlive(pidfd int) error {
 	return nil
 }
 
-// pinnedNetnsStat enters a pidfd's netns on a locked OS thread, obtains the
-// actual thread namespace inode and restores the original thread on every
-// return path. In particular, no /proc/<pid>/ns/net dereference is required.
-func pinnedNetnsStat(pidfd int) (entered unix.Stat_t, err error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	original, err := os.Open("/proc/thread-self/ns/net")
+// validateNetworkNamespaceFD enforces nsfs and the kernel namespace type. A
+// regular file under the permitted directory must never become a setns target.
+func validateNetworkNamespaceFD(f *os.File) error {
+	if f == nil {
+		return errors.New("network namespace FD unavailable")
+	}
+	var fs unix.Statfs_t
+	if err := unix.Fstatfs(int(f.Fd()), &fs); err != nil {
+		return fmt.Errorf("stat CRI namespace filesystem: %w", err)
+	}
+	if fs.Type != int64(unix.NSFS_MAGIC) {
+		return errors.New("CRI path does not name an nsfs namespace")
+	}
+	nstype, err := unix.IoctlRetInt(int(f.Fd()), unix.NS_GET_NSTYPE)
 	if err != nil {
-		return entered, fmt.Errorf("save verifier thread namespace: %w", err)
+		return fmt.Errorf("query CRI namespace type: %w", err)
 	}
-	defer original.Close()
-	if err = checkThreadHost(); err != nil {
-		return entered, err
-	}
-	if err := checkPIDAlive(pidfd); err != nil {
-		return entered, fmt.Errorf("pinned process not live before setns: %w", err)
-	}
-	if err := unix.Setns(pidfd, unix.CLONE_NEWNET); err != nil {
-		return entered, fmt.Errorf("enter pinned process network namespace: %w", err)
-	}
-	defer func() {
-		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
-			panic(errors.Join(err, fmt.Errorf("restore verifier thread namespace: %w", restore)))
-		}
-		if e := checkThreadHost(); e != nil {
-			panic(errors.Join(err, fmt.Errorf("restored verifier thread differs from verified host: %w", e)))
-		}
-	}()
-	current, err := os.Open("/proc/thread-self/ns/net")
-	if err != nil {
-		return entered, fmt.Errorf("open verifier thread namespace after setns: %w", err)
-	}
-	defer current.Close()
-	if err := unix.Fstat(int(current.Fd()), &entered); err != nil {
-		return entered, fmt.Errorf("stat verifier thread namespace: %w", err)
-	}
-	if err := checkPIDAlive(pidfd); err != nil {
-		return entered, fmt.Errorf("pinned process exited during namespace comparison: %w", err)
-	}
-	return entered, nil
-}
-
-// verifyPIDNetns compares a live pinned sandbox pidfd with the confined CRI
-// namespace FD. The candidate is rejected against both current thread and PID1
-// before any attempt to enter the sandbox pidfd namespace.
-func verifyPIDNetns(pidfd int, candidate *os.File) error {
-	if candidate == nil {
-		return errors.New("candidate network namespace is required")
-	}
-	if err := rejectHost(candidate); err != nil {
-		return fmt.Errorf("reject forbidden candidate namespace: %w", err)
-	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	original, err := os.Open("/proc/thread-self/ns/net")
-	if err != nil {
-		return fmt.Errorf("save verifier thread namespace: %w", err)
-	}
-	defer original.Close()
-	if err := checkThreadHost(); err != nil {
-		return err
-	}
-	var reported, self unix.Stat_t
-	if err := unix.Fstat(int(candidate.Fd()), &reported); err != nil {
-		return fmt.Errorf("stat confined CRI namespace: %w", err)
-	}
-	if err := unix.Fstat(int(original.Fd()), &self); err != nil {
-		return fmt.Errorf("stat original thread namespace: %w", err)
-	}
-	if err := rejectForbiddenNetns(reported, self); err != nil {
-		return fmt.Errorf("reject current thread namespace before setns: %w", err)
-	}
-	if err := checkThreadHost(); err != nil {
-		return err
-	}
-	entered, err := pinnedNetnsStat(pidfd)
-	if err != nil {
-		return err
-	}
-	if !sameNetns(entered, reported) {
-		return errors.New("reported netns differs from pinned sandbox PID netns")
+	if nstype != unix.CLONE_NEWNET {
+		return errors.New("CRI path does not name a network namespace")
 	}
 	return nil
 }
@@ -260,6 +288,10 @@ func openContainedNetns(path string) (*os.File, error) {
 		return nil, fmt.Errorf("open contained CRI network namespace: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), path)
+	if err := validateNetworkNamespaceFD(f); err != nil {
+		f.Close()
+		return nil, err
+	}
 	if err := rejectHost(f); err != nil {
 		f.Close()
 		return nil, err

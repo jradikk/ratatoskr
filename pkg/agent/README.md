@@ -27,9 +27,15 @@ readiness check also still depends on successful init. Encrypted mode obtains an
 registers with pinned TLS against the gateway PodIP from the agent host netns,
 and only then applies the WireGuard client; a missing CA, registration failure,
 or token failure prevents readiness. Neither token nor WireGuard private key is
-written to Pod metadata or node files by this agent. CRI PID fallback requires
-cgroup ownership containing the exact Pod UID. Unknown CRI verbose formats
-fail closed. The marker is a non-secret in-netns dummy link named `rtk-ready`;
+written to Pod metadata or node files by this agent. The CRI-selected
+network namespace requires READY namespace/name/UID/PodIP metadata, a live
+pidfd whose cgroup contains the Pod UID, exactly one confined nsfs network
+namespace path, and a unique eth0 IPv4 matching PodIP before any nftables or
+routing mutation. The agent rechecks the same CRI sandbox ID/PID/path and
+pinned namespace inode before programming. The path-to-PID netns relationship
+is **trusted CRI authority**, not an independent pidfd namespace attestation:
+RuntimeDefault on the validated runtime denies `setns(pidfd)` even when entry
+through the confined CRI nsfs path succeeds. Unknown CRI shapes fail closed. The marker is a non-secret in-netns dummy link named `rtk-ready`;
 its presence alongside the complete authorized config hash prevents redundant
 route replacement after agent restart.
 
@@ -42,9 +48,12 @@ lifecycle, `ratatoskr-agent` ServiceAccount and the fieldRef declarations.
 Only then does it pin its current thread's netns FD as the host baseline.
 Every resync rechecks the Pod via the API and refuses programming/readiness on
 API failure or identity changes. The candidate CRI netns must differ from that
-pinned baseline and match the pinned sandbox PID via pidfd before programming.
+pinned baseline and correspond to the CRI-reported PodIP on eth0 before
+programming. A pidfd pins the reported PID for cgroup UID/liveness checks, but
+does not independently prove that PID owns the CRI-reported network namespace.
 This is a trusted **kubelet/API inference** that a hostNetwork agent's netns
 is the node host netns; it is not independent PID1 attestation. A cluster
 where the kubelet or API reports false Pod hostNetwork/identity breaks this
-trust model. Kernel 5.10 must support pidfd_open and pidfd setns for sandbox
-proof; otherwise the agent fails closed without adding privileges.
+trust model. Linux 5.10 must support `pidfd_open`, `openat2`, nsfs
+`NS_GET_NSTYPE` and direct `setns` of the CRI-reported nsfs FD; runtimes
+forbidding these syscalls fail closed without added privileges.

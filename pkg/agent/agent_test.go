@@ -64,12 +64,12 @@ func TestSandboxUIDMismatch(t *testing.T) {
 	md := &cri.PodSandboxMetadata{Name: "p", Namespace: "ns", Uid: "other"}
 	labels := map[string]string{"io.kubernetes.pod.uid": "wanted"}
 	f := fakeCRI{item: &cri.PodSandbox{Id: "s", Metadata: md, Labels: labels, State: cri.PodSandboxState_SANDBOX_READY}, response: &cri.PodSandboxStatusResponse{Status: &cri.PodSandboxStatus{Id: "s", Metadata: md, Labels: labels, State: cri.PodSandboxState_SANDBOX_READY}, Info: map[string]string{"info": `{"pid":1}`}}}
-	if n, err := Sandbox(context.Background(), f, "ns", "p", "wanted", "10.1.0.2"); err == nil {
+	if n, _, err := Sandbox(context.Background(), f, "ns", "p", "wanted", "10.1.0.2"); err == nil {
 		n.Close()
 		t.Fatal("accepted mismatched UID")
 	}
 	f.item.Metadata.Uid = "wanted"
-	if n, err := Sandbox(context.Background(), f, "ns", "p", "wanted", "10.1.0.2"); err == nil {
+	if n, _, err := Sandbox(context.Background(), f, "ns", "p", "wanted", "10.1.0.2"); err == nil {
 		n.Close()
 		t.Fatal("accepted mismatched status UID")
 	}

@@ -4,7 +4,7 @@ Status: **code, local component gates and restricted-Pod startup smoke pass; fin
 
 ## Built
 
-- Node DaemonSet uses the local CRI sandbox identity (namespace, name, UID, ready state and PodIP), corroborates the reported netns with the sandbox PID/cgroup/netns inode, rejects both its own and the node host namespace, and only then enters the selected Pod netns on a pinned OS thread. It restores the original namespace even on programming errors.
+- Node DaemonSet uses the local CRI sandbox identity (namespace, name, UID, ready state and PodIP), trusts the CRI-reported netns path after READY Pod UID/name/ns/PodIP status, live pinned sandbox PID/Pod-UID cgroup, confined nsfs-network FD and an in-netns eth0 PodIP check, rejects both its own and the node host namespace, and only then enters the selected Pod netns on a pinned OS thread. It restores the original namespace even on programming errors.
 - `driver: agent` injects a capability-free restricted-compatible wait-init. It cannot read an ordinary API token; its private emptyDir shadow mount leaves the workload's existing ServiceAccount/fsGroup choices intact. It polls the `rtk-ready` dummy link, which the node agent brings UP **last**, after installing routes, nft rules and fail-close fallback.
 - The agent watches assigned Pods and gateway endpoints and periodically resyncs. It hashes authorized configs, adopts an already-UP matching marker after restart without replacing existing tunnel state, recomputes MTU from each workload's own eth0, and updates fixed gateway PodIP routes in place. For encrypted mode, it obtains a Pod UID-bound short-lived TokenRequest in memory, restores the host netns, verifies the gateway TLS identity and registers the peer before installing a usable WG tunnel route. No private key or token is written to a Kubernetes object or the repository.
 - Controller leaves agent-mode datapath-ready annotations to the agent, rather than incorrectly interpreting a still-running wait-init as a failed M2 init. Chart now defaults to the agent driver for production and renders scoped RBAC, hostPID/hostNetwork node agent and a read-only CRI/netns mount only in the operator namespace. `hack/dev-values.yaml` retains init mode; `hack/dev-agent-values.yaml` targets the existing flannel k3d cluster.
@@ -24,3 +24,18 @@ Status: **code, local component gates and restricted-Pod startup smoke pass; fin
 - The component Pod intentionally had no healthy endpoint. The agent reported MTU unavailable and did not mark ready, as designed; CRI setns/marker-up through a healthy real gateway under container RuntimeDefault still needs that final validation.
 - The node agent's hostPID/CRI socket, SYS_ADMIN+NET_ADMIN and cluster-wide Pod/TokenRequest permissions are node-root-equivalent. Restricted **workloads** receive none of these permissions, but operators must secure the agent node placement and API credentials. Runtime-specific CRI paths outside the validated k3d/containerd shape fail clearly rather than guessing.
 - M6 eBPF, M7 HA/observability, M8 compatibility and M9 release are pending. Live OpenVPN inputs must not be copied or logged; unset `RATATOSKR_E2E_OVPN` at the final gate is a **skip**, not a pass.
+
+## October 31, 2026 — CRI-authoritative namespace correction
+
+The earlier claim that the agent independently corroborates the CRI path's
+network namespace inode against `setns(pidfd)` is superseded. RuntimeDefault
+on the validated k3d containerd agent denies `setns(pidfd)`. The agent now
+trusts the authenticated CRI's sandbox-ID → netns path mapping, while requiring
+full READY Pod identity and PodIP, pidfd liveness and Pod-UID cgroup membership,
+exactly one openat2-confined nsfs network namespace FD, host-netns rejection,
+a second CRI status/list/PID/path/inode check before programming, and unique
+in-netns eth0 IPv4 matching PodIP before any datapath mutation. A compromised
+CRI could lie consistently about both the sandbox and path; the agent does not
+claim independent PID-to-netns attestation. No capabilities, RuntimeDefault
+settings or node privilege requirements were broadened. Restricted workload
+packet-level e2e remains deferred until independently validated.

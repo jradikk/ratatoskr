@@ -20,6 +20,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
@@ -67,6 +68,9 @@ func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, g
 		return errors.New("client config and backend factory are required")
 	}
 	return InNamespace(target, func() error {
+		if err := verifyTargetPodIPv4(cfg.PodIP); err != nil {
+			return err
+		}
 		if !remove {
 			if err := guardWorkload(); err != nil {
 				return err
@@ -235,16 +239,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return errors.New("unsafe existing agent config or encryption transition")
 		}
 	}
-	target, err := Sandbox(ctx, r.CRI, pod.Namespace, pod.Name, string(pod.UID), pod.Status.PodIP)
+	target, sandboxProof, err := Sandbox(ctx, r.CRI, pod.Namespace, pod.Name, string(pod.UID), pod.Status.PodIP)
 	if err != nil {
 		return fmt.Errorf("verify sandbox network namespace: %w", err)
 	}
 	defer target.Close()
+	defer unix.Close(sandboxProof.pidfd)
+	if err := recheckSandbox(ctx, r.CRI, sandboxProof, target); err != nil {
+		return fmt.Errorf("recheck CRI sandbox before programming: %w", err)
+	}
 	gatewayMTU := cfg.MTU
 	if !removing {
 		// Install the namespace-wide IPv6 guard before registration or
 		// steering. Inspect on every resync, including marker/hash adoption.
 		if err = InNamespace(target, func() error {
+			if e := verifyTargetPodIPv4(cfg.PodIP); e != nil {
+				return fmt.Errorf("verify selected workload IPv4 before nft mutations: %w", e)
+			}
 			if e := guardWorkload(); e != nil {
 				return fmt.Errorf("install workload IPv6 fail-closed guard: %w", e)
 			}
@@ -259,6 +270,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	if !removing && cfg.Encryption == "wireguard" && mode == "ebpf" {
 		// Explicitly refuse eBPF WireGuard before issuing a token or opening
 		// any registration socket unless backend advertises WG management.
+		if err = recheckSandbox(ctx, r.CRI, sandboxProof, target); err != nil {
+			return fmt.Errorf("recheck sandbox before backend capability: %w", err)
+		}
 		if err = InNamespace(target, func() error { return checkWireGuardSupport(factory) }); err != nil {
 			return err
 		}
@@ -272,6 +286,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			if json.Unmarshal([]byte(pod.Annotations[ConfigAnnotation]), &old) != nil || old.Encryption != cfg.Encryption {
 				return errors.New("unsafe encryption transition; refusing plaintext fallback")
 			}
+		}
+		if err = recheckSandbox(ctx, r.CRI, sandboxProof, target); err != nil {
+			return fmt.Errorf("recheck sandbox before peer preparation: %w", err)
 		}
 		var publicKey string
 		if err = InNamespace(target, func() error {
@@ -305,6 +322,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		if err = registration.RegisterClient(ctx, registration.ClientRequest{GatewayPodIP: cfg.Endpoint, RegistrationCACert: []byte(cfg.RegistrationCACert), ClientPublicKey: publicKey, AgentHostNetwork: true, TokenProvider: func(ctx context.Context) (string, error) { return podBoundToken(ctx, r.Tokens, pod) }}); err != nil {
 			return fmt.Errorf("authenticate gateway peer: %w", err)
 		}
+	}
+	if err = recheckSandbox(ctx, r.CRI, sandboxProof, target); err != nil {
+		return fmt.Errorf("recheck sandbox before datapath programming: %w", err)
 	}
 	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
 		if errors.Is(err, errUnsupportedIPv6) {
