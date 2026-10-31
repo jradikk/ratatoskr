@@ -125,6 +125,15 @@ class ProbeTests(unittest.TestCase):
                 app.direct_api("10.43.0.1", "10.42.2.5")
                 ca.assert_called_with(cafile=app.CA)
 
+    def test_marker_timeout_tx_delta_is_diagnostic_only(self):
+        for before, after, want in ((4, 5, 48), (4, 4, 49), (None, 5, 43), (4, None, 43)):
+            with self.subTest(before=before, after=after):
+                with patch.object(app, "direct_api"), \
+                     patch.object(app, "marker_result", side_effect=app.MarkerFailure("connect-timeout")), \
+                     patch.object(app, "client_geneve_tx_packets", side_effect=[before, after] if before is not None else [None]):
+                    self.assertEqual(app.main(["healthy", "10.43.0.1"], {"POD_IP": "10.42.2.5"}), want)
+                    self.assertNotEqual(want, app.BLOCKED)
+
     def test_only_selected_unreachable_errno_qualifies(self):
         import errno
         class Sock:

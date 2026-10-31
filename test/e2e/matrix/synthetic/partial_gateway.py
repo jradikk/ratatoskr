@@ -220,7 +220,8 @@ def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.m
                                37: "direct-after-api-success", 38: "direct-after-api-other",
                                41: "marker-unreachable", 43: "marker-connect-timeout", 44: "marker-refused",
                                45: "marker-response-invalid", 46: "marker-other-failed",
-                               47: "marker-response-timeout"}
+                               47: "marker-response-timeout", 48: "marker-connect-timeout-geneve-tx",
+                               49: "marker-connect-timeout-no-geneve-tx"}
                 label = ("wait-init-failed" if init_exit not in (None, 0) else
                          app_failure.get(app_exit, "app-failed") if app_exit not in (None, 0) else
                          "pod-failed-unknown")

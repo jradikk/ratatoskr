@@ -751,6 +751,36 @@ race, lint, vet, build and privileged checks passed. The 96-cell M8 matrix
 and live VPN tier remain incomplete/SKIPPED respectively, and M9 publication
 remains withheld.
 
+## October 31, 2026 — selected GENEVE egress observed, return remains unproved
+
+A test-only, nonroot and capability-free helper added a **read-only**, capped
+counter check for `/sys/class/net/rtk0/statistics/tx_packets` around its
+selected marker TCP connect. Exact immutable image IDs were rechecked on all
+existing nodes for each guarded real retry. The helper reported a **positive
+GENEVE TX delta while its TCP connect timed out**. This proves the attempt
+reached the selected GENEVE link, not that a packet reached or passed the
+gateway, traversed the VPN or returned. The exact marked client FIB lookup
+resolved to `rtk0`, while the unmarked lookup for the same target resolved to
+`eth0` as expected for inclusion-only policy; the public-CA direct API path
+still completed. The controller-managed Gateway ConfigMap's allowlist grew
+from zero to one client and the UDP6081 NetworkPolicy's selector matched that
+selected namespace/Pod. No security restriction was disabled.
+
+During one status-only gateway sample, `gnv0` TX *drop* counters increased
+while RX packets remained zero. An early read of return table 101 saw only
+the fail-closed unreachable fallback; repeated external observations did **not**
+capture a trustworthy post-allowlist return-route state before fixture cleanup.
+These counters are not synchronized same-packet proof and must not be used to
+attribute a specific drop to the selected flow. Host TC/outer UDP header
+sampling was inconclusive. An 8-second **test-only** failed-app hold was
+tried solely for read-only inspection and then removed; the helper again exits
+promptly with its original nonzero failure code. Neither a speculative route,
+firewall, privilege nor overlay change was made. Both UID-owned namespaces
+and private PKI were verified removed, release remained agent/iproute with
+agent 3/3 Ready. A deterministic return-route/flower/outer-header trace tied
+to the *same selected packet* is required before a datapath correction or
+M8/M9 claim. The live VPN profile is still absent/SKIPPED.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from

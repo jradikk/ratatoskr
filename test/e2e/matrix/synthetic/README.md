@@ -22,6 +22,13 @@ probe correctly accepts only exact 401 Unauthorized or 403 Forbidden. The
 selected marker then timed out during TCP connect. Test-only exit codes
 identify fixed DNS/route/TLS/marker subchecks without logging bodies, errors
 or credentials; no timeout or arbitrary failure counts as fail-closed evidence.
+A read-only optional `rtk0` TX counter check now distinguishes a marker TCP
+connect timeout with increased selected GENEVE egress from one with no counter
+increase; **neither is a PASS** or evidence of delivery to the Gateway/VPN.
+In the guarded flannel/agent/iproute retry, TX increased but connect still
+timed out. The source of the packet loss/return failure remains unverified;
+see the October 31 final-gate report for precise limits. No client netns
+mutation, privilege or runtime override was added to this fixture.
 
 ## Separately gated init-driver/nonrestricted partial traffic (never M8 PASS)
 

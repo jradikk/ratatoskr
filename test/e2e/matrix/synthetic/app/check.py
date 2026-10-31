@@ -2,8 +2,8 @@
 """Fixed one-shot restricted client. Exit 0 healthy, 42 verified unreachable.
 
 No shell, no credential reads, no request/response/error output. Failure
-codes 11–13, 21–28 and 31–38 name only fixed failed stages, never qualify
-as fail-close evidence. Invalid invocation exits 1. No Kubernetes API token.
+codes 11–13, 21–28, 31–38, and 41–49 name only fixed failed stages, never
+qualify as fail-close evidence. Invalid invocation exits 1. No Kubernetes API token.
 """
 import errno
 import ipaddress
@@ -161,6 +161,19 @@ def direct_api(api_ip, pod_ip):
         raise DirectFailure("tls-status") from None
 
 
+def client_geneve_tx_packets():
+    """Optional read-only test diagnostic; never used to award traffic PASS."""
+    try:
+        with open("/sys/class/net/rtk0/statistics/tx_packets", "rb") as source:
+            raw = source.read(32)
+        if not raw or len(raw) == 32 or not raw.strip().isdigit():
+            return None
+        count = int(raw)
+        return count if 0 <= count < (1 << 64) else None
+    except (OSError, ValueError):
+        return None
+
+
 def marker_result():
     deadline = time.monotonic() + 5
     try:
@@ -213,9 +226,14 @@ def main(argv=None, environ=None):
                 "tls-verify": 24, "tls-status": 25}[exc.stage]
     except failures:
         return 11  # Unknown direct-path failure before selected probe.
+    before = client_geneve_tx_packets() if mode == "healthy" else None
     try:
         result = marker_result()
     except MarkerFailure as exc:
+        if mode == "healthy" and exc.category == "connect-timeout" and before is not None:
+            after = client_geneve_tx_packets()
+            if after is not None:
+                return 48 if after > before else 49  # Neither is PASS.
         return {"unreachable": 41, "connect-timeout": 43, "refused": 44,
                 "response": 45, "other": 46, "response-timeout": 47}[exc.category]
     except failures:

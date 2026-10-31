@@ -131,6 +131,8 @@ class SmokeTests(unittest.TestCase):
                                               (0, 45, "marker-response-invalid"),
                                               (0, 46, "marker-other-failed"),
                                               (0, 47, "marker-response-timeout"),
+                                              (0, 48, "marker-connect-timeout-geneve-tx"),
+                                              (0, 49, "marker-connect-timeout-no-geneve-tx"),
                                               (0, 17, "app-failed"),
                                               (None, None, "pod-failed-unknown")):
             with self.subTest(category=category):
