@@ -116,6 +116,8 @@ class TokenReviewTest(unittest.TestCase):
         self.assertFalse(result["gatewayTokenReviewObserved"])
         self.assertEqual(len(calls), 7)
         self.assertFalse(responses)
+        self.assertEqual([call[3] for call in calls],
+                         [8192, 65536, 16384, 8192, 8192, 8192, 65536])
         self.assertTrue(all("secret-only-in-stdin" not in " ".join(argv) for argv, *_ in calls))
         self.assertEqual(calls[2][0][-4:], ["--raw", "/api/v1/namespaces/" + NS +
                                                     "/serviceaccounts/default/token", "-f", "-"])
@@ -126,6 +128,46 @@ class TokenReviewTest(unittest.TestCase):
                          [[t.AUDIENCE], [t.WRONG_AUDIENCE]])
         self.assertEqual([json.loads(c[1])["spec"]["token"] for c in calls[3:5]],
                          [BEARER, BEARER])
+
+    def test_each_checkpoint_reports_only_fixed_stage_even_for_secret_exception(self):
+        for index, stage in enumerate(("namespace-pre", "pod-pre", "token-request",
+                                       "positive-review", "negative-review",
+                                       "namespace-post", "pod-post")):
+            responses = [namespace(), pod(), request(), positive(), negative(), namespace(), pod()]
+            calls = []
+            def fake_transport(_argv, *, payload, timeout, max_output):
+                calls.append((payload, max_output))
+                if len(calls) == index + 1:
+                    raise RuntimeError("PRIVATE JWT: " + BEARER)
+                return json.dumps(responses.pop(0)).encode()
+            with patch.dict(os.environ, GATES, clear=True):
+                with self.assertRaises(t.StageBlocked) as caught:
+                    t.execute(NS, UID, SA, OWNER, GATEWAY, transport=fake_transport)
+            self.assertEqual(caught.exception.stage, stage)
+            self.assertEqual(str(caught.exception), "Independent TokenReview blocked at " + stage + ".")
+            self.assertNotIn(BEARER, str(caught.exception))
+        with self.assertRaises(t.Blocked):
+            t.StageBlocked("secret:" + BEARER)
+
+    def test_large_pod_response_is_bounded_and_malformed_identity_is_sanitized(self):
+        responses = [namespace(), pod(), request(), positive(), negative(), namespace(), pod()]
+        oversized_pod = pod()
+        oversized_pod["metadata"]["annotations"] = {"ratatoskr.skaldhall.io/agent-config": "x" * 12000}
+        responses[1] = oversized_pod
+        responses[6] = oversized_pod
+        def fake_transport(_argv, *, payload, timeout, max_output):
+            raw = json.dumps(responses.pop(0)).encode()
+            self.assertLessEqual(len(raw), max_output)
+            return raw
+        with patch.dict(os.environ, GATES, clear=True):
+            self.assertFalse(t.execute(NS, UID, SA, OWNER, GATEWAY,
+                                       transport=fake_transport)["gatewayTokenReviewObserved"])
+        with patch.object(t, "execute", side_effect=t.StageBlocked("pod-pre")):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), patch.dict(os.environ, GATES, clear=True):
+                self.assertEqual(t.main(["--execute", "--namespace", NS]), 1)
+            self.assertIn("pod-pre", output.getvalue())
+            self.assertNotIn(BEARER, output.getvalue())
 
     def test_changed_pod_or_negative_authenticated_blocks_without_secret_output(self):
         for altered_index, altered in ((6, pod("d" * 32)), (4, positive())):

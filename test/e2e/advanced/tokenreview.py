@@ -29,6 +29,20 @@ class Blocked(Exception):
     """Fixed, token-free diagnostic; do not print underlying exceptions."""
 
 
+# These are authored checkpoint names, never untrusted Kubernetes/API text.
+STAGES = frozenset({"namespace-pre", "pod-pre", "token-request", "positive-review",
+                    "negative-review", "namespace-post", "pod-post"})
+
+
+class StageBlocked(Blocked):
+    """Sanitized operation checkpoint without raw API, token, or CLI output."""
+    def __init__(self, stage):
+        if stage not in STAGES:
+            raise Blocked("Independent TokenReview checkpoint invalid.")
+        self.stage = stage
+        super().__init__("Independent TokenReview blocked at " + stage + ".")
+
+
 def require(condition):
     if not condition:
         raise Blocked("Independent TokenReview identity or audience check failed.")
@@ -124,31 +138,48 @@ def execute(namespace, uid, service_account, token, gateway, *, transport=adapte
             os.environ.get("RATATOSKR_E2E_WG_SYNTHETIC") == "1" and
             os.environ.get("RATATOSKR_E2E_TOKENREVIEW") == "1")
     identity(namespace, uid, service_account, token, gateway)
-    def call(args, *, payload=None, max_output=8192):
-        timeout = 12 if remaining is None else min(12, remaining())
-        return _call(args, payload=payload, max_output=max_output,
-                     timeout=timeout, transport=transport)
+    def checkpoint(stage, args, *, validator, payload=None, max_output=8192):
+        # Never expose the raw response, bearer, subprocess diagnostics or
+        # parser exception even when called directly by the owned fixture.
+        try:
+            timeout = 12 if remaining is None else min(12, remaining())
+            result = _call(args, payload=payload, max_output=max_output,
+                           timeout=timeout, transport=transport)
+            return validator(result)
+        except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+            raise
+        except BaseException:
+            raise StageBlocked(stage) from None
+
     ns_args = ["get", "namespace", namespace, "-o", "json"]
     pod_args = ["get", "pod", POD, "--namespace", namespace, "-o", "json"]
-    ns_uid = validate_namespace(call(ns_args), namespace, token)
-    validate_pod(call(pod_args), namespace, uid, service_account, token, gateway)
+    ns_uid = checkpoint("namespace-pre", ns_args,
+                        validator=lambda obj: validate_namespace(obj, namespace, token))
+    checkpoint("pod-pre", pod_args, max_output=65536,
+               validator=lambda obj: validate_pod(obj, namespace, uid, service_account,
+                                                  token, gateway))
     body = {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
             "spec": {"audiences": [AUDIENCE], "expirationSeconds": 600,
                      "boundObjectRef": {"apiVersion": "v1", "kind": "Pod", "name": POD, "uid": uid}}}
     request_path = "/api/v1/namespaces/" + namespace + "/serviceaccounts/" + service_account + "/token"
-    request = call(["create", "--raw", request_path, "-f", "-"],
-                   payload=json.dumps(body, separators=(",", ":")).encode(), max_output=16384)
-    bearer = validate_request(request, namespace, uid, service_account)
+    bearer = checkpoint("token-request", ["create", "--raw", request_path, "-f", "-"],
+                        validator=lambda obj: validate_request(obj, namespace, uid, service_account),
+                        payload=json.dumps(body, separators=(",", ":")).encode(), max_output=16384)
     # A single Pod-bound token is reviewed under both audiences; never put it
     # into process argv. The second review MUST be unauthenticated outright.
-    for audience, positive in ((AUDIENCE, True), (WRONG_AUDIENCE, False)):
+    for audience, positive, stage in ((AUDIENCE, True, "positive-review"),
+                                      (WRONG_AUDIENCE, False, "negative-review")):
         review = {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview",
                   "spec": {"token": bearer, "audiences": [audience]}}
-        result = call(["create", "--raw", "/apis/authentication.k8s.io/v1/tokenreviews", "-f", "-"],
-                      payload=json.dumps(review, separators=(",", ":")).encode(), max_output=8192)
-        validate_review(result, namespace, uid, service_account, positive=positive)
-    require(validate_namespace(call(ns_args), namespace, token) == ns_uid)
-    validate_pod(call(pod_args), namespace, uid, service_account, token, gateway)
+        checkpoint(stage, ["create", "--raw", "/apis/authentication.k8s.io/v1/tokenreviews", "-f", "-"],
+                   payload=json.dumps(review, separators=(",", ":")).encode(), max_output=8192,
+                   validator=lambda obj: validate_review(obj, namespace, uid, service_account,
+                                                         positive=positive))
+    checkpoint("namespace-post", ns_args,
+               validator=lambda obj: require(validate_namespace(obj, namespace, token) == ns_uid))
+    checkpoint("pod-post", pod_args, max_output=65536,
+               validator=lambda obj: validate_pod(obj, namespace, uid, service_account,
+                                                  token, gateway))
     return {"independentKubernetesTokenReview": "exact-pod-uid-sa-audience-and-negative-audience-verified",
             "gatewayTokenReviewObserved": False}
 
@@ -170,6 +201,9 @@ def main(argv=None):
     try:
         execute(args.namespace, args.pod_uid, args.service_account,
                 args.lifecycle_token, args.gateway)
+    except StageBlocked as err:
+        print("FAILED: " + str(err) + " Gateway behavior unverified.")
+        return 1
     except (Blocked, adapter.AdapterError, KeyError, ValueError, TypeError, AttributeError):
         print("FAILED: independent Kubernetes TokenReview check blocked; gateway behavior unverified.")
         return 1
