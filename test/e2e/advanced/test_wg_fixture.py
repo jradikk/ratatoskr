@@ -127,11 +127,17 @@ class WireGuardFixtureTest(unittest.TestCase):
                          "receive_bytes": 12, "transmit_bytes": 16},
                         {"sample_ok": 1, "installed_peers": 0}])
         workload = w.selected_pod(owner, gw.name, "10.43.0.1")
-        with patch.object(w.partial_gateway, "source_ready", return_value=True):
+        with patch.dict(w.os.environ, {"RATATOSKR_E2E_TOKENREVIEW": "1"}), \
+                patch.object(w.tokenreview, "execute", return_value={"gatewayTokenReviewObserved": False}) as review, \
+                patch.object(w.partial_gateway, "source_ready", return_value=True):
             result = w.observe(owner, source, gw, UID, workload, IDS,
                                metrics_reader=lambda *_args: next(samples),
                                clock=lambda: 0, sleep=lambda _seconds: self.fail("no retry needed"))
+        review.assert_called_once()
+        self.assertEqual(review.call_args.args, (owner.names[1], UID, "default", owner.token, gw.name))
+        self.assertEqual(review.call_args.kwargs["remaining"](), owner.deadline - 40)
         self.assertTrue(result["encryptedStartup"] and result["peerRemoved"] and source.deleted)
+        self.assertEqual(result["tokenReview"], "not-independently-observed")
         self.assertEqual(result["plainGeneve"], "not-tested")
 
     def test_observer_typed_stage_not_replaced_by_peer_lifecycle(self):

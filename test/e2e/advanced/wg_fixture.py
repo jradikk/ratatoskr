@@ -27,6 +27,7 @@ import node_images  # noqa: E402
 import partial_gateway  # noqa: E402
 import prepare  # noqa: E402
 import run  # noqa: E402
+import tokenreview  # noqa: E402 - independent API diagnostic, not gateway evidence
 
 SYSTEM = "ratatoskr-system"
 OWN = lifecycle.LABEL
@@ -44,7 +45,7 @@ class Blocked(lifecycle.LifecycleError):
 CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
     "fixture-manifests", "source-create", "operator-secret-create",
     "operator-gateway-create", "source-ready", "gateway-owned",
-    "peer-baseline", "peer-registration", "peer-revocation",
+    "peer-baseline", "peer-registration", "independent-tokenreview", "peer-revocation",
     "peer-lifecycle", "cleanup-unverified"})
 
 
@@ -545,6 +546,18 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
             sleep(min(2, max(0, registration_deadline - clock())))
     else:
         raise StageBlocked(step)
+    # Optional, separately authorized Kubernetes API diagnostic while the
+    # owner-created selected Pod still exists. This does not observe whether
+    # the gateway made its own TokenReview, and never upgrades M8 to PASS.
+    if os.environ.get("RATATOSKR_E2E_TOKENREVIEW") == "1":
+        try:
+            tokenreview.execute(owner.names[1], client_uid,
+                                pod.get("spec", {}).get("serviceAccountName", "default"),
+                                owner.token, operator.name,
+                                remaining=lambda: owner.deadline - clock() - 40)
+        except (tokenreview.Blocked, adapter.AdapterError, KeyError, ValueError,
+                TypeError, AttributeError):
+            raise StageBlocked("independent-tokenreview") from None
     step = "peer-revocation"
     try:
         operator.delete_selected(source_api)
