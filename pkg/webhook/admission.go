@@ -24,16 +24,17 @@ import (
 )
 
 const (
-	prefix           = "ratatoskr.skaldhall.io/"
-	GatewayLabel     = prefix + "gateway"
-	GatewayNamespace = prefix + "gateway-namespace"
-	ConfigAnnotation = prefix + "client-config"
-	ReadyAnnotation  = prefix + "datapath-ready"
-	initName         = "ratatoskr-init"
-	configVolume     = "ratatoskr-client-config"
-	wgTokenVolume    = "ratatoskr-wg-token"             // #nosec G101 -- volume name, not a token value.
-	wgTokenAudience  = "ratatoskr.skaldhall.io/gateway" // #nosec G101 -- projected token audience, not a credential.
-	wgTokenMount     = "/var/run/ratatoskr/wg-token"    // #nosec G101 -- fixed mount path, not token bytes.
+	prefix               = "ratatoskr.skaldhall.io/"
+	GatewayLabel         = prefix + "gateway"
+	GatewayNamespace     = prefix + "gateway-namespace"
+	ConfigAnnotation     = prefix + "client-config"
+	ReadyAnnotation      = prefix + "datapath-ready"
+	appliedAckAnnotation = prefix + "gateway-applied-ack"
+	initName             = "ratatoskr-init"
+	configVolume         = "ratatoskr-client-config"
+	wgTokenVolume        = "ratatoskr-wg-token"             // #nosec G101 -- volume name, not a token value.
+	wgTokenAudience      = "ratatoskr.skaldhall.io/gateway" // #nosec G101 -- projected token audience, not a credential.
+	wgTokenMount         = "/var/run/ratatoskr/wg-token"    // #nosec G101 -- fixed mount path, not token bytes.
 )
 
 type Handler struct {
@@ -156,13 +157,16 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 	}
 	pod.Annotations[ConfigAnnotation] = string(raw)
 	pod.Annotations[ReadyAnnotation] = "pending"
+	if h.driver() == "init" {
+		pod.Annotations[appliedAckAnnotation] = ""
+	}
 	if h.driver() == "agent" {
 		// The node agent programs the pod netns and installs rtk-ready last. This
 		// init only waits; it needs no API token, NET_ADMIN or config mount.
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: agentShadowVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 		pod.Spec.InitContainers = append([]corev1.Container{agentWaitInit(h.InitImage)}, pod.Spec.InitContainers...)
 	} else {
-		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}}}}})
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}, {Path: "applied-ack.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + appliedAckAnnotation + "']"}}}}}})
 		privileged, nonRoot, root := false, false, int64(0)
 		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{
 			RunAsUser: &root, RunAsNonRoot: &nonRoot, Privileged: &privileged, AllowPrivilegeEscalation: &privileged,
@@ -404,6 +408,10 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 				}
 			}
 		}
+		if h.driver() == "init" && old.Labels[GatewayLabel] != "" && !sameMapEntry(old.Annotations, pod.Annotations, appliedAckAnnotation) &&
+			(h.agentNamespace() == "" || req.UserInfo.Username != "system:serviceaccount:"+h.agentNamespace()+":ratatoskr-controller") {
+			return denied(fmt.Errorf("only the operator controller may update init applied gateway acknowledgement"))
+		}
 		// A restarted init can read the annotation again. Do not allow a pod
 		// creator to swap a validated policy, exclusion or remote after CREATE.
 		if old.Labels[GatewayLabel] != "" && !sameMapEntry(old.Annotations, pod.Annotations, ConfigAnnotation) {
@@ -543,14 +551,18 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 			if volume.Name != configVolume {
 				continue
 			}
-			if volumeFound || volume.DownwardAPI == nil || len(volume.DownwardAPI.Items) != 1 {
-				return fmt.Errorf("expected unique Ratatoskr Downward API config volume")
+			if volumeFound || volume.DownwardAPI == nil || len(volume.DownwardAPI.Items) != 2 {
+				return fmt.Errorf("expected unique Ratatoskr config and applied-ack Downward API volume")
 			}
-			item := volume.DownwardAPI.Items[0]
-			if item.Path != "client.json" || item.FieldRef == nil ||
-				item.FieldRef.FieldPath != "metadata.annotations['"+ConfigAnnotation+"']" ||
-				(item.FieldRef.APIVersion != "" && item.FieldRef.APIVersion != "v1") {
-				return fmt.Errorf("expected Ratatoskr annotation projection")
+			for i, item := range volume.DownwardAPI.Items {
+				path, field := "client.json", "metadata.annotations['"+ConfigAnnotation+"']"
+				if i == 1 {
+					path, field = "applied-ack.json", "metadata.annotations['"+appliedAckAnnotation+"']"
+				}
+				if item.Path != path || item.FieldRef == nil || item.FieldRef.FieldPath != field ||
+					(item.FieldRef.APIVersion != "" && item.FieldRef.APIVersion != "v1") {
+					return fmt.Errorf("expected immutable Ratatoskr config and applied-ack annotation projection")
+				}
 			}
 			volumeFound = true
 		}
@@ -565,6 +577,9 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 				return fmt.Errorf("agent driver must not project Ratatoskr config or gateway token")
 			}
 		}
+	}
+	if h.driver() == "init" && pod.Annotations[appliedAckAnnotation] != "" {
+		return fmt.Errorf("init applied gateway acknowledgement must begin pending")
 	}
 	if pod.Annotations[ReadyAnnotation] != "pending" {
 		return fmt.Errorf("datapath readiness must remain pending until init succeeds")

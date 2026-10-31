@@ -104,6 +104,42 @@ func run(configPath string, remove bool) error {
 	if remove {
 		return backend.RemoveClient(context.Background(), cfg)
 	}
+	if cfg.Endpoint.IsValid() {
+		// Block selected traffic before any gateway registration or usable
+		// tunnel. The controller must first attest this exact client in the
+		// gateway process's applied config, not merely API ConfigMap writes.
+		closed := cfg
+		closed.Endpoint = netip.Addr{}
+		closed.GatewayPublicKey = ""
+		closed.RegistrationCACert = ""
+		closed.WireGuardPort = 0
+		if err := backend.ApplyClient(context.Background(), closed); err != nil {
+			return fmt.Errorf("install init unreachable fallback: %w", err)
+		}
+		waitCtx, cancel := context.WithTimeout(context.Background(), appliedAckTimeout)
+		defer cancel()
+		if err := waitAppliedAck(waitCtx, cfg, readProjectedAck, appliedAckInterval); err != nil {
+			return err
+		}
+		// Projected downward API volumes update asynchronously: refuse a
+		// withdrawn/changed acknowledgement immediately before enabling path.
+		raw, e := readProjectedAck()
+		if e != nil {
+			return fmt.Errorf("recheck applied gateway ack: %w", e)
+		}
+		if e = validateAppliedAck(raw, cfg); e != nil {
+			return e
+		}
+	}
+	if !cfg.Endpoint.IsValid() {
+		// An admission-time fail-closed config cannot select a later endpoint:
+		// the init driver is fixed to its original PodIP. Keep the unreachable
+		// fallback and do not start the application; recreate after recovery.
+		if err := backend.ApplyClient(context.Background(), cfg); err != nil {
+			return fmt.Errorf("install init unreachable fallback: %w", err)
+		}
+		return errors.New("no selected healthy gateway endpoint; recreate init-driver Pod after recovery")
+	}
 	if cfg.Encryption == "wireguard" && cfg.Endpoint.IsValid() {
 		manager, ok := backend.(datapath.WireGuardManager)
 		if !ok {
@@ -119,6 +155,15 @@ func run(configPath string, remove bool) error {
 			BypassMark:         datapath.WireGuardMark,
 		}); err != nil {
 			return fmt.Errorf("authenticate gateway peer: %w", err)
+		}
+	}
+	if cfg.Endpoint.IsValid() {
+		raw, e := readProjectedAck()
+		if e != nil {
+			return fmt.Errorf("recheck applied gateway ack before programming: %w", e)
+		}
+		if e = validateAppliedAck(raw, cfg); e != nil {
+			return e
 		}
 	}
 	return backend.ApplyClient(context.Background(), cfg)

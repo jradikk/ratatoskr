@@ -514,6 +514,25 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.status(ctx, &gw, ready, "GatewayHealth", "gateway Pod and upstream must be healthy"); err != nil {
 		return ctrl.Result{}, err
 	}
+	if r.Options.Driver != "agent" {
+		var current api.EgressGateway
+		if err := r.Get(ctx, client.ObjectKeyFromObject(&gw), &current); err != nil {
+			return ctrl.Result{}, err
+		}
+		var desiredConfig *corev1.ConfigMap
+		for _, obj := range resources {
+			if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == gw.Name {
+				desiredConfig = cm
+				break
+			}
+		}
+		if desiredConfig == nil {
+			return ctrl.Result{}, fmt.Errorf("owner-controlled gateway config unavailable for init ack")
+		}
+		if err := r.reconcileInitAppliedAck(ctx, &current, desiredConfig.Data["gateway.json"]); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
@@ -551,7 +570,14 @@ func (r *GatewayReconciler) block(ctx context.Context, gw *api.EgressGateway, re
 		return ctrl.Result{}, e
 	}
 	gw.Status.Endpoints = nil
-	return r.failure(ctx, gw, reason, err)
+	result, failureErr := r.failure(ctx, gw, reason, err)
+	if failureErr != nil {
+		return result, failureErr
+	}
+	if err := r.reconcileInitAppliedAck(ctx, gw, ""); err != nil {
+		return ctrl.Result{}, err
+	}
+	return result, nil
 }
 func (r *GatewayReconciler) unsupported(ctx context.Context, gw *api.EgressGateway, why string) (ctrl.Result, error) {
 	return r.block(ctx, gw, "Unsupported", fmt.Errorf("%s", why))
