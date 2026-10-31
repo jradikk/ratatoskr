@@ -310,6 +310,35 @@ func (r *GatewayReconciler) managedGatewayPod(ctx context.Context, gw *api.Egres
 	return true, nil
 }
 
+// expectedGatewayConfigHash hashes the exact bytes that Kubernetes projects
+// from our owner-controlled ConfigMap; decoding/re-encoding would change the
+// digest and could falsely acknowledge a configuration the Pod never applied.
+func expectedGatewayConfigHash(objects []client.Object, gw *api.EgressGateway) (string, error) {
+	for _, object := range objects {
+		cm, ok := object.(*corev1.ConfigMap)
+		if !ok || cm.Name != gw.Name || cm.Namespace != gw.Namespace || !metav1.IsControlledBy(cm, gw) {
+			continue
+		}
+		raw, exists := cm.Data["gateway.json"]
+		if !exists || raw == "" {
+			return "", fmt.Errorf("rendered gateway.json is missing")
+		}
+		sum := sha256.Sum256([]byte(raw))
+		return hex.EncodeToString(sum[:]), nil
+	}
+	return "", fmt.Errorf("owner-controlled rendered gateway ConfigMap unavailable")
+}
+
+// validGatewayAck never trusts a stale /info response from an old Pod at a
+// reused PodIP. An ack is published only for the current managed Pod UID and
+// the exact desired ConfigMap bytes; upstream health is evaluated separately.
+func validGatewayAck(pod *corev1.Pod, info gatewayInfo, expectedHash string) bool {
+	if pod == nil || pod.UID == "" || expectedHash == "" || len(expectedHash) != 64 {
+		return false
+	}
+	return info.PodUID == string(pod.UID) && info.AppliedClientConfigHash == expectedHash
+}
+
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var gw api.EgressGateway
 	if err := r.Get(ctx, req.NamespacedName, &gw); err != nil {
@@ -527,14 +556,16 @@ func podReady(p *corev1.Pod) bool {
 }
 
 type gatewayInfo struct {
-	ExitIP       string `json:"exitIP"`
-	Ready        bool   `json:"ready"`
-	PodMTU       int32  `json:"podMTU"`
-	GeneveMTU    int32  `json:"geneveMTU"`
-	WireguardMTU int32  `json:"wireguardMTU"`
-	UpstreamMTU  int32  `json:"upstreamMTU"`
-	EffectiveMTU int32  `json:"effectiveMTU"`
-	MSS          int32  `json:"mss"`
+	ExitIP                  string `json:"exitIP"`
+	Ready                   bool   `json:"ready"`
+	PodMTU                  int32  `json:"podMTU"`
+	GeneveMTU               int32  `json:"geneveMTU"`
+	WireguardMTU            int32  `json:"wireguardMTU"`
+	UpstreamMTU             int32  `json:"upstreamMTU"`
+	EffectiveMTU            int32  `json:"effectiveMTU"`
+	MSS                     int32  `json:"mss"`
+	PodUID                  string `json:"podUID"`
+	AppliedClientConfigHash string `json:"appliedClientConfigHash"`
 }
 
 func (i gatewayInfo) measured() bool {

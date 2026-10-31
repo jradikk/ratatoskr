@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
@@ -19,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -95,6 +99,18 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 	g, u := tpl.Spec.Containers[0], tpl.Spec.Containers[1]
 	if !reflect.DeepEqual(g.Command, []string{"/ratatoskr", "-config", "/config/gateway.json"}) || g.Env[0].Name != "POD_IP" {
 		t.Fatal("gateway command/downward IP incorrect")
+	}
+	uidEnv := 0
+	for _, env := range g.Env {
+		if env.Name == "POD_UID" {
+			uidEnv++
+			if env.ValueFrom == nil || env.ValueFrom.FieldRef == nil || env.ValueFrom.FieldRef.FieldPath != "metadata.uid" {
+				t.Fatalf("gateway POD_UID must use Downward API: %+v", env)
+			}
+		}
+	}
+	if uidEnv != 1 {
+		t.Fatalf("gateway must receive exactly one POD_UID env in plain mode: %d", uidEnv)
 	}
 	for _, m := range g.VolumeMounts {
 		if m.Name == "upstream" {
@@ -181,7 +197,13 @@ func TestEBPFGatewayRenderingAndWireGuardRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	gateway := objects[2].(*appsv1.Deployment).Spec.Template.Spec.Containers[0]
-	if len(gateway.Env) < 2 || gateway.Env[1].Name != "DATAPATH" || gateway.Env[1].Value != "ebpf" {
+	ebpfEnv := false
+	for _, env := range gateway.Env {
+		if env.Name == "DATAPATH" && env.Value == "ebpf" {
+			ebpfEnv = true
+		}
+	}
+	if !ebpfEnv {
 		t.Fatalf("missing eBPF gateway mode: %+v", gateway.Env)
 	}
 	if !reflect.DeepEqual(gateway.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "BPF", "PERFMON"}) {
@@ -330,6 +352,63 @@ func TestMissingClusterCIDRsFailsClosed(t *testing.T) {
 	var dep appsv1.Deployment
 	if err := r.Get(ctx, req.NamespacedName, &dep); err == nil {
 		t.Fatal("forwarding deployment created with unknown cluster CIDRs")
+	}
+}
+
+func TestGatewayAppliedConfigHashUsesExactRenderedBytes(t *testing.T) {
+	r, gw := fixture(t)
+	gw.Status.GatewayID = 123
+	objects, err := r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := expectedGatewayConfigHash(objects, gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := objects[0].(*corev1.ConfigMap).Data["gateway.json"]
+	sum := sha256.Sum256([]byte(raw))
+	if hash != hex.EncodeToString(sum[:]) {
+		t.Fatalf("hash is not exact rendered bytes: %s", hash)
+	}
+	other := objects[0].(*corev1.ConfigMap).DeepCopy()
+	other.Data["gateway.json"] = " " + raw
+	altered, err := expectedGatewayConfigHash([]client.Object{other}, gw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if altered == hash {
+		t.Fatal("whitespace byte change did not change hash")
+	}
+	other.OwnerReferences = nil
+	if _, err := expectedGatewayConfigHash([]client.Object{other}, gw); err == nil {
+		t.Fatal("unowned ConfigMap trusted")
+	}
+}
+func TestGatewayAckRequiresMatchingPodUIDAndAppliedHash(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "current-pod"}}
+	info := gatewayInfo{Ready: true, PodUID: "current-pod", AppliedClientConfigHash: hash}
+	if !validGatewayAck(pod, info, hash) {
+		t.Fatal("current Pod and desired applied hash not acknowledged")
+	}
+	info.AppliedClientConfigHash = strings.Repeat("b", 64)
+	if validGatewayAck(pod, info, hash) {
+		t.Fatal("stale config hash acknowledged")
+	}
+	info.AppliedClientConfigHash = hash
+	info.PodUID = "old-pod"
+	if validGatewayAck(pod, info, hash) {
+		t.Fatal("old Pod UID acknowledged")
+	}
+	info.PodUID = ""
+	if validGatewayAck(pod, info, hash) {
+		t.Fatal("missing Pod UID acknowledged")
+	}
+	info.PodUID = "current-pod"
+	info.AppliedClientConfigHash = ""
+	if validGatewayAck(pod, info, hash) {
+		t.Fatal("ready upstream without applied hash acknowledged")
 	}
 }
 

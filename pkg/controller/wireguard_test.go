@@ -95,6 +95,15 @@ func TestRenderWireGuardIdentityAndIngress(t *testing.T) {
 			t.Fatalf("missing gateway identity %s", name)
 		}
 	}
+	uidCount := 0
+	for _, env := range pod.Containers[0].Env {
+		if env.Name == "POD_UID" {
+			uidCount++
+		}
+	}
+	if uidCount != 1 {
+		t.Fatalf("encrypted gateway must not receive duplicate POD_UID env: %d", uidCount)
+	}
 	policy := objects[len(objects)-1].(*networkingv1.NetworkPolicy)
 	ports := map[int32]bool{}
 	for _, rule := range policy.Spec.Ingress {
