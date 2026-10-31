@@ -343,6 +343,9 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         except (KeyboardInterrupt, SystemExit):
             print("FAILED: partial Gateway smoke interrupted; verify cleanup and orphan state.")
             return 1
+        except outage.RestoreBlocked:
+            print("FAILED: synthetic probe-switch restoration unverified; UID-owned namespace cleanup was attempted. Inspect orphan state privately.")
+            return 1
         except (partial_gateway.Blocked, outage.Blocked) as err:
             # Only fixed checkpoint labels from our own observer are reported;
             # never serialize arbitrary API responses, profiles or exception chains.

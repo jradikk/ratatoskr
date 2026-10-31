@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from contextlib import contextmanager
 import sys
 import unittest
 from unittest.mock import patch
@@ -77,6 +78,26 @@ class API:
 
 
 class OutageTests(unittest.TestCase):
+    @contextmanager
+    def _fake_execute(self, owner, api):
+        objects = [{"kind": kind, "metadata": {"name": name,
+                    "namespace": owner.names[1] if kind == "EgressPolicy" else owner.names[0]}}
+                   for kind, name in o.partial_gateway.BASE]
+        objects.append({"kind": "Pod", "metadata": {"name": "synthetic-witness", "namespace": owner.names[0]}})
+        baseline = {"gatewayUID": UID, "serverUID": UID, "gatewayPodUID": UID,
+                    "gatewayID": 9, "endpoint": "10.42.0.5", "session": {}}
+        def healthy(*_args):
+            return {"podUID": UID, "healthyExit": True, "directAPITLSAndDNS": True,
+                    "serverSessionBytesAdvanced": True}
+        with patch.object(o.partial_gateway, "private_contents", return_value=()), \
+             patch.object(o.prepare, "manifests", return_value=objects), \
+             patch.object(o.prepare, "running_probe_pod", return_value={"kind": "Pod", "metadata": {
+                 "name": "synthetic-client", "namespace": owner.names[1]}}), \
+             patch.object(o, "poll", return_value={}):
+            yield lambda: o.execute({name: IMAGE for name in o.run.COMPONENTS}, api_ip="10.43.0.1",
+                                    lifecycle_factory=lambda **kw: owner, adapter_factory=lambda _owner: api,
+                                    observer=lambda *_args: baseline, healthy=healthy)
+
     def run_fake(self, *, fail_stage=None):
         owner = Owner()
         api = API(owner)
@@ -114,6 +135,55 @@ class OutageTests(unittest.TestCase):
                                            adapter_factory=lambda _owner: api,
                                            observer=observer, healthy=healthy))
         return owner.events
+
+    def test_probe_body_failure_preserves_fixed_stage_after_verified_cleanup(self):
+        owner = Owner()
+        api = API(owner)
+        original = api.probe_running
+        def fail(name, uid, image, phase, api_ip):
+            if name == "synthetic-client" and phase == "outage":
+                raise o.adapter.AdapterError("PRIVATE_TOKEN_FROM_UNTRUSTED_TRANSPORT")
+            return original(name, uid, image, phase, api_ip)
+        api.probe_running = fail
+        with self._fake_execute(owner, api) as run:
+            with self.assertRaisesRegex(o.Blocked, "withdrawn-selected-fail-close") as caught:
+                run()
+        self.assertNotIn("PRIVATE_TOKEN", str(caught.exception))
+        self.assertEqual(owner.events[-1], "cleanup")
+        self.assertIn("restore", owner.events)
+
+    def test_restoration_failure_distinct_from_probe_body_failure(self):
+        owner = Owner()
+        api = API(owner)
+        class FailedRestore(ExitSwitch):
+            def __exit__(self, *_):
+                self.api.owner.events.append("restore-failed")
+                raise o.adapter.RestorationError("PRIVATE_TOKEN")
+        api.exit_health_outage = lambda: FailedRestore(api)
+        with self._fake_execute(owner, api) as run:
+            with self.assertRaisesRegex(o.RestoreBlocked, "probe-switch restoration unverified") as caught:
+                run()
+        self.assertNotIn("PRIVATE_TOKEN", str(caught.exception))
+        self.assertEqual(owner.events[-1], "cleanup")
+
+    def test_cleanup_failure_overrides_body_checkpoint(self):
+        class CleanupFailure(Owner):
+            def __exit__(self, *_):
+                self.events.append("cleanup-failed")
+                raise o.lifecycle.LifecycleError("Final-gate cleanup unverified (namespace).")
+        owner = CleanupFailure()
+        api = API(owner)
+        original = api.probe_running
+        def fail(name, uid, image, phase, api_ip):
+            if name == "synthetic-client" and phase == "outage":
+                raise o.adapter.AdapterError("PRIVATE_TOKEN")
+            return original(name, uid, image, phase, api_ip)
+        api.probe_running = fail
+        with self._fake_execute(owner, api) as run:
+            with self.assertRaisesRegex(o.lifecycle.LifecycleError, "cleanup unverified") as caught:
+                run()
+        self.assertNotIn("withdrawn-selected-fail-close", str(caught.exception))
+        self.assertEqual(owner.events[-1], "cleanup-failed")
 
     def test_ordered_healthy_outage_witness_restore_recovery_and_cleanup(self):
         events = self.run_fake()

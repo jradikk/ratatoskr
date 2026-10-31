@@ -571,6 +571,14 @@ python3 test/e2e/matrix/synthetic/static-check.py
 sh -n test/e2e/matrix/synthetic/server/start.sh
 ```
 
+On a bounded outage runner failure, fixed checkpoint labels distinguish a
+body `AdapterError` (including the selected/witness exec return category) after
+successful UID-owned cleanup from a true namespace/private-PKI cleanup failure.
+A probe-only ConfigMap restoration failure is separately typed and cannot be
+reported as a routine selected-probe failure. All unknown exceptions remain
+suppressed; no private stdout, API body, Pod log or profile is surfaced. These
+labels are diagnostic only, **never** acceptance evidence or M8 PASS.
+
 ## Restricted agent existing-workload outage/recovery (authored; NOT executed)
 
 The newly separate `--execute-agent-outage` path is an executable, explicitly

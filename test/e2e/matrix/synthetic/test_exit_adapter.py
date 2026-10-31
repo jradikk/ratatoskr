@@ -143,7 +143,7 @@ class AdapterProbeTests(unittest.TestCase):
 
     def test_intervening_same_uid_writer_blocks_restore(self):
         api, wire = fixture()
-        with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):
+        with self.assertRaisesRegex(a.RestorationError, "restoration unverified"):
             with api.exit_health_outage():
                 wire.version += 1  # same UID/label but external update
         self.assertEqual(wire.state, "false")
@@ -151,7 +151,7 @@ class AdapterProbeTests(unittest.TestCase):
 
     def test_intervening_reenable_blocks_false_success(self):
         api, wire = fixture()
-        with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):
+        with self.assertRaisesRegex(a.RestorationError, "restoration unverified"):
             with api.exit_health_outage():
                 wire.state = "true"
                 wire.version += 1
@@ -159,7 +159,7 @@ class AdapterProbeTests(unittest.TestCase):
 
     def test_replacement_during_outage_blocks_restore_no_false_pass(self):
         api, wire = fixture()
-        with self.assertRaisesRegex(a.AdapterError, "restoration unverified"):
+        with self.assertRaisesRegex(a.RestorationError, "restoration unverified"):
             with api.exit_health_outage():
                 wire.uid = "d" * 32
         self.assertEqual(wire.state, "false")  # cannot write a foreign object

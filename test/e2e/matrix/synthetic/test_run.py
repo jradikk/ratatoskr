@@ -180,6 +180,35 @@ class GateTests(unittest.TestCase):
                                       env, SmokeAPI, lambda _ids, **_kw: True,
                                       lambda _ids, **_kw: (_ for _ in ()).throw(RuntimeError("SECRET"))), 1)
         self.assertEqual(seen, [("smoke", "10.43.0.1")])
+    def test_outage_cli_reports_fixed_body_stage_vs_true_cleanup_failure(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1",
+               "RATATOSKR_E2E_AGENT_OUTAGE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        class SmokeAPI(FakeAPI):
+            def get(self, resource, name=None, namespace=None, selector=None):
+                if (resource, name, namespace) == ("service", "kubernetes", "default"):
+                    return {"metadata": {"name": name, "namespace": namespace},
+                            "spec": {"type": "ClusterIP", "clusterIP": "10.43.0.1"}}
+                return super().get(resource, name, namespace, selector)
+        args = ["--execute", "--allow-partial-vpn-smoke", "--execute-agent-outage"]
+        # Standalone test imports the same synthetic module via run.py path.
+        import outage
+        for failure, expected, forbidden in (
+                (outage.Blocked("Synthetic outage body blocked at withdrawn-selected-fail-close."),
+                 "withdrawn-selected-fail-close", "lifecycle unverified"),
+                (outage.RestoreBlocked("Synthetic outage probe-switch restoration unverified."),
+                 "probe-switch restoration unverified", "withdrawn-selected-fail-close"),
+                (outage.lifecycle.LifecycleError("Final-gate cleanup unverified (namespace)."),
+                 "lifecycle unverified", "withdrawn-selected-fail-close")):
+            with self.subTest(expected=expected):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = run.main(args, env, SmokeAPI, lambda _ids, **_kw: None,
+                                      lambda _ids, **_kw: (_ for _ in ()).throw(failure))
+                self.assertEqual(result, 1)
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn(forbidden, output.getvalue())
+
     def test_gateway_smoke_blocks_stale_controller_image_refs_before_mutation(self):
         env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
         env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})

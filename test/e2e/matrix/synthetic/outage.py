@@ -19,6 +19,10 @@ class Blocked(lifecycle.LifecycleError):
     """Only fixed sanitized stage names; no untrusted API/exec output."""
 
 
+class RestoreBlocked(Blocked):
+    """Owned probe switch restoration unverified despite namespace cleanup."""
+
+
 def deadline(owner, clock, seconds):
     end = min(owner.deadline, clock() + seconds)
     if owner.closed or owner.clock() >= owner.deadline or end <= clock():
@@ -139,78 +143,111 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
     except (ValueError, TypeError):
         raise Blocked("Preflight API IPv4 invalid.") from None
     with lifecycle_factory(duration=900) as owner:
-        owner.create_namespaces()
-        owner.generate_pki()
-        api = adapter_factory(owner)
-        ns, apps = owner.names
-        objects = prepare.manifests(ns, "ratatoskr-synthetic-openvpn:local",
-                                    partial_gateway.private_contents(owner.private_dir), owner.token)
-        base = [x for x in objects if (x["kind"], x["metadata"].get("name")) in partial_gateway.BASE]
-        if [(x["kind"], x["metadata"]["name"]) for x in base] != list(partial_gateway.BASE):
-            raise Blocked("Outage fixture allowlist differs.")
-        created = {}
-        for item in base:
-            identity = api.create(item)
-            created[(identity["kind"], identity["namespace"], identity["name"])] = identity["uid"]
-        baseline = observer(api, owner, ids, created)
-        if (not isinstance(baseline, dict) or set(baseline) !=
-                {"gatewayUID", "serverUID", "gatewayPodUID", "gatewayID", "endpoint", "session"} or
-                baseline["gatewayUID"] != created[("EgressGateway", ns, "synthetic")] or
-                baseline["serverUID"] != created[("Pod", ns, "synthetic-vpn")]):
-            raise Blocked("Healthy controller-owned baseline incomplete.")
-        first = healthy(api, owner, ids, created, baseline, str(address))
-        if (not isinstance(first, dict) or first.get("healthyExit") is not True or
-                first.get("directAPITLSAndDNS") is not True or
-                first.get("serverSessionBytesAdvanced") is not True or
-                not lifecycle.UID.fullmatch(first.get("podUID", ""))):
-            raise Blocked("Healthy one-shot evidence missing before outage.")
-        running = api.create(prepare.running_probe_pod(apps, ns, str(address)))
-        uid = running["uid"]
-        if (running["kind"], running["namespace"], running["name"]) != ("Pod", apps, "synthetic-client"):
-            raise Blocked("Running selected Pod CREATE identity mismatch.")
-        poll(owner, "running-selected", lambda: selected_ready(api, apps, "synthetic-client", uid,
-             ids["selected"], baseline, api_ip=str(address)), seconds=90, clock=clock, sleep=sleep)
-        marker_ready(api, apps, uid, ids["selected"])
-        api.probe_running("synthetic-client", uid, ids["selected"], "healthy", str(address))
-        witness_items = [item for item in objects if item["kind"] == "Pod" and
-                         item["metadata"].get("name") == "synthetic-witness" and
-                         item["metadata"].get("namespace") == ns]
-        if len(witness_items) != 1:
-            raise Blocked("Independent witness Pod fixture missing or ambiguous.")
-        witness = witness_items[0]
-        witness_id = api.create(witness)
-        if (witness_id["kind"], witness_id["namespace"], witness_id["name"]) != ("Pod", ns, "synthetic-witness"):
-            raise Blocked("Independent witness CREATE identity mismatch.")
-        # The witness is intentionally selected independently and connects with
-        # its own client cert; it cannot inherit gateway steering.
-        poll(owner, "independent-witness", lambda: witness_ready(api, ns, witness_id["uid"],
-             ids["witness"], baseline["serverUID"], ids["server"]), seconds=85, clock=clock, sleep=sleep)
-        switch_uid, _, state = api.exit_health_snapshot()
-        if switch_uid != created[("ConfigMap", ns, "synthetic-exit-health")] or state != "true":
-            raise Blocked("Probe-only ConfigMap CREATE UID changed.")
-        endpoint = baseline["endpoint"]
-        with api.exit_health_outage():
-            # API CAS does not prove projected ConfigMap volume changed. The
-            # independent authenticated witness must see an exact tunnel-bound
-            # HTTP 503 (empty body) from /exit before checking controller state.
-            poll(owner, "exit-projection", lambda: (
-                 True if api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"],
-                                           "exit-off", str(address)) else None),
-                 seconds=85, clock=clock, sleep=sleep)
-            poll(owner, "gateway-withdrawal", lambda: gateway_state(api, ns, baseline["gatewayUID"],
-                 baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=85, clock=clock, sleep=sleep)
-            api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"], "outage", str(address))
-            # The running selected Pod had its wait-init exit successfully BEFORE
-            # withdrawal; a newly created outage Pod could remain blocked at init.
-            api.probe_running("synthetic-client", uid, ids["selected"], "outage", str(address))
-            poll(owner, "outage-still-withdrawn", lambda: gateway_state(api, ns, baseline["gatewayUID"],
-                 baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=8, clock=clock, sleep=sleep)
-            api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"], "outage", str(address))
-        poll(owner, "gateway-recovery", lambda: gateway_state(api, ns, baseline["gatewayUID"],
-             baseline["gatewayPodUID"], healthy=True, endpoint=endpoint), seconds=85, clock=clock, sleep=sleep)
-        poll(owner, "agent-recovery", lambda: selected_ready(api, apps, "synthetic-client", uid,
-             ids["selected"], baseline, api_ip=str(address)), seconds=85, clock=clock, sleep=sleep)
-        api.probe_running("synthetic-client", uid, ids["selected"], "healthy", str(address))
-        if api.get("pod", "synthetic-client", apps)["metadata"].get("uid") != uid:
-            raise Blocked("Recovered selected Pod UID changed.")
+        stage = "namespace-create"
+        try:
+            owner.create_namespaces()
+            stage = "private-pki"
+            owner.generate_pki()
+            stage = "fixture-adapter"
+            api = adapter_factory(owner)
+            ns, apps = owner.names
+            stage = "fixture-manifests"
+            objects = prepare.manifests(ns, "ratatoskr-synthetic-openvpn:local",
+                                        partial_gateway.private_contents(owner.private_dir), owner.token)
+            base = [x for x in objects if (x["kind"], x["metadata"].get("name")) in partial_gateway.BASE]
+            if [(x["kind"], x["metadata"]["name"]) for x in base] != list(partial_gateway.BASE):
+                raise Blocked("Outage fixture allowlist differs.")
+            created = {}
+            stage = "fixture-create"
+            for item in base:
+                identity = api.create(item)
+                created[(identity["kind"], identity["namespace"], identity["name"])] = identity["uid"]
+            stage = "baseline-owner-health"
+            baseline = observer(api, owner, ids, created)
+            if (not isinstance(baseline, dict) or set(baseline) !=
+                    {"gatewayUID", "serverUID", "gatewayPodUID", "gatewayID", "endpoint", "session"} or
+                    baseline["gatewayUID"] != created[("EgressGateway", ns, "synthetic")] or
+                    baseline["serverUID"] != created[("Pod", ns, "synthetic-vpn")]):
+                raise Blocked("Healthy controller-owned baseline incomplete.")
+            stage = "healthy-one-shot"
+            first = healthy(api, owner, ids, created, baseline, str(address))
+            if (not isinstance(first, dict) or first.get("healthyExit") is not True or
+                    first.get("directAPITLSAndDNS") is not True or
+                    first.get("serverSessionBytesAdvanced") is not True or
+                    not lifecycle.UID.fullmatch(first.get("podUID", ""))):
+                raise Blocked("Healthy one-shot evidence missing before outage.")
+            stage = "running-selected-create"
+            running = api.create(prepare.running_probe_pod(apps, ns, str(address)))
+            uid = running["uid"]
+            if (running["kind"], running["namespace"], running["name"]) != ("Pod", apps, "synthetic-client"):
+                raise Blocked("Running selected Pod CREATE identity mismatch.")
+            stage = "running-selected-ready"
+            poll(owner, "running-selected", lambda: selected_ready(api, apps, "synthetic-client", uid,
+                 ids["selected"], baseline, api_ip=str(address)), seconds=90, clock=clock, sleep=sleep)
+            stage = "running-selected-marker"
+            marker_ready(api, apps, uid, ids["selected"])
+            stage = "running-selected-healthy"
+            api.probe_running("synthetic-client", uid, ids["selected"], "healthy", str(address))
+            witness_items = [item for item in objects if item["kind"] == "Pod" and
+                             item["metadata"].get("name") == "synthetic-witness" and
+                             item["metadata"].get("namespace") == ns]
+            if len(witness_items) != 1:
+                raise Blocked("Independent witness Pod fixture missing or ambiguous.")
+            witness = witness_items[0]
+            stage = "independent-witness-create"
+            witness_id = api.create(witness)
+            if (witness_id["kind"], witness_id["namespace"], witness_id["name"]) != ("Pod", ns, "synthetic-witness"):
+                raise Blocked("Independent witness CREATE identity mismatch.")
+            # The witness is intentionally selected independently and connects with
+            # its own client cert; it cannot inherit gateway steering.
+            stage = "independent-witness-ready"
+            poll(owner, "independent-witness", lambda: witness_ready(api, ns, witness_id["uid"],
+                 ids["witness"], baseline["serverUID"], ids["server"]), seconds=85, clock=clock, sleep=sleep)
+            stage = "probe-switch-identity"
+            switch_uid, _, state = api.exit_health_snapshot()
+            if switch_uid != created[("ConfigMap", ns, "synthetic-exit-health")] or state != "true":
+                raise Blocked("Probe-only ConfigMap CREATE UID changed.")
+            endpoint = baseline["endpoint"]
+            stage = "probe-switch-disable"
+            with api.exit_health_outage():
+                # API CAS does not prove projected ConfigMap volume changed. The
+                # independent authenticated witness must see an exact tunnel-bound
+                # HTTP 503 (empty body) from /exit before checking controller state.
+                stage = "exit-projection"
+                poll(owner, "exit-projection", lambda: (
+                     True if api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"],
+                                               "exit-off", str(address)) else None),
+                     seconds=85, clock=clock, sleep=sleep)
+                stage = "gateway-withdrawal"
+                poll(owner, "gateway-withdrawal", lambda: gateway_state(api, ns, baseline["gatewayUID"],
+                     baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=85, clock=clock, sleep=sleep)
+                stage = "withdrawn-witness-marker"
+                api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"], "outage", str(address))
+                # The running selected Pod had its wait-init exit successfully BEFORE
+                # withdrawal; a newly created outage Pod could remain blocked at init.
+                stage = "withdrawn-selected-fail-close"
+                api.probe_running("synthetic-client", uid, ids["selected"], "outage", str(address))
+                stage = "outage-still-withdrawn"
+                poll(owner, "outage-still-withdrawn", lambda: gateway_state(api, ns, baseline["gatewayUID"],
+                     baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=8, clock=clock, sleep=sleep)
+                stage = "withdrawn-witness-marker-recheck"
+                api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"], "outage", str(address))
+            stage = "gateway-recovery"
+            poll(owner, "gateway-recovery", lambda: gateway_state(api, ns, baseline["gatewayUID"],
+                 baseline["gatewayPodUID"], healthy=True, endpoint=endpoint), seconds=85, clock=clock, sleep=sleep)
+            stage = "agent-recovery"
+            poll(owner, "agent-recovery", lambda: selected_ready(api, apps, "synthetic-client", uid,
+                 ids["selected"], baseline, api_ip=str(address)), seconds=85, clock=clock, sleep=sleep)
+            stage = "recovered-selected-healthy"
+            api.probe_running("synthetic-client", uid, ids["selected"], "healthy", str(address))
+            stage = "recovered-selected-identity"
+            if api.get("pod", "synthetic-client", apps)["metadata"].get("uid") != uid:
+                raise Blocked("Recovered selected Pod UID changed.")
+        except adapter.RestorationError:
+            # The context manager's finally failed: never imply a routine
+            # selected-probe failure when the probe switch is unconfirmed.
+            raise RestoreBlocked("Synthetic outage probe-switch restoration unverified.") from None
+        except (adapter.AdapterError, evidence.EvidenceError, KeyError, IndexError, TypeError,
+                ValueError, AttributeError, StopIteration):
+            raise Blocked("Synthetic outage body blocked at " + stage + ".") from None
     return False  # Cleanup verified by Lifecycle; full M8 stays INCOMPLETE.

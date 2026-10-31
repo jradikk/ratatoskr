@@ -24,6 +24,10 @@ class AdapterError(Exception):
     """Constant non-secret diagnostics only; untrusted stdout/stderr suppressed."""
 
 
+class RestorationError(AdapterError):
+    """Probe-only ConfigMap restoration failed; no body checkpoint is a PASS."""
+
+
 # Exact fixture names, kinds, container names; no arbitrary kubectl flags.
 RESOURCES = {
     "pod": frozenset({"synthetic-vpn", "synthetic-client", "synthetic-witness",
@@ -385,7 +389,7 @@ class FixtureAPI:
             except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
                 raise
             except BaseException:
-                raise AdapterError("Probe-only ConfigMap restoration unverified; no PASS permitted.") from None
+                raise RestorationError("Probe-only ConfigMap restoration unverified; no PASS permitted.") from None
 
     def list_owned_gateway_pods(self, namespace, gateway_uid):
         """One exact labelled Pod; caller must check Deployment→RS→Pod chain."""
