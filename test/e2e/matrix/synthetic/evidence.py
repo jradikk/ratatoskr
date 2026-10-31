@@ -224,7 +224,9 @@ def assert_selected_probe(pod, *, namespace, phase, expected_uid, expected_image
     shadow = {"name": "ratatoskr-agent-api-shadow", "emptyDir": {}}
     if (len(spec.get("volumes", [])) != 2 or public_ca not in spec["volumes"] or
             shadow not in spec["volumes"] or
-            app.get("env") != [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}]):
+            app.get("env") not in (
+                [{"name": "POD_IP", "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}}],
+                [{"name": "POD_IP", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.podIP"}}}])):
         raise EvidenceError("Selected probe API CA/agent shadow/env differs from fixture.")
     statuses = [x for x in status.get("containerStatuses", []) if x.get("name") == "client"]
     if len(statuses) != 1 or statuses[0].get("imageID") != expected_image_id:

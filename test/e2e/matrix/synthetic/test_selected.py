@@ -89,6 +89,21 @@ class SelectedTests(unittest.TestCase):
             self.assertEqual(result, {"phase": phase, "verifiedExit": 42 if phase == "outage" else 0, "uid": UID})
         self.assertEqual(len(ids), 3)
 
+    def test_api_defaulted_fieldref_version_is_allowed_but_other_versions_rejected(self):
+        item, _, _ = pod("healthy")
+        field = item["spec"]["containers"][0]["env"][0]["valueFrom"]["fieldRef"]
+        field["apiVersion"] = "v1"
+        expected = dict(namespace=APP, phase="healthy", expected_uid=UID,
+                        expected_image_id=IMAGE, expected_api_ip="10.43.0.1")
+        evidence.assert_selected_probe(item, **expected)
+        field["apiVersion"] = "v2"
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.assert_selected_probe(item, **expected)
+        field["apiVersion"] = "v1"
+        field["fieldPath"] = "metadata.name"
+        with self.assertRaises(evidence.EvidenceError):
+            evidence.assert_selected_probe(item, **expected)
+
     def test_tamper_denials_and_interval(self):
         item, start, end = pod("outage")
         for tamper in (

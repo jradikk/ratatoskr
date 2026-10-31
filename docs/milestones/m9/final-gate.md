@@ -781,6 +781,54 @@ agent 3/3 Ready. A deterministic return-route/flower/outer-header trace tied
 to the *same selected packet* is required before a datapath correction or
 M8/M9 claim. The live VPN profile is still absent/SKIPPED.
 
+## October 31, 2026 — packet capture and applied-configuration startup fix
+
+A bounded passive tcpdump-equivalent investigation used existing host tools
+inside the existing k3d node network namespaces. Only UDP6081 header summaries
+were parsed in capped memory; no pcap or packet bodies were retained. The exact
+selected-client → gateway tuple was observed 15 times on both source and gateway
+nodes, with no reverse tuple in that capture. A later same-fixture gateway
+sample observed `gnv0` RX grow from 0 to 5. This disproved a blanket claim that
+Flannel or the external firewall prevented all delivery. The controller's API
+ConfigMap then contained one client, but the **actual gateway container's**
+projected `/config/gateway.json` still contained zero and return table 101 had
+only its unreachable fallback. The agent's local ready marker was premature:
+upstream health does not acknowledge that a newly selected client is installed.
+A temporary fixed sleep was tested and removed; no production sleeps or runtime
+patches were used as a remedy.
+
+The integrated startup protocol now hashes the exact validated bytes read from
+one gateway ConfigMap file descriptor and publishes that digest only after a
+successful datapath application. Read/probe/apply failure revokes the proof;
+failed application retries even when desired bytes are unchanged. The controller
+binds `/info.podUID` to its verified Pod→ReplicaSet→Deployment→Gateway ownership
+chain and publishes endpoint-specific `podUID` and `appliedClientConfigHash`
+only when the applied hash matches its current desired ConfigMap. Upstream health
+and measured MTU remain independent of a missing client acknowledgement. The
+agent uses existing live Pod GETs plus newly documented ConfigMap GET permission
+to check exact endpoint UID, owner-controlled ConfigMap, raw digest and its PodIP
+membership. While acknowledgement is missing or stale it applies the unreachable
+client path, removes the ready marker and leaves the workload pending; ordinary
+projection lag does not make the DaemonSet unready. No additional Linux capability,
+privileged mode, workload API token, or runtime/seccomp change was introduced.
+
+After locally rebuilding/importing gateway/controller/agent images, updating the
+optional CRD status schema and completing the operator rollouts, a restricted
+selected workload progressed Pending → Running → Succeeded. Initial harness
+rejection was independently traced solely to Kubernetes defaulting
+`fieldRef.apiVersion` to `v1`; the assertion now accepts omitted or exact `v1`
+while rejecting any other version or field path. The final guarded partial
+OpenVPN smoke passed its inner owner/status/session and selected one-shot checks:
+exact tunnel-only marker, public-CA anonymous API TLS denial and direct DNS/API
+route checks, exit 0, current agent routing configuration, and supporting server
+session counter growth. It deliberately returned **4 / INCOMPLETE**, not a full
+M8 PASS: counter growth alone is not packet attribution, and witness, withdrawal,
+recovery, WireGuard, HA, other CNI/mesh cells and Linux 5.10 remain unaccepted.
+Both UID-owned namespaces and private PKI were verified removed. Full integrated
+Go race/lint/vet/build/privileged checks passed before deployment; the updated
+synthetic evidence suite passed 125 fake tests. The live VPN profile remains
+absent/SKIPPED and no release was published or signed.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from

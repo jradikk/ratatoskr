@@ -1,5 +1,14 @@
 # Synthetic OpenVPN — input scaffold, NOT an executed e2e
 
+Latest bounded agent runtime result (October 31, 2026): after adding a
+controller-owner-bound **gateway-applied configuration acknowledgement**, the
+restricted one-shot selected workload fetched the exact tunnel-only marker and
+passed its direct Kubernetes DNS/public-CA API checks with exit 0. Both temporary
+namespaces/private PKI were verified removed. The partial runner correctly exits
+**4 / INCOMPLETE**: this is not the full compatibility, witness, outage/recovery,
+WireGuard, HA or release gate. Historical failure notes below describe earlier
+runs; see the final-gate report for the applied-ack protocol and validation.
+
 Runtime status (October 30, 2026): the guarded init-driver partial smoke was
 executed twice against the existing cluster after a parent-managed release
 switch. The real Gateway and OpenVPN session reached the healthy baseline, but
