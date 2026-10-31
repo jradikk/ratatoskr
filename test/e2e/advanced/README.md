@@ -48,6 +48,40 @@ network capture context, no credential/TokenReview observation adapter and no
 parent authorization to mutate the cluster. Until implemented and run, this
 scenario is **NOT COVERED**. `test/e2e/matrix/coverage.json` remains unchanged.
 
+## Explicit-gated read-only HA observer (live, NOT run during authoring)
+
+`ha_live.py` is an executable bounded **read-only** collector against an
+already-approved agent/iproute release with 2–3 healthy replicas, one selected
+client Pod and a controller-owned Gateway. It reads only GETs of the named
+Gateway, its Deployment, owned ReplicaSets/Pods and the selected Pod. Every
+GET is deadline/output bounded; CLI stderr and raw API JSON never enter the
+report. It validates UID owner chains, Gateway readiness and applied-config
+acknowledgements, the selected Pod's agent config/hash and its pinned gateway
+PodIP. It waits up to 90 seconds for an **external operator-owned** withdrawal
+of precisely the replica that client chose, and verifies the client reselects
+one remaining healthy gateway in two consecutive snapshots. It never scales,
+deletes, patches, opens a VPN profile, executes in Pods or accesses a Secret.
+
+The parent/operator must first approve exact existing context, namespace/name
+and Pod UID, verify the release, network and safe failover procedure, then
+coordinate the replica failure **outside** this collector. No automated failure
+injection is provided. Only after that approval, invoke explicitly:
+
+```sh
+RATATOSKR_E2E_FINAL_GATE=1 python3 test/e2e/advanced/ha_live.py --execute \\
+  --context CONTEXT --gateway-namespace GATEWAY_NS --gateway-name GATEWAY_NAME \\
+  --pod-namespace CLIENT_NS --pod-name CLIENT_NAME
+```
+
+If the chosen replica does not disappear within the bound or any UID/gateway
+identity changes, this exits nonzero. The sole positive report explicitly says
+`traffic: not-tested` and `establishedFlowContinuity: not-asserted`; it is **not**
+a network/marker/VPN or WireGuard acceptance pass. A full M7 gate still needs
+fresh post-failover selected marker delivery and exit-IP evidence from a new
+connection, plus a no-endpoint fail-close check. Parent must not award coverage
+from this observer alone. The collector does not create/own the Gateway, so
+live cleanup and subsequent recovery remain solely with the parent/operator.
+
 ## HA boundary
 
 The Go test checks deterministic 1–3 endpoint selection, reordering stability,
