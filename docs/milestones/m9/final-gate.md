@@ -663,6 +663,45 @@ change or an explicitly approved trust-contract revision exists, no selected
 traffic, M5 runtime acceptance, M8 compatibility, or M9 release PASS is
 claimed. The live VPN profile remains absent/SKIPPED.
 
+## October 31, 2026 — stock RuntimeDefault CRI authority experiment remains inconclusive
+
+The user clarified that their prior change only allowed firewall traffic. On the
+unchanged-security production DaemonSet, `setns(pidfd, CLONE_NEWNET)` still
+requires a target-process access check and cannot be fixed by packet egress
+permissions. To test a stock-runtime path, `fcd75cf` changed the agent to
+**explicitly trust the authenticated node CRI's sandbox-ID→netns-path mapping**,
+not to claim the former independent PID→netns kernel proof. The candidate path
+must be an exactly-one, openat2-confined, nonhost nsfs network-namespace FD;
+the READY sandbox ID, namespace/name/UID/PodIP, live PID, Pod-UID cgroup, path
+and FD inode are rechecked, and target `eth0` must uniquely own that IPv4
+before programming. Full Go race/lint/vet/build and privileged component checks
+passed. The built agent was imported locally and rolled 3/3 Ready under the
+**same** NET_ADMIN/SYS_ADMIN, nonprivileged RuntimeDefault context. This is a
+change in trust boundary: a compromised CRI that consistently lies about the
+sandbox-to-path mapping remains outside the agent's independent proof. Linux
+5.10 and other CNI/runtime semantics are not yet accepted.
+
+The first guarded real selected-Pod retry on that image failed with `CRI path
+does not name an nsfs namespace` on its assigned node; the positive Gateway
+baseline ran but no selected application traffic passed. Node-side existing
+namespace mounts reported nsfs. This did not establish what a freshly created
+sandbox path looked like inside the long-lived agent mount namespace. The chart
+previously mounted `/var/run/netns` read-only without child mount propagation.
+A chart-only experiment added **one-way HostToContainer** propagation solely to
+that read-only mount (no capabilities or privileged mode), rendered with static
+security assertions, and rolled the agent 3/3 Ready. An initial retry raced
+that rollout and was blocked at the immutable-image preflight without creating
+fixture resources. A settled, preflighted retry again failed at selected-Pod
+status and cleaned both UID-owned namespaces/private PKI. Subsequent bounded
+agent log classification saw `matching ready sandbox unavailable` while the
+fixture was already removed; it did not capture the precise fresh-namespace
+error. Existing child nsfs mounts are visible in the current agent mountinfo,
+but that does **not** prove propagation for a new child created after startup.
+The one-way chart change must not be counted as a traffic fix without a
+correlated fresh-sandbox observation. Controller/webhook remain 1/1 Available,
+agent 3/3 Ready, and the release remains agent/iproute. M8/M9 are incomplete;
+live VPN input is absent/SKIPPED.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from

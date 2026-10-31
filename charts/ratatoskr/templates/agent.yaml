@@ -134,6 +134,9 @@ spec:
             - name: netns
               mountPath: /var/run/netns
               readOnly: true
+              # CNI creates per-sandbox nsfs bind mounts after this Pod starts.
+              # Receive them without propagating agent mounts back to the host.
+              mountPropagation: HostToContainer
       volumes:
         - name: cri-socket
           hostPath:

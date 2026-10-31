@@ -80,7 +80,8 @@ def check_agent(docs, socket, datapath):
     ]
     assert container["volumeMounts"] == [
         {"name": "cri-socket", "mountPath": socket, "readOnly": True},
-        {"name": "netns", "mountPath": "/var/run/netns", "readOnly": True},
+        {"name": "netns", "mountPath": "/var/run/netns", "readOnly": True,
+         "mountPropagation": "HostToContainer"},
     ]
 
 

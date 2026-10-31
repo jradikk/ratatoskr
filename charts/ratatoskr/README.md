@@ -56,6 +56,10 @@ operations before enabling this mode. The agent mounts the node CRI Unix
 socket at `agent.criSocket` (default
 `/run/containerd/containerd.sock`; `hack/dev-values.yaml` supplies the k3d/k3s
 `/run/k3s/containerd/containerd.sock`) and read-only `/var/run/netns`.
+The netns mount uses one-way `HostToContainer` propagation: a CNI may create
+per-Pod nsfs bind mounts **after** the DaemonSet starts, and without this option
+the agent can see a regular placeholder instead of the namespace FD and safely
+refuse programming. This does not propagate agent mounts back to the host.
 The agent Pod mounts its own Kubernetes ServiceAccount token for API access;
 no chart-managed workload/gateway receives CRI or netns hostPath mounts.
 **Treat this DaemonSet as node-root-equivalent:** access to the CRI socket and
