@@ -214,6 +214,58 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertTrue(all(w.SYSTEM in str(argv) for argv, _ in calls
                             if "get" in argv or "delete" in argv))
 
+    def test_selected_pod_double_delete_after_real_create_is_idempotent(self):
+        owner = FakeOwner()
+        calls = []
+        current = {}
+        owner.owned[owner.names[1]] = UID
+        op = w.OperatorFixture(owner, transport=lambda argv, *, payload, timeout, max_output:
+                               transport(argv, payload=payload, timeout=timeout, max_output=max_output))
+        def transport(argv, *, payload, timeout, max_output):
+            calls.append(tuple(argv))
+            if "--ignore-not-found" in argv:
+                if "pod" in argv:
+                    return (w.CLIENT + "\t" + UID + "\t" + TOKEN).encode() if current.get("pod") else b""
+                return b""
+            if "create" in argv:
+                obj = json.loads(payload)
+                self.assertEqual(obj["metadata"]["name"], w.CLIENT)
+                current["pod"] = True
+                return ("v1\tPod\t" + owner.names[1] + "\t" + w.CLIENT + "\t" + UID).encode()
+            if "delete" in argv:
+                self.assertEqual(json.loads(payload)["preconditions"]["uid"], UID)
+                current.pop("pod")
+                return b""
+            self.fail("unexpected transport call")
+        class Namespace:
+            def _namespace(self, name):
+                return name
+        source = Namespace()
+        payload = w.selected_pod(owner, op.name, "10.43.0.1")
+        self.assertEqual(op.create_selected(source, payload), UID)
+        op.delete_selected(source)
+        self.assertEqual(op.deleted_selected_uid, UID)
+        op.delete_selected(source)  # execute.finally after successful observe.
+        self.assertEqual(sum("delete" in argv for argv in calls), 1)
+        self.assertNotIn("pod", current)
+
+    def test_selected_pod_absent_after_confirmed_create_and_replacement_safety(self):
+        owner = FakeOwner()
+        owner.owned[owner.names[1]] = UID
+        op = w.OperatorFixture(owner, transport=lambda *_args, **_kwargs: b"")
+        op.attempted.add("Pod")
+        op.created["Pod"] = UID
+        class Namespace:
+            def _namespace(self, name): return name
+        op.delete_selected(Namespace())  # Independently removed same owned UID.
+        self.assertEqual(op.deleted_selected_uid, UID)
+        op.get_selected_uid = lambda: "c" * 32
+        with self.assertRaises(w.Blocked):
+            op.delete_selected(Namespace())  # Replacement must never be adopted/deleted.
+        op.created.pop("Pod")
+        with self.assertRaises(w.Blocked):
+            op.delete_selected(Namespace())  # Ambiguous POST never legitimizes absence.
+
     def test_ambiguous_create_not_deleted_or_retried(self):
         owner = FakeOwner()
         calls = []

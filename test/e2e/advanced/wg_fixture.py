@@ -98,6 +98,7 @@ class OperatorFixture:
         self.name = "rtk-wg-" + owner.token[:16]
         self.created = {}
         self.attempted = set()
+        self.deleted_selected_uid = None
 
     def _call(self, args, *, payload=None, output=2048):
         remaining = min(10, getattr(self, "cleanup_deadline", self.owner.deadline) - self.owner.clock())
@@ -219,6 +220,7 @@ class OperatorFixture:
         except (KeyError, IndexError, TypeError, AttributeError, adapter.AdapterError):
             raise Blocked("Selected encrypted workload preflight failed.") from None
         self.attempted.add("Pod")
+        self.deleted_selected_uid = None
         raw = self._call(["create", "-f", "-", "-o", adapter.CREATE_IDENTITY],
                          payload=json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(),
                          output=256)
@@ -237,8 +239,18 @@ class OperatorFixture:
             return
         apps = self.owner.names[1]
         uid = self.created.get("Pod")
-        need(uid is not None and self.get_selected_uid() == uid,
-             "Selected workload CREATE UID ambiguous or changed; no name-only deletion.")
+        need(uid is not None and lifecycle.UID.fullmatch(uid),
+             "Selected workload CREATE UID ambiguous; no name-only deletion.")
+        observed = self.get_selected_uid()
+        if observed is None:
+            # A previously verified CREATE (or already confirmed first DELETE)
+            # may have been removed before cleanup. Absence is success only
+            # with the exact server-returned UID already recorded; an ambiguous
+            # POST has no such UID and remains a hard cleanup failure.
+            self.deleted_selected_uid = uid
+            return
+        need(observed == uid and self.deleted_selected_uid is None,
+             "Selected workload UID changed or reappeared after deletion.")
         options = {"apiVersion": "v1", "kind": "DeleteOptions",
                    "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
         self._call(["delete", "--raw=/api/v1/namespaces/" + apps + "/pods/" + CLIENT,
@@ -248,6 +260,7 @@ class OperatorFixture:
             try:
                 observed = self.get_selected_uid()
                 if observed is None:
+                    self.deleted_selected_uid = uid
                     return
                 need(observed == uid, "Selected workload replacement UID appeared during cleanup.")
             except (adapter.AdapterError, Blocked):
