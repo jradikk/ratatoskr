@@ -405,7 +405,7 @@ func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
 	if err := r.Status().Update(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	current := gatewayInfo{ExitIP: "198.51.100.9", Ready: true, PodMTU: 1500, GeneveMTU: 1400, UpstreamMTU: 1400, EffectiveMTU: 1400, MSS: 1360, PodUID: string(pod.UID)}
+	current := gatewayInfo{ExitIP: "198.51.100.9", Ready: true, PodMTU: 1500, GeneveMTU: 1450, UpstreamMTU: 1400, EffectiveMTU: 1400, MSS: 1360, PodUID: string(pod.UID)}
 	r.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 		data, _ := json.Marshal(current)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
@@ -420,7 +420,7 @@ func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
 		if err := r.Get(ctx, request.NamespacedName, &result); err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Status.Endpoints) != 1 || !result.Status.Endpoints[0].UpstreamHealthy || result.Status.MTU.EffectiveMTU != 1400 {
+		if len(result.Status.Endpoints) != 1 || (current.PodUID == string(pod.UID) && (!result.Status.Endpoints[0].UpstreamHealthy || result.Status.MTU.EffectiveMTU != 1400)) || (current.PodUID != string(pod.UID) && (result.Status.Endpoints[0].UpstreamHealthy || result.Status.MTU.EffectiveMTU != 0)) {
 			t.Fatalf("ack unexpectedly changed health or MTU: %+v", result.Status)
 		}
 		return result.Status.Endpoints[0]
