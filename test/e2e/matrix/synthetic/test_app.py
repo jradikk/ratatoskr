@@ -125,6 +125,19 @@ class ProbeTests(unittest.TestCase):
                 app.direct_api("10.43.0.1", "10.42.2.5")
                 ca.assert_called_with(cafile=app.CA)
 
+    def test_outage_capture_mode_needs_connect_timeout_and_direct_paths(self):
+        for category, expected in (("connect-timeout", 0), ("refused", 44),
+                                   ("response-timeout", 47), ("unreachable", 41)):
+            with self.subTest(category=category), patch.object(app, "direct_api") as direct, \
+                 patch.object(app, "marker_result", side_effect=app.MarkerFailure(category)):
+                self.assertEqual(app.main(["outage-capture", "10.43.0.1"],
+                                          {"POD_IP": "10.42.2.5"}), expected)
+                self.assertEqual(direct.call_count, 2 if expected == 0 else 1)
+        with patch.object(app, "direct_api", side_effect=[None, app.DirectFailure("tls-connect")]), \
+             patch.object(app, "marker_result", side_effect=app.MarkerFailure("connect-timeout")):
+            self.assertEqual(app.main(["outage-capture", "10.43.0.1"],
+                                      {"POD_IP": "10.42.2.5"}), 33)
+
     def test_marker_timeout_tx_delta_is_diagnostic_only(self):
         for before, after, want in ((4, 5, 48), (4, 4, 49), (None, 5, 43), (4, None, 43)):
             with self.subTest(before=before, after=after):

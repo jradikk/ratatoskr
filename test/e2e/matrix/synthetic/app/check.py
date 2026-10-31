@@ -214,7 +214,7 @@ def main(argv=None, environ=None):
         time.sleep(600)
         return 0
     try:
-        if len(argv) != 2 or argv[0] not in ("healthy", "outage", "outage-check"):
+        if len(argv) != 2 or argv[0] not in ("healthy", "outage", "outage-check", "outage-capture"):
             raise Invalid()
         mode, approved_api = argv
         api_ip, pod_ip = ip4(approved_api), ip4(env.get("POD_IP"))
@@ -235,12 +235,19 @@ def main(argv=None, environ=None):
     try:
         result = marker_result()
     except MarkerFailure as exc:
-        if mode == "healthy" and exc.category == "connect-timeout" and before is not None:
+        if mode == "outage-capture" and exc.category == "connect-timeout":
+            # This is NOT fail-close evidence by itself. The host-side capture
+            # collector also requires exact outgoing API SYN and no selected SYN
+            # on the UID-bound workload eth0, plus owned closed RPDB/routes.
+            result = "connect-timeout"
+        elif mode == "healthy" and exc.category == "connect-timeout" and before is not None:
             after = client_geneve_tx_packets()
             if after is not None:
                 return 48 if after > before else 49  # Neither is PASS.
-        return {"unreachable": 41, "connect-timeout": 43, "refused": 44,
-                "response": 45, "other": 46, "response-timeout": 47}[exc.category]
+            return 43
+        else:
+            return {"unreachable": 41, "connect-timeout": 43, "refused": 44,
+                    "response": 45, "other": 46, "response-timeout": 47}[exc.category]
     except failures:
         return 12  # Unknown marker failure; never an outage success.
     try:
@@ -252,9 +259,11 @@ def main(argv=None, environ=None):
                 "tls-verify": 34, "tls-status": 35}[exc.stage]
     except failures:
         return 13  # Unknown direct-path failure after marker.
-    if (mode == "healthy" and result != "healthy") or (mode != "healthy" and result != "unreachable"):
+    expected = ("healthy" if mode == "healthy" else
+                "connect-timeout" if mode == "outage-capture" else "unreachable")
+    if result != expected:
         return 12
-    return 0 if mode in ("healthy", "outage-check") else BLOCKED
+    return 0 if mode in ("healthy", "outage-check", "outage-capture") else BLOCKED
 
 
 if __name__ == "__main__":

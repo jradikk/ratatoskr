@@ -82,7 +82,8 @@ COMMANDS = {
 }
 SERVER_COMMAND = ("python3", "/usr/local/bin/session.py")
 RUNNING_PROBE = {"healthy": ("python3", "/usr/local/bin/check.py", "healthy"),
-                 "outage": ("python3", "/usr/local/bin/check.py", "outage-check")}
+                 "outage": ("python3", "/usr/local/bin/check.py", "outage-check"),
+                 "outage-capture": ("python3", "/usr/local/bin/check.py", "outage-capture")}
 WITNESS_COMMAND = ("python3", "/usr/local/bin/witness.py", "--probe")
 WITNESS_EXIT_OFF = ("python3", "/usr/local/bin/witness.py", "--exit-off")
 
@@ -555,7 +556,7 @@ class FixtureAPI:
     def probe_running(self, name, uid, image_id, phase, api_ip):
         """Fixed executable probes; return only a trusted exit category, no output."""
         import ipaddress
-        if name not in ("synthetic-client", "synthetic-witness") or phase not in ("healthy", "outage", "exit-off"):
+        if name not in ("synthetic-client", "synthetic-witness") or phase not in ("healthy", "outage", "outage-capture", "exit-off"):
             raise AdapterError("Running probe name or phase not allowlisted.")
         try:
             addr = ipaddress.ip_address(api_ip)

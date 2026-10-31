@@ -211,6 +211,18 @@ class OutageTests(unittest.TestCase):
             o.observe_running_selected(api, owner.names[1], UID, IMAGE, base, "10.43.0.1", diagnosis)
         self.assertEqual(diagnosis, {"category": "api-unavailable"})
 
+    def test_failed_outage_probe_never_counts_without_capture(self):
+        # Standalone proof must refuse timeout-only and any missing positive
+        # control. The orchestration chooses capture only after pending status.
+        import failclose_capture as cap
+        good = b"1.000 IP 10.42.2.5.12345 > 10.43.0.1.443: Flags [S], seq 1\n"
+        self.assertTrue(cap.capture_proof(good, "10.42.2.5", "10.43.0.1"))
+        for bad in (b"", b"1.000 IP 10.42.2.5.12345 > 10.88.0.1.8080: Flags [S], seq 1\n",
+                    good + b"2.000 IP 10.42.2.5.12345 > 10.88.0.1.8080: Flags [S], seq 1\n",
+                    good.replace(b"10.42.2.5", b"10.42.2.6"), good + b"PRIVATE_PAYLOAD\n"):
+            with self.subTest(bad=bad[:35]), self.assertRaises(cap.Blocked):
+                cap.capture_proof(bad, "10.42.2.5", "10.43.0.1")
+
     def test_selected_fail_closed_waits_for_agent_and_actual_unreachable(self):
         class Selected:
             def __init__(self):

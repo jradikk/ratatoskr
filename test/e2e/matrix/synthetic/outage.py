@@ -5,10 +5,11 @@ import json
 import time
 
 try:
-    from . import adapter, evidence, lifecycle, partial_gateway, prepare, run
+    from . import adapter, evidence, failclose_capture, lifecycle, partial_gateway, prepare, run
 except ImportError:
     import adapter
     import evidence
+    import failclose_capture
     import lifecycle
     import partial_gateway
     import prepare
@@ -323,8 +324,28 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
                 # The running selected Pod had its wait-init exit successfully BEFORE
                 # withdrawal; a newly created outage Pod could remain blocked at init.
                 stage = "withdrawn-selected-fail-close"
-                poll(owner, "withdrawn-selected-fail-close", lambda: selected_fail_closed(
-                     api, apps, uid, ids["selected"], str(address)), seconds=85,
+                # An immediate EHOST/ENETUNREACH is independently sufficient;
+                # a TCP timeout is *never* promoted without UID-bound closed
+                # routes, a live eth0 capture with positive API SYN, and zero
+                # matching selected SYN through that same source netns.
+                def fail_close():
+                    try:
+                        return selected_fail_closed(api, apps, uid, ids["selected"], str(address))
+                    except adapter.AdapterError:
+                        pod = api.get("pod", "synthetic-client", apps)
+                        if (pod["metadata"].get("uid") != uid or
+                                pod["metadata"].get("annotations", {}).get(evidence.PREFIX + "datapath-ready") != "pending" or
+                                pod.get("status", {}).get("phase") != "Running"):
+                            return None
+                        def fixed_probe():
+                            if api.probe_running("synthetic-client", uid, ids["selected"],
+                                                 "outage-capture", str(address)) is not True:
+                                raise failclose_capture.Blocked("Selected bounded timeout probe did not complete.")
+                        if failclose_capture.prove(api, apps, uid, ids["selected"], baseline["gatewayID"],
+                                                    str(address), trigger=fixed_probe):
+                            return pod
+                    return None
+                poll(owner, "withdrawn-selected-fail-close", fail_close, seconds=85,
                      clock=clock, sleep=sleep)
                 stage = "outage-still-withdrawn"
                 poll(owner, "outage-still-withdrawn", lambda: gateway_state(api, ns, baseline["gatewayUID"],
@@ -342,6 +363,8 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             stage = "recovered-selected-identity"
             if api.get("pod", "synthetic-client", apps)["metadata"].get("uid") != uid:
                 raise Blocked("Recovered selected Pod UID changed.")
+        except failclose_capture.Blocked:
+            raise Blocked("Synthetic outage body blocked at " + stage + "-source-capture.") from None
         except adapter.RestorationError:
             # The context manager's finally failed: never imply a routine
             # selected-probe failure when the probe switch is unconfirmed.
