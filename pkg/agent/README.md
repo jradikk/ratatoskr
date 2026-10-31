@@ -57,3 +57,23 @@ where the kubelet or API reports false Pod hostNetwork/identity breaks this
 trust model. Linux 5.10 must support `pidfd_open`, `openat2`, nsfs
 `NS_GET_NSTYPE` and direct `setns` of the CRI-reported nsfs FD; runtimes
 forbidding these syscalls fail closed without added privileges.
+
+## Gateway applied-client readiness gate
+
+The agent does not use a Gateway ConfigMap API write as proof that a gateway
+applied return routing. Before installing an active endpoint or registering an
+encrypted peer, it verifies the current Gateway status endpoint carries the
+controller-attested gateway Pod UID and gateway-process-applied SHA-256 of the
+**exact raw** `gateway.json` bytes from a ConfigMap with a Gateway controller
+owner UID. An uncached GET of the selected gateway Pod must match the published
+UID/name/PodIP and be non-deleting. The decoded raw config must contain the
+exact client PodIP and gateway ID. Gateway status is trusted to attest the
+Pod→ReplicaSet→Deployment→Gateway owner chain; the agent does not claim
+independent ReplicaSet/Deployment reads. This requires cluster-wide
+`configmaps/get` (not list/watch/patch) for dynamic gateway namespaces; protect
+the agent ServiceAccount accordingly. On absent/stale acknowledgement the
+agent applies the unreachable client fallback first, removes its readiness
+marker and leaves Pod readiness `pending`. Projection lag is normal and does
+not mark the node DaemonSet unready. No client list is exposed through gateway
+`/info`. Gateway Pod/ConfigMap GET and Gateway status remain trusted control
+plane inputs; a compromised Kubernetes API/controller breaks this boundary.

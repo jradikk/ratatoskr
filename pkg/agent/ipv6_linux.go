@@ -167,6 +167,16 @@ func clearReadyMarker() error {
 	return netlink.LinkDel(marker)
 }
 
+func (r *Reconciler) setPodPending(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Annotations[ReadyAnnotation] == "pending" {
+		return nil
+	}
+	original := pod.DeepCopy()
+	pod.Annotations = copyAnnotations(pod.Annotations)
+	pod.Annotations[ReadyAnnotation] = "pending"
+	return r.Client.Patch(ctx, pod, client.MergeFrom(original))
+}
+
 func (r *Reconciler) setPodError(ctx context.Context, pod *corev1.Pod) error {
 	if pod.Annotations[ReadyAnnotation] == "error" {
 		return nil

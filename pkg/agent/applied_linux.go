@@ -80,8 +80,15 @@ func checkAppliedRaw(raw, hash string, config datapath.ClientConfig, endpoint ne
 	if gw.PodIP.IsValid() && gw.PodIP != endpoint {
 		return errors.New("gateway config PodIP differs from selected endpoint")
 	}
-	if gw.GatewayID != config.GatewayID || gw.Encryption != config.Encryption {
-		return errors.New("gateway config ID or encryption differs from selected client")
+	if gw.PodIP.IsValid() && !gw.PodIP.Is4() {
+		return errors.New("gateway config PodIP is not IPv4")
+	}
+	encryption := gw.Encryption
+	if encryption == "" {
+		encryption = "none"
+	}
+	if gw.GatewayID != config.GatewayID || encryption != config.Encryption || !config.PodIP.Is4() || !config.Endpoint.Is4() || endpoint != config.Endpoint {
+		return errors.New("gateway config ID, encryption or selected client endpoint differs")
 	}
 	for _, ip := range gw.Clients {
 		if ip == config.PodIP {
@@ -106,4 +113,51 @@ func (r *Reconciler) appliedGateway(ctx context.Context, gw *api.EgressGateway, 
 		return errors.New("gateway ConfigMap owner UID differs from gateway")
 	}
 	return checkAppliedRaw(cm.Data["gateway.json"], appliedHash, cfg, cfg.Endpoint)
+}
+
+// selectedAck is read from the latest Gateway API status, never inferred from
+// a ConfigMap write. Zero/duplicate/missing endpoint attestations fail closed.
+func selectedAck(gw *api.EgressGateway, cfg datapath.ClientConfig) (string, string, error) {
+	if gw == nil || !cfg.Endpoint.Is4() || gw.Status.ObservedGeneration != gw.Generation {
+		return "", "", errors.New("gateway status generation or selected endpoint stale")
+	}
+	count := 0
+	var uid, hash string
+	for _, ep := range gw.Status.Endpoints {
+		if ep.PodIP != cfg.Endpoint.String() {
+			continue
+		}
+		count++
+		if ep.UpstreamHealthy {
+			uid, hash = ep.PodUID, ep.AppliedClientConfigHash
+		}
+	}
+	if count != 1 || uid == "" || hash == "" {
+		return "", "", errors.New("selected gateway lacks unique healthy applied-client acknowledgement")
+	}
+	return uid, hash, nil
+}
+
+// verifyFreshAck obtains new API objects immediately before usable client
+// programming or peer registration; a projected ConfigMap update alone is
+// never an acknowledgement that the gateway installed return routing.
+func (r *Reconciler) verifyFreshAck(ctx context.Context, key types.NamespacedName, old *api.EgressGateway, cfg datapath.ClientConfig) (bool, error) {
+	if old == nil || old.UID == "" {
+		return false, errors.New("gateway identity unavailable")
+	}
+	var now api.EgressGateway
+	if err := r.Client.Get(ctx, key, &now); err != nil {
+		return false, fmt.Errorf("GET gateway acknowledgement: %w", err)
+	}
+	if now.UID != old.UID || now.DeletionTimestamp != nil || now.Status.GatewayID != cfg.GatewayID || now.Spec.Encryption != old.Spec.Encryption {
+		return false, errors.New("gateway UID or ID changed or deleting")
+	}
+	uid, hash, err := selectedAck(&now, cfg)
+	if err != nil {
+		return false, err
+	}
+	if err = r.appliedGateway(ctx, &now, cfg, uid, hash); err != nil {
+		return false, err
+	}
+	return true, nil
 }

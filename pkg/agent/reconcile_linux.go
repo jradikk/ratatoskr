@@ -63,6 +63,33 @@ func markerReady(marker netlink.Link) bool {
 // Program constructs its backend only after entering the selected sandbox netns.
 // The dummy marker is created LAST. Failure removes the marker and preserves the
 // backend's unreachable fallback; callers must never publish ready on failure.
+// ProgramClosed is deliberately separate from Program: invalid Endpoint must
+// never publish an UP marker. ApplyClient with an invalid endpoint installs
+// its owned unreachable fallback before any previous marker is withdrawn.
+func ProgramClosed(ctx context.Context, target *os.File, cfg datapath.ClientConfig, factory BackendFactory) error {
+	if factory == nil || !cfg.PodIP.Is4() {
+		return errors.New("closed client config and backend required")
+	}
+	cfg.Endpoint = netip.Addr{}
+	cfg.GatewayPublicKey = ""
+	cfg.RegistrationCACert = ""
+	cfg.WireGuardPort = 0
+	return InNamespace(target, func() error {
+		if err := verifyTargetPodIPv4(cfg.PodIP); err != nil {
+			return err
+		}
+		backend, err := factory()
+		if err != nil {
+			return err
+		}
+		defer backend.Close()
+		if err := backend.ApplyClient(ctx, cfg); err != nil {
+			return fmt.Errorf("install unreachable client fallback: %w", err)
+		}
+		return clearReadyMarker()
+	})
+}
+
 func Program(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, gatewayMTU int, previous string, remove bool, factory BackendFactory, mode string) error {
 	if cfg == nil || factory == nil {
 		return errors.New("client config and backend factory are required")
@@ -169,6 +196,19 @@ type Reconciler struct {
 	Own                     OwnPod
 }
 
+// pendingGateway is a normal, non-blocking projection/application lag. Only
+// a successful closed ApplyClient and marker withdrawal allow reconciliation
+// to return nil (so the node DaemonSet stays ready while this Pod waits).
+func (r *Reconciler) pendingGateway(ctx context.Context, pod *corev1.Pod, target *os.File, proof sandboxProof, cfg datapath.ClientConfig, factory BackendFactory) error {
+	if err := recheckSandbox(ctx, r.CRI, proof, target); err != nil {
+		return fmt.Errorf("recheck sandbox before gateway ack withdrawal: %w", err)
+	}
+	if err := ProgramClosed(ctx, target, cfg, factory); err != nil {
+		return err
+	}
+	return r.setPodPending(ctx, pod)
+}
+
 func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	if pod.Spec.NodeName != r.Node || pod.Spec.HostNetwork || pod.UID == "" || pod.Status.PodIP == "" {
 		return nil
@@ -184,6 +224,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	var cfg datapath.ClientConfig
+	var gw api.EgressGateway
+	gatewayKey := types.NamespacedName{}
 	removing := !selected
 	if !removing && existing != "" && pod.Annotations[BackendAnnotation] != "" && backendMode(pod.Annotations[BackendAnnotation]) != mode {
 		return errors.New("datapath backend transition requires explicit cleanup")
@@ -214,8 +256,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		if gwNS == "" {
 			return errors.New("OPERATOR_NAMESPACE required")
 		}
-		var gw api.EgressGateway
-		if err = r.Client.Get(ctx, types.NamespacedName{Namespace: gwNS, Name: name}, &gw); err != nil {
+		gatewayKey = types.NamespacedName{Namespace: gwNS, Name: name}
+		if err = r.Client.Get(ctx, gatewayKey, &gw); err != nil {
 			return err
 		}
 		var policies api.EgressPolicyList
@@ -265,6 +307,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return nil
 		}); err != nil {
 			return errors.Join(fmt.Errorf("enter verified workload namespace or initialize: %w", err), r.setPodError(ctx, pod))
+		}
+	}
+	if !removing {
+		if !cfg.Endpoint.IsValid() {
+			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
+		}
+		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
+			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 	}
 	if !removing && cfg.Encryption == "wireguard" && mode == "ebpf" {
@@ -325,6 +375,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	}
 	if err = recheckSandbox(ctx, r.CRI, sandboxProof, target); err != nil {
 		return fmt.Errorf("recheck sandbox before datapath programming: %w", err)
+	}
+	if !removing {
+		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
+			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
+		}
 	}
 	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
 		if errors.Is(err, errUnsupportedIPv6) {
