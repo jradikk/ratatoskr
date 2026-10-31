@@ -62,6 +62,11 @@ class CollectorTests(unittest.TestCase):
         rule = [{"priority": 10998, "protocol": 186, "table": TABLE,
                  "fwmark": "0x200000/0xf00000"}]
         self.assertTrue(f.route_proof(json.dumps(closed).encode(), TABLE))
+        for route_type in (7, "7"):
+            self.assertTrue(f.route_proof(json.dumps([dict(closed[0], type=route_type)]).encode(), TABLE))
+        for route_type in (1, "1", 8, "8", None, True):
+            with self.assertRaises(f.Blocked):
+                f.route_proof(json.dumps([dict(closed[0], type=route_type)]).encode(), TABLE)
         self.assertTrue(f.rule_proof(json.dumps(rule).encode(), TABLE))
         for bad in ([dict(closed[0], type="unicast")], closed + [dict(closed[0], type="unicast")],
                     [dict(closed[0], metric=0)], [dict(closed[0], protocol="bgp")],

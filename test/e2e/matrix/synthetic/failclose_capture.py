@@ -91,7 +91,7 @@ def route_proof(raw, table):
             raise ValueError()
         defaults = [v for v in values if v.get("dst", "default") in ("default", "0.0.0.0/0")]
         if (len(defaults) != 1 or
-                defaults[0].get("type") != "unreachable" or
+                defaults[0].get("type") not in ("unreachable", 7, "7") or
                 defaults[0].get("protocol") not in (PROTOCOL, str(PROTOCOL)) or
                 defaults[0].get("metric") != METRIC or
                 any(v.get("table", table) not in (table, str(table)) for v in values)):
