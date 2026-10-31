@@ -219,8 +219,10 @@ def root_collect(node_host_pid, sandbox_pid, table, source, api_ip, trigger, *,
                 if len(stdout) > 86016 or len(stderr) > 1024:
                     raise Blocked("Root source capture output exceeded cap.")
             if not ready and stdout:
-                if stdout != b"READY\n":
+                if not b"READY\n".startswith(stdout):
                     raise Blocked("Root source capture readiness malformed.")
+                if stdout != b"READY\n":
+                    continue  # READY may arrive across multiple pipe reads.
                 ready = True
                 trigger()
                 proc.stdin.write(b"STOP\n")
