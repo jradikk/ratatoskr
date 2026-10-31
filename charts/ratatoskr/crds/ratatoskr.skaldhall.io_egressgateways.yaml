@@ -333,9 +333,23 @@ spec:
               endpoints:
                 items:
                   properties:
+                    appliedClientConfigHash:
+                      description: |-
+                        AppliedClientConfigHash is the lowercase SHA-256 of the exact gateway.json
+                        ConfigMap bytes consumed by this Pod after successful datapath application.
+                        It proves the applied config without publishing the client IP list in status.
+                      maxLength: 64
+                      pattern: ^[a-f0-9]{64}$
+                      type: string
                     podIP:
                       type: string
                     podName:
+                      type: string
+                    podUID:
+                      description: |-
+                        PodUID binds the applied configuration acknowledgment to this Pod instance,
+                        not a replacement that reuses its name or IP.
+                      maxLength: 253
                       type: string
                     registrationCACert:
                       description: |-

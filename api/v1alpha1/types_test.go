@@ -20,7 +20,7 @@ func TestJSONRoundTrip(t *testing.T) {
 			AllowedNamespaces: AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"egress": "allowed"}}},
 			Exclusions:        ExclusionsSpec{ExtraCIDRs: []string{"10.0.0.0/8"}},
 		},
-		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamExitIP: "203.0.113.4", UpstreamHealthy: true, WireguardPublicKey: "public-key", RegistrationCACert: "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"}}},
+		Status: EgressGatewayStatus{GatewayID: 42, Endpoints: []GatewayEndpoint{{PodIP: "10.2.0.3", PodUID: "gateway-pod-uid", AppliedClientConfigHash: strings.Repeat("a", 64), UpstreamExitIP: "203.0.113.4", UpstreamHealthy: true, WireguardPublicKey: "public-key", RegistrationCACert: "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n"}}},
 	}
 	policy := &EgressPolicy{
 		TypeMeta:   metav1.TypeMeta{APIVersion: SchemeGroupVersion.String(), Kind: "EgressPolicy"},
@@ -34,6 +34,10 @@ func TestJSONRoundTrip(t *testing.T) {
 		}
 		if obj == original && !strings.Contains(string(encoded), `"registrationCACert":"-----BEGIN CERTIFICATE-----`) {
 			t.Fatalf("gateway JSON omitted the registration CA certificate: %s", encoded)
+		}
+		if obj == original && (!strings.Contains(string(encoded), `"podUID":"gateway-pod-uid"`) ||
+			!strings.Contains(string(encoded), `"appliedClientConfigHash":"`+strings.Repeat("a", 64)+`"`)) {
+			t.Fatalf("gateway JSON omitted the applied config acknowledgment: %s", encoded)
 		}
 		decoded := reflect.New(reflect.TypeOf(obj).Elem()).Interface()
 		if err := json.Unmarshal(encoded, decoded); err != nil {

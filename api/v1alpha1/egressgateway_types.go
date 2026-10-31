@@ -134,11 +134,21 @@ type EgressGatewayStatus struct {
 }
 
 type GatewayEndpoint struct {
-	PodName            string `json:"podName,omitempty"`
-	PodIP              string `json:"podIP"`
-	UpstreamExitIP     string `json:"upstreamExitIP,omitempty"`
-	UpstreamHealthy    bool   `json:"upstreamHealthy"`
-	WireguardPublicKey string `json:"wireguardPublicKey,omitempty"`
+	PodName string `json:"podName,omitempty"`
+	PodIP   string `json:"podIP"`
+	// PodUID binds the applied configuration acknowledgment to this Pod instance,
+	// not a replacement that reuses its name or IP.
+	// +kubebuilder:validation:MaxLength=253
+	PodUID string `json:"podUID,omitempty"`
+	// AppliedClientConfigHash is the lowercase SHA-256 of the exact gateway.json
+	// ConfigMap bytes consumed by this Pod after successful datapath application.
+	// It proves the applied config without publishing the client IP list in status.
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=^[a-f0-9]{64}$
+	AppliedClientConfigHash string `json:"appliedClientConfigHash,omitempty"`
+	UpstreamExitIP          string `json:"upstreamExitIP,omitempty"`
+	UpstreamHealthy         bool   `json:"upstreamHealthy"`
+	WireguardPublicKey      string `json:"wireguardPublicKey,omitempty"`
 	// RegistrationCACert is the PEM-encoded public, ephemeral CA certificate for
 	// authenticated peer registration on this endpoint. Never publish a private key.
 	// PEM is ASCII, so MaxLength also bounds the encoded value to 4096 bytes.
