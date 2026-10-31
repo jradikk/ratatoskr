@@ -266,6 +266,13 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		cfg.Identity.Policy = policy.Name
 		cfg.Policy = compiled
 	}
+	if h.driver() == "agent" {
+		// CREATE admission has no assigned Pod UID or post-CNI IP, and Gateway
+		// endpoint/MTU/exclusion status can change between mutation and validation.
+		// Persist only authorized immutable intent. The node agent resolves live
+		// exclusions, endpoint identity and MTU after scheduling, before traffic.
+		return cfg, nil
+	}
 	for _, e := range gateway.Status.EffectiveExclusions {
 		prefix, err := netip.ParsePrefix(e.CIDR)
 		if err != nil || !prefix.Addr().Is4() {
