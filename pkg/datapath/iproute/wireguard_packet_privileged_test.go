@@ -322,7 +322,20 @@ func TestPrivilegedWireGuardIngressIdentity(t *testing.T) {
 		}
 		return
 	}
-	accepted, rejected := stats()
+	// WG ReceiveBytes and the nft INPUT observer precede GENEVE decapsulation
+	// and tc ingress. Wait for the *same* authenticated packet to reach the
+	// flower action before asserting its acceptance; an immediate FilterList
+	// races the kernel receive path under load. Never count default-drop as a
+	// successful authenticated probe.
+	deadline = time.Now().Add(2 * time.Second)
+	var accepted, rejected uint32
+	for {
+		accepted, rejected = stats()
+		if accepted > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if accepted == 0 {
 		t.Fatalf("Geneve verifier did not accept authenticated outer==inner PodIP/VNI; rejects=%d", rejected)
 	}
