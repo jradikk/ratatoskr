@@ -145,7 +145,7 @@ class WireGuardFixtureTest(unittest.TestCase):
             def fail(*_args):
                 raise w.StageBlocked("peer-registration")
             with self.assertRaises(w.StageBlocked) as raised:
-                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                           operator_factory=lambda _owner: operator, source_factory=FakeSource,
                           observer=fail)
         self.assertEqual(raised.exception.checkpoint, "peer-registration")
@@ -166,7 +166,7 @@ class WireGuardFixtureTest(unittest.TestCase):
             def fail(*_args):
                 raise RuntimeError("PRIVATE PROFILE DATA")
             with self.assertRaises(w.StageBlocked) as raised:
-                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                           operator_factory=lambda _owner: operator, source_factory=FakeSource,
                           observer=fail)
         self.assertEqual(str(raised.exception),
@@ -187,7 +187,7 @@ class WireGuardFixtureTest(unittest.TestCase):
                  ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
                 {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
             with self.assertRaises(w.StageBlocked) as raised:
-                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                           operator_factory=lambda _owner: operator, source_factory=FakeSource,
                           observer=lambda *_args: {"encryptedStartup": True, "peerRegistered": True,
                               "peerRemoved": True, "plainGeneve": "not-tested",
@@ -211,7 +211,7 @@ class WireGuardFixtureTest(unittest.TestCase):
             def fail(*_args):
                 raise RuntimeError("private-key-material must never reach stdout")
             with self.assertRaises(w.StageBlocked) as raised:
-                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                           operator_factory=factory, source_factory=FakeSource,
                           observer=fail)
         self.assertEqual(str(raised.exception), "WireGuard synthetic fixture blocked at peer-lifecycle.")
@@ -229,7 +229,7 @@ class WireGuardFixtureTest(unittest.TestCase):
         with patch.object(w, "manifests", return_value=([{"kind": "Secret", "metadata": {
                 "name": "synthetic-server", "namespace": owner.names[0]}}], {}, {})):
             with self.assertRaises(w.StageBlocked) as raised:
-                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                           operator_factory=lambda actual: op, source_factory=FailingSource)
         self.assertEqual(str(raised.exception), "WireGuard synthetic fixture blocked at source-create.")
         self.assertTrue(owner.cleaned and op.cleaned)
@@ -249,10 +249,13 @@ class WireGuardFixtureTest(unittest.TestCase):
         owner = FakeOwner()
         owner.clock = lambda: 100
         owner.deadline = 240
-        self.assertEqual(w._phase_deadline(owner, lambda: 100, 85, 70), 170)
-        with self.assertRaises(w.StageBlocked):
-            w._phase_deadline(owner, lambda: 171, 75, 70)
-        self.assertEqual(w._phase_deadline(owner, lambda: 120, 35, 65), 155)
+        owner.deadline = 490  # 390s total from clock=100.
+        self.assertEqual(w._phase_deadline(owner, lambda: 100, 85, 255, "source-ready"), 185)
+        self.assertEqual(w._phase_deadline(owner, lambda: 180, 150, 105, "peer-registration"), 330)
+        self.assertEqual(w._phase_deadline(owner, lambda: 335, 35, 35, "peer-revocation"), 370)
+        with self.assertRaises(w.StageBlocked) as caught:
+            w._phase_deadline(owner, lambda: 386, 150, 105, "peer-registration")
+        self.assertEqual(caught.exception.checkpoint, "peer-registration")
 
     def test_default_entrypoint_never_calls_cluster(self):
         with patch.dict(w.os.environ, {}, clear=True), patch.object(w.run, "ReadOnlyAPI") as api:
@@ -393,7 +396,7 @@ class WireGuardFixtureTest(unittest.TestCase):
                 (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
                  ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
                 {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
-            result = w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+            result = w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda **kwargs: owner,
                                operator_factory=factory, source_factory=FakeSource,
                                observer=lambda *_args: {"encryptedStartup": True,
                                    "peerRegistered": True, "peerRemoved": True,

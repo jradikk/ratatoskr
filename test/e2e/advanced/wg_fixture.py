@@ -419,11 +419,11 @@ def verify_encrypted_ready(gateway, pod, gateway_uid, client_uid, gateway_name):
         raise Blocked("Encrypted endpoint or client config malformed.") from None
 
 
-def _phase_deadline(owner, clock, seconds, reserve):
-    """Bounded stage, leaving the owned workload a separate cleanup window."""
+def _phase_deadline(owner, clock, seconds, reserve, stage):
+    """Bounded stage with time reserved for deletion and verified cleanup."""
     end = min(owner.deadline - reserve, clock() + seconds)
     if owner.closed or end <= clock():
-        raise StageBlocked("peer-lifecycle")
+        raise StageBlocked(stage)
     return end
 
 
@@ -437,9 +437,11 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
     if metrics_reader is None:
         metrics_reader = wg_transport.read_metrics
     # Source/Gateway setup, selected registration and revocation have separate
-    # bounded windows. Keep 70 seconds for UID-conditional selected cleanup;
-    # no missing phase can borrow unlimited time from the next.
-    startup_deadline = _phase_deadline(owner, clock, 85, 70)
+    # bounded windows. The selected agent may need 120s projected-ConfigMap
+    # propagation after CREATE; allow 150s without borrowing revocation time.
+    # Reserve 105s at registration start for 35s Pod deletion, 35s peer
+    # revocation, and 35s body headroom before independent cleanup grace.
+    startup_deadline = _phase_deadline(owner, clock, 85, 255, "source-ready")
     source_uid = source_api.created[("Pod", owner.names[0], SERVER)]
     need(isinstance(source_uid, str) and lifecycle.UID.fullmatch(source_uid),
          "OpenVPN source CREATE-return UID missing.")
@@ -513,7 +515,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         raise
     except BaseException:
         raise StageBlocked(step) from None
-    registration_deadline = _phase_deadline(owner, clock, 75, 70)
+    registration_deadline = _phase_deadline(owner, clock, 150, 105, "peer-registration")
     while clock() < registration_deadline:
         try:
             pod = source_api.get("pod", CLIENT, owner.names[1])
@@ -550,7 +552,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         raise
     except BaseException:
         raise StageBlocked(step) from None
-    revocation_deadline = _phase_deadline(owner, clock, 35, 65)
+    revocation_deadline = _phase_deadline(owner, clock, 35, 35, "peer-revocation")
     while clock() < revocation_deadline:
         try:
             after = metrics_reader(operator, gateway_pod, ids["gateway"])
@@ -574,7 +576,10 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
          "Immutable runtime image IDs required.")
     need(api_ip is not None, "Preflight Kubernetes Service IP required.")
     ipv4(api_ip)
-    with owner_factory() as owner:
+    # 85s source/Gateway + 150s post-CREATE config/peer + 35s deletion +
+    # 35s revocation + 35s reserved lifecycle cleanup = 340s minimum.
+    # Lifecycle accepts <=900s; never extend by an unbounded poll or fixed sleep.
+    with owner_factory(duration=390) as owner:
         stage = "namespace-create"
         operator = None
         source_api = None
