@@ -23,6 +23,11 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get]
+  # Dynamic gateway namespaces prevent a static resourceNames restriction.
+  # The agent accepts only the owner-bound gateway config; no Secret access.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
   - apiGroups: [ratatoskr.skaldhall.io]
     resources: [egressgateways]
     verbs: [get, list, watch]

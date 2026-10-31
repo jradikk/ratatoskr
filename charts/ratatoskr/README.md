@@ -67,8 +67,13 @@ host PID namespaces is highly privileged despite the bounded Linux capability
 list. BPF mode expands kernel-programming privileges even without host bpffs;
 place the agent only on trusted nodes. Its cluster-wide ClusterRole permits
 Pod get/list/watch/patch, namespace get, gateway
-get/list/watch, policy list, and `serviceaccounts/token` create in
-any namespace for short-lived, Pod-bound registration tokens. This is a
+get/list/watch, policy list, ConfigMap get, and `serviceaccounts/token` create in
+any namespace for short-lived, Pod-bound registration tokens. ConfigMap reads
+allow the agent to compare the current owner-bound gateway configuration with
+an endpoint's applied acknowledgement before enabling selected traffic.
+Standard RBAC cannot restrict this GET to dynamically named gateways across
+namespaces: it therefore also permits reading other ConfigMaps, which must
+not be treated as a place for secrets. This is a
 powerful cluster-wide binding; restrict who may deploy/modify it. It has no
 Secret read permission. To check rendering without a node:
 `python3 charts/ratatoskr/tests/check_chart.py` (requires Helm and PyYAML).

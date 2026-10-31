@@ -38,6 +38,7 @@ def check_agent(docs, socket, datapath):
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
         {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["get"]},
+        {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"]},
         {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egressgateways"],
          "verbs": ["get", "list", "watch"]},
         {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egresspolicies"], "verbs": ["list"]},
