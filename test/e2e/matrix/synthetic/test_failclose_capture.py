@@ -94,6 +94,24 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaises(f.Blocked):
                 f.capture_proof(bad, SOURCE, API)
 
+    def test_capture_category_is_fixed_diagnostic_never_positive_proof(self):
+        api = b"1.000 IP 10.42.2.5.12345 > 10.43.0.1.443: Flags [S], seq 1\n"
+        backend = b"1.000 IP 10.42.2.5.12345 > 192.0.2.10.6443: Flags [S], seq 1\n"
+        selected = b"1.000 IP 10.42.2.5.12345 > 10.88.0.1.8080: Flags [S], seq 1\n"
+        for raw, category in ((b"", "empty"), (api, "api443-control-present"),
+                              (backend, "other6443-not-authorized"),
+                              (selected, "selected-egress-observed"),
+                              (backend + selected, "selected-egress-observed"),
+                              (b"PRIVATE_PACKET_TOKEN\n", "unrecognized-or-mixed")):
+            with self.subTest(category=category):
+                self.assertEqual(f.capture_category(raw, SOURCE, API), category)
+                if raw != api:
+                    with self.assertRaises(f.Blocked) as result:
+                        f.capture_proof(raw, SOURCE, API)
+                    self.assertIn(category, str(result.exception))
+                    self.assertNotIn("192.0.2.10", str(result.exception))
+                    self.assertNotIn("PRIVATE_PACKET_TOKEN", str(result.exception))
+
     def test_root_helper_validates_args_and_pins_netns_type_inode(self):
         self.assertEqual(root.validated(["321", "123", str(TABLE), SOURCE, API])[:3], (321, 123, TABLE))
         for bad in (["321", "0", str(TABLE), SOURCE, API], ["321", "123", "10007", SOURCE, API],

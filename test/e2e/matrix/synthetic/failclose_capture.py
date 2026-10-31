@@ -134,6 +134,52 @@ def rule_proof(raw, table):
         raise Blocked("Owned RPDB marked table selector unverified.") from None
 
 
+def capture_category(raw, source, api_ip):
+    """Fixed diagnostic only, never a positive-control or no-egress proof.
+
+    Do not surface a captured address, port outside the two fixed categories,
+    payload, API object or packet line. Unknown formatting stays untrusted.
+    """
+    if not isinstance(raw, bytes) or len(raw) > 4096:
+        return "oversize-or-invalid"
+    try:
+        lines = raw.decode("ascii").splitlines()
+        if not lines:
+            return "empty"
+        if len(lines) > 32:
+            return "oversize-or-invalid"
+        api, selected, other_443, other_6443, unknown = 0, 0, 0, 0, 0
+        pattern = re.compile(r"^[0-9]+\.[0-9]+ IP " + re.escape(source) +
+                             r"\.[0-9]{1,5} > ([0-9]{1,3}(?:\.[0-9]{1,3}){3})\.([0-9]{1,5}): Flags \[S\](?:,.*)?$")
+        for line in lines:
+            match = pattern.fullmatch(line)
+            if match is None:
+                unknown += 1
+                continue
+            target, port = match.groups()
+            if (target, port) == (api_ip, "443"):
+                api += 1
+            elif (target, port) == (DEST, "8080"):
+                selected += 1
+            elif port == "443":
+                other_443 += 1
+            elif port == "6443":
+                other_6443 += 1
+            else:
+                unknown += 1
+        if selected:
+            return "selected-egress-observed"
+        if api and not (other_443 or other_6443 or unknown):
+            return "api443-control-present"
+        if other_6443 and not (api or other_443 or unknown):
+            return "other6443-not-authorized"
+        if other_443 and not (api or other_6443 or unknown):
+            return "other443-not-authorized"
+        return "unrecognized-or-mixed"
+    except (UnicodeError, ValueError, TypeError):
+        return "oversize-or-invalid"
+
+
 def capture_proof(raw, source, api_ip):
     if not isinstance(raw, bytes) or len(raw) > 4096:
         raise Blocked("Header-only capture exceeded limit.")
@@ -159,7 +205,8 @@ def capture_proof(raw, source, api_ip):
             raise ValueError()
         return True
     except (UnicodeError, ValueError, TypeError, AttributeError):
-        raise Blocked("API SYN positive control missing or selected SYN egress detected.") from None
+        raise Blocked("API SYN positive control missing or selected SYN egress detected (" +
+                      capture_category(raw, source, api_ip) + ").") from None
 
 
 def node_exec(argv, *, limit=65536, transport=node_images._bounded):

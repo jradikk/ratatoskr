@@ -363,8 +363,16 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             stage = "recovered-selected-identity"
             if api.get("pod", "synthetic-client", apps)["metadata"].get("uid") != uid:
                 raise Blocked("Recovered selected Pod UID changed.")
-        except failclose_capture.Blocked:
-            raise Blocked("Synthetic outage body blocked at " + stage + "-source-capture.") from None
+        except failclose_capture.Blocked as failure:
+            # Only the collector's allowlisted fixed messages and categories
+            # may cross this boundary; never raw packets, exceptions or IPs.
+            known = ("empty", "selected-egress-observed", "api443-control-present",
+                     "other6443-not-authorized", "other443-not-authorized",
+                     "unrecognized-or-mixed", "oversize-or-invalid")
+            message = str(failure)
+            category = next((item for item in known if message.endswith("(" + item + ").")), None)
+            suffix = "-" + category if category else ""
+            raise Blocked("Synthetic outage body blocked at " + stage + "-source-capture" + suffix + ".") from None
         except adapter.RestorationError:
             # The context manager's finally failed: never imply a routine
             # selected-probe failure when the probe switch is unconfirmed.
