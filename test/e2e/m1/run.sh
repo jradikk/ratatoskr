@@ -46,13 +46,13 @@ PY
 mkdir -p "$REPORT_DIR"
 PRIVATE=$(mktemp -d /tmp/ratatoskr-m1-private.XXXXXX)
 CTX=k3d-ratatoskr-flannel
-NAMESPACE="ratatoskr-m1-${MODE}-$$"
+read -r NAMESPACE NAMESPACE_OWNER < <(python3 "$ROOT/test/e2e/m1/namespace.py" identity "$MODE")
+[[ -n "$NAMESPACE" && -n "$NAMESPACE_OWNER" ]] || exit 2
 CLUSTER_CREATED=no
-NAMESPACE_CREATED=no
 RESULT=failed
 STAGE=setup
 REPORT="$REPORT_DIR/report.json"
-export NAMESPACE
+export NAMESPACE NAMESPACE_OWNER
 export GATEWAY_IMAGE=${GATEWAY_IMAGE:-ghcr.io/skaldhall/ratatoskr-gateway:dev}
 export TOOLS_IMAGE=${TOOLS_IMAGE:-ratatoskr-tools:m1-local}
 export FAKE_IMAGE=${FAKE_IMAGE:-ratatoskr-fakeupstream:m1-local}
@@ -102,22 +102,24 @@ cleanup() {
     RESULT=failed
     record "$STAGE" failed 'Command failed or timed out; no raw logs collected.'
   fi
-  if [[ "$NAMESPACE_CREATED" == yes ]]; then
-    if timeout --signal=TERM --kill-after=5s 130s kubectl --context "$CTX" \
-        --request-timeout=125s delete namespace "$NAMESPACE" --wait=true --timeout=120s >/dev/null 2>&1; then
-      record cleanup-namespace passed 'Ephemeral namespace and Secrets removed.'
-    else
-      RESULT=failed
-      record cleanup-namespace failed 'Namespace cleanup timed out; remove namespace manually before another run.'
-    fi
+  NAMESPACE_CLEANUP_OK=yes
+  if python3 "$ROOT/test/e2e/m1/namespace.py" cleanup "$PRIVATE" >/dev/null 2>&1; then
+    record cleanup-namespace passed 'Confirmed owned namespace UID removed or no namespace was created.'
+  else
+    NAMESPACE_CLEANUP_OK=no
+    RESULT=failed
+    record cleanup-namespace failed 'Ownership/UID cleanup unverified; foreign or ambiguous namespace preserved. Inspect manually.'
   fi
-  if [[ "$CLUSTER_CREATED" == yes ]]; then
+  if [[ "$CLUSTER_CREATED" == yes && "$NAMESPACE_CLEANUP_OK" == yes ]]; then
     if timeout --signal=TERM --kill-after=5s 90s bash "$ROOT/hack/k3d-down.sh" flannel >/dev/null 2>&1; then
       record cleanup-cluster passed 'Cluster created by this harness removed using hack lifecycle.'
     else
       RESULT=failed
       record cleanup-cluster failed 'Cluster cleanup failed; use hack/k3d-down.sh flannel before another variant.'
     fi
+  fi
+  if [[ "$CLUSTER_CREATED" == yes && "$NAMESPACE_CLEANUP_OK" != yes ]]; then
+    record cleanup-cluster failed 'Cluster retained because namespace ownership cleanup is unverified; no foreign resources removed.'
   fi
   jq --arg status "$RESULT" '.status=$status' "$REPORT" > "$PRIVATE/report.next"
   mv "$PRIVATE/report.next" "$REPORT"
@@ -219,13 +221,9 @@ if [[ "$IMPORT" == yes ]]; then
   }
 fi
 STAGE=namespace
-if k get namespace "$NAMESPACE" >/dev/null 2>&1; then
-  record namespace failed 'Generated namespace already exists; refusing to overwrite or remove it.'
-  exit 1
-fi
-python3 "$ROOT/test/e2e/m1/render.py" "$ROOT/test/e2e/m1/templates/namespace.yaml.tmpl" > "$PRIVATE/namespace.yaml"
-NAMESPACE_CREATED=yes
-k apply -f "$PRIVATE/namespace.yaml" >/dev/null
+# Exactly one CREATE; returned UID and owner label authorize only UID-conditional
+# deletion. A failed/ambiguous CREATE can never adopt an object seen by name.
+python3 "$ROOT/test/e2e/m1/namespace.py" create "$PRIVATE" "$NAMESPACE" "$NAMESPACE_OWNER"
 if [[ "$MODE" == live ]]; then
   STAGE=secret-creation
   secret_args=("--from-file=client.ovpn=$PRIVATE/upstream/client.ovpn")

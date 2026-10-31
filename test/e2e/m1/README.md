@@ -39,7 +39,8 @@ Defaults are k3s pod CIDR `10.42.0.0/16` and service CIDR `10.43.0.0/16`.
 `M1_POD_CIDR` / `M1_SERVICE_CIDR` may override them; all node pod subnets and the
 API ClusterIP are checked against those declarations. This does not discover
 all custom service ranges or support dual-stack. Base and gateway templates are
-**complete YAML documents**, not patches. Dynamic client JSON is non-secret.
+**complete YAML documents**, not patches, and contain no Namespace object; only
+the ownership-safe lifecycle can create a namespace. Dynamic client JSON is non-secret.
 
 ## Future execution interface (do not execute before final gate)
 
@@ -92,8 +93,16 @@ writes its failure report. The default wall deadline is 1800 seconds, adjustable
 with `M1_TOTAL_TIMEOUT_SECONDS`, plus up to 270 seconds cleanup grace. Exec/curl,
 readiness, imports and lifecycle/cleanup operations have independent limits.
 
-On ordinary exit, assertion failure, INT or TERM, cleanup deletes the ephemeral
-namespace (including Secrets) and all private runtime files. It deletes a cluster
+Namespace names and owner tokens use fresh UUID randomness, never the shell PID.
+`namespace.py` performs exactly one CREATE and validates the returned namespace
+UID/owner label. Cleanup uses a raw DELETE with server-side UID preconditions and
+checks bounded completion; it never issues a name-only delete or adopts an object
+following a conflicting/ambiguous CREATE. An unconfirmed response or replacement
+preserves the namespace and fails cleanup; an owned-created cluster is retained
+when namespace ownership is unverified, rather than removing foreign resources.
+
+On ordinary exit, assertion failure, INT or TERM, cleanup deletes only the exact
+confirmed-owned ephemeral namespace (including Secrets) and private runtime files. It deletes a cluster
 **only if this run created it**, via `hack/k3d-down.sh flannel`; a reused cluster
 is retained. Cleanup failures make the report failed and require manual namespace
 and/or lifecycle cleanup before another run. SIGKILL, machine loss and a failed
@@ -201,7 +210,7 @@ for script in hack/m1-proof.sh test/e2e/m1/run.sh test/e2e/ci/run.sh test/e2e/li
 done
 sh -n test/e2e/m1/ipinfo.sh
 PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/m1/static-check.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/m1 -p 'test_bundle.py'
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/m1 -p 'test_*.py'
 ```
 
 The static validator uses PyYAML (validation-only local dependency), renders all

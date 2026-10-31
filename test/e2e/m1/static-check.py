@@ -10,6 +10,7 @@ import yaml
 HERE = Path(__file__).resolve().parent
 VALUES = {
     "NAMESPACE": "ratatoskr-m1-static",
+    "NAMESPACE_OWNER": "a" * 32,
     "REMOTE_NODE": "k3d-ratatoskr-flannel-server-0",
     "GATEWAY_NODE": "k3d-ratatoskr-flannel-agent-0",
     "CLIENT_NODE": "k3d-ratatoskr-flannel-agent-1",
@@ -48,6 +49,9 @@ def main():
             require(doc.get("apiVersion") == "v1", "missing or unexpected apiVersion")
             require(doc.get("kind") in {"Namespace", "ConfigMap", "Service", "Pod"}, "unexpected kind")
             require(doc.get("metadata", {}).get("name"), "missing object name")
+            if doc["kind"] == "Namespace":
+                require(path.name == "namespace.yaml.tmpl", "base/gateway applies must never create or adopt namespaces")
+                require(doc["metadata"]["labels"].get("ratatoskr.skaldhall.io/m1-owner") == VALUES["NAMESPACE_OWNER"], "namespace ownership label missing")
             if doc["kind"] != "Namespace":
                 require(doc["metadata"].get("namespace") == VALUES["NAMESPACE"], "missing namespace")
             if doc["kind"] == "ConfigMap":
