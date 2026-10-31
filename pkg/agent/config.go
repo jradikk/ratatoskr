@@ -131,6 +131,13 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 			c.RegistrationCACert = selected.RegistrationCACert
 			c.WireGuardPort = datapath.WireGuardPortDefault
 		}
+	} else if c.MTU == 0 {
+		// The controller clears measured MTU when every gateway is unhealthy.
+		// No usable tunnel is possible: validate a conservative closed-only
+		// fallback instead of treating transient health as authorization loss
+		// and permanently quarantining DNS/API access. A healthy endpoint
+		// still requires its measured MTU and fails closed if absent.
+		c.MTU = 576
 	}
 
 	return c, c.Validate()

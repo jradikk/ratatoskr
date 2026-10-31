@@ -121,6 +121,40 @@ func TestConfigFailClosedAndEndpointHash(t *testing.T) {
 	}
 }
 
+func TestUnhealthyGatewayWithoutMeasuredMTUUsesOnlyClosedFallback(t *testing.T) {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client", Namespace: "ns", UID: types.UID("workload-uid"), Labels: map[string]string{GatewayLabel: "g"}}, Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{PodIP: "10.1.0.2"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns"}}
+	gw := &api.EgressGateway{ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "operator", Generation: 1}, Spec: api.EgressGatewaySpec{AllowedNamespaces: api.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{}}}, Status: api.EgressGatewayStatus{ObservedGeneration: 1, GatewayID: 10, MTU: api.GatewayMTUStatus{EffectiveMTU: 1400}, Endpoints: []api.GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamHealthy: true}}}}
+	healthy, err := Config(p, ns, gw, nil, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !healthy.Endpoint.IsValid() || healthy.MTU != 1400 {
+		t.Fatalf("expected healthy measured gateway: %+v", healthy)
+	}
+	// A real health withdrawal clears status MTU while retaining an unhealthy
+	// endpoint. It must still produce an authorized unreachable configuration.
+	gw.Status.MTU.EffectiveMTU = 0
+	gw.Status.Endpoints[0].UpstreamHealthy = false
+	closed, err := Config(p, ns, gw, nil, "operator")
+	if err != nil {
+		t.Fatalf("transient health loss incorrectly denied client: %v", err)
+	}
+	if closed.Endpoint.IsValid() || closed.MTU != 576 || closed.GatewayID != healthy.GatewayID || closed.PodIP != healthy.PodIP || Hash(closed) == Hash(healthy) {
+		t.Fatalf("closed fallback not distinct from healthy config: %+v", closed)
+	}
+	// No endpoint list is equivalent to all replicas unhealthy.
+	gw.Status.Endpoints = nil
+	closed, err = Config(p, ns, gw, nil, "operator")
+	if err != nil || closed.Endpoint.IsValid() || closed.MTU != 576 {
+		t.Fatalf("missing healthy endpoint did not close: %+v %v", closed, err)
+	}
+	gw.Status.Endpoints = []api.GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamHealthy: true}}
+	if _, err = Config(p, ns, gw, nil, "operator"); err == nil {
+		t.Fatal("healthy endpoint accepted without measured MTU")
+	}
+}
+
 func TestClientMTUBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name, encryption   string
