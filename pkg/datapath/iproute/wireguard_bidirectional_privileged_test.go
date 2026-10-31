@@ -4,16 +4,16 @@ package iproute
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/netip"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 // Three disposable netns prove a *real* selected client GENEVE request over
@@ -222,6 +222,6 @@ func TestPrivilegedWireGuardBidirectionalReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if gnv.Attrs().Statistics.RxPackets == 0 || gnv.Attrs().Statistics.TxPackets == 0 {
-		t.Fatal(fmt.Sprintf("missing WG-carried bidirectional GENEVE: %+v", gnv.Attrs().Statistics))
+		t.Fatalf("missing WG-carried bidirectional GENEVE: %+v", gnv.Attrs().Statistics)
 	}
 }

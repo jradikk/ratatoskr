@@ -263,15 +263,24 @@ func TestPrivilegedWireGuardIngressIdentity(t *testing.T) {
 		t.Fatalf("WG packet matched plaintext eth0 guard: before=%d after=%d", before, got)
 	}
 	probeConn := gw.nft()
-	probeRules, err := probeConn.GetRules(ot, oc)
-	if err != nil || len(probeRules) != 1 {
-		t.Fatalf("missing authenticated WG input observer: %v %v", probeRules, err)
-	}
+	// ReceiveBytes may advance for the handshake before decrypted GENEVE
+	// reaches INPUT. Wait for the actual UDP6081 observer, not peer bytes.
+	deadline = time.Now().Add(2 * time.Second)
 	var authenticatedInputs uint64
-	for _, ex := range probeRules[0].Exprs {
-		if ct, ok := ex.(*expr.Counter); ok {
-			authenticatedInputs = ct.Packets
+	for {
+		probeRules, err := probeConn.GetRules(ot, oc)
+		if err != nil || len(probeRules) != 1 {
+			t.Fatalf("missing authenticated WG input observer: %v %v", probeRules, err)
 		}
+		for _, ex := range probeRules[0].Exprs {
+			if ct, ok := ex.(*expr.Counter); ok {
+				authenticatedInputs = ct.Packets
+			}
+		}
+		if authenticatedInputs > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if authenticatedInputs == 0 {
 		t.Fatal("decrypted UDP6081 never entered input with WG ingress identity")

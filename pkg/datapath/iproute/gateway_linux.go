@@ -180,7 +180,7 @@ func (b *Backend) gatewayTunnelAddr(link netlink.Link) error {
 		if !ok || !ip.Is4() || addr.IPNet == nil {
 			return fmt.Errorf("unexpected IPv4 address on %s", datapath.GatewayDevice)
 		}
-		bits, total := addr.IPNet.Mask.Size()
+		bits, total := addr.Mask.Size()
 		if total != 32 || bits != 32 || ip != desired.Addr() {
 			return fmt.Errorf("foreign IPv4 address on %s", datapath.GatewayDevice)
 		}
