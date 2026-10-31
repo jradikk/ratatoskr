@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,7 +16,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -42,15 +43,17 @@ const gatewayMetricsAddr = "127.0.0.1:9902"
 // source of truth for VPN health and exit IP. The gateway publishes only cached
 // readiness and the non-secret exit IP on its own port for probes/controller use.
 type state struct {
-	ready         bool
-	exitIP        string
-	upstreamIndex int
-	podMTU        int
-	geneveMTU     int
-	wireguardMTU  int
-	upstreamMTU   int
-	effectiveMTU  int
-	mss           int
+	ready                   bool
+	podUID                  string
+	appliedClientConfigHash string
+	exitIP                  string
+	upstreamIndex           int
+	podMTU                  int
+	geneveMTU               int
+	wireguardMTU            int
+	upstreamMTU             int
+	effectiveMTU            int
+	mss                     int
 }
 type upstreamInfo struct {
 	ExitIP string `json:"exitIP"`
@@ -216,38 +219,52 @@ func startGatewayDNS(listen string, ready func() bool, errorsCh chan<- error) (f
 // changes take effect without restarting the gateway pod. ConfigMap projection
 // is atomic; a malformed replacement must make the gateway fail closed.
 func readGatewayConfig(configPath string) (datapath.GatewayConfig, error) {
+	cfg, _, err := readGatewayConfigSnapshot(configPath)
+	return cfg, err
+}
+
+// The hash and decoded config come from the exact same opened FD bytes. Never
+// hash a second read: projected ConfigMap symlinks may switch between reads.
+func readGatewayConfigSnapshot(configPath string) (datapath.GatewayConfig, string, error) {
 	var cfg datapath.GatewayConfig
 	f, err := os.Open(configPath) // #nosec G304 -- explicit operator-owned ConfigMap mount, not an HTTP request path.
 	if err != nil {
-		return cfg, fmt.Errorf("open gateway config: %w", err)
+		return cfg, "", fmt.Errorf("open gateway config: %w", err)
 	}
 	defer f.Close()
 	stat, err := f.Stat()
 	if err != nil {
-		return cfg, err
+		return cfg, "", err
 	}
 	if stat.Size() > 1<<20 {
-		return cfg, errors.New("gateway config exceeds 1 MiB")
+		return cfg, "", errors.New("gateway config exceeds 1 MiB")
 	}
-	dec := json.NewDecoder(io.LimitReader(f, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
+	if err != nil {
+		return cfg, "", errors.New("read gateway config failed")
+	}
+	if len(raw) > 1<<20 {
+		return cfg, "", errors.New("gateway config exceeds 1 MiB")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return cfg, errors.New("invalid gateway datapath config")
+		return cfg, "", errors.New("invalid gateway datapath config")
 	}
 	var trailing json.RawMessage
 	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return cfg, errors.New("multiple gateway config documents are forbidden")
+		return cfg, "", errors.New("multiple gateway config documents are forbidden")
 	}
 	if !cfg.PodIP.IsValid() {
 		cfg.PodIP, err = netip.ParseAddr(os.Getenv("POD_IP"))
 		if err != nil {
-			return cfg, errors.New("podIP config or POD_IP environment is required")
+			return cfg, "", errors.New("podIP config or POD_IP environment is required")
 		}
 	}
 	if err := cfg.Validate(); err != nil {
-		return cfg, err
+		return cfg, "", err
 	}
-	return cfg, nil
+	return cfg, fmt.Sprintf("%x", sha256.Sum256(raw)), nil
 }
 
 // gatewayBackend rejects unknown and unavailable modes without falling back.
@@ -263,6 +280,10 @@ func gatewayBackend(mode string) (datapath.Backend, error) {
 }
 
 func run(ctx context.Context, configPath string) error {
+	podUID := os.Getenv("POD_UID")
+	if err := validatePodUID(podUID); err != nil {
+		return err
+	}
 	if err := platform.CheckKernel(); err != nil {
 		return err
 	}
@@ -288,7 +309,7 @@ func run(ctx context.Context, configPath string) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	server := &http.Server{Addr: ":9900", ReadHeaderTimeout: 3 * time.Second}
 	var current atomic.Value
-	current.Store(state{})
+	current.Store(state{podUID: podUID})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !current.Load().(state).ready {
@@ -297,20 +318,7 @@ func run(ctx context.Context, configPath string) error {
 		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
-		s := current.Load().(state)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
-			ExitIP       string `json:"exitIP"`
-			Ready        bool   `json:"ready"`
-			PodMTU       int    `json:"podMTU"`
-			GeneveMTU    int    `json:"geneveMTU"`
-			WireguardMTU int    `json:"wireguardMTU"`
-			UpstreamMTU  int    `json:"upstreamMTU"`
-			EffectiveMTU int    `json:"effectiveMTU"`
-			MSS          int    `json:"mss"`
-		}{s.exitIP, s.ready, s.podMTU, s.geneveMTU, s.wireguardMTU, s.upstreamMTU, s.effectiveMTU, s.mss})
-	})
+	mux.HandleFunc("/info", gatewayInfoHandler(&current))
 	server.Handler = mux
 	// The health API remains on the pod network for probes/controller. Metrics
 	// are deliberately bound to loopback only; do not add a public Service or
@@ -379,60 +387,27 @@ func run(ctx context.Context, configPath string) error {
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-	prev := state{}
+	reconciler := &gatewayReconciler{current: &current, podUID: podUID, cfg: cfg, apply: backend.ApplyGateway}
+	defer reconciler.invalidate()
 	for {
-		next, readErr := readGatewayConfig(configPath)
-		if readErr == nil {
-			readErr = clampGatewayMTU(&next)
-		}
-		if readErr != nil {
-			// A missing/invalid replacement must never keep using stale selected
-			// pod permissions or an old upstream-ready accept rule.
-			cfg.UpstreamHealthy = false
-			cfg.Clients = nil
-			current.Store(state{})
-			prev = state{}
-			if err := backend.ApplyGateway(ctx, cfg); err != nil {
-				logger.Error("gateway fail-closed update failed", "error", err)
-			}
-			logger.Error("gateway config unavailable", "error", readErr)
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-tick.C:
-				continue
-			}
-		}
-		next.UpstreamHealthy = cfg.UpstreamHealthy
-		changed := !reflect.DeepEqual(cfg, next)
-		cfg = next
-		s, err := probe(client, cfg.Encryption)
+		err := reconciler.refresh(ctx,
+			func() (datapath.GatewayConfig, string, error) { return readGatewayConfigSnapshot(configPath) },
+			clampGatewayMTU,
+			func(encryption string) (state, error) { return probe(client, encryption) })
 		if err != nil {
-			s = state{}
-		}
-		// Even with no upstream, keep refreshing table 100 so it is installed as
-		// soon as the plugin creates upstream0; marked recovery probes need it.
-		if changed || s != prev || !s.ready {
-			cfg.UpstreamHealthy = s.ready
-			if err := backend.ApplyGateway(ctx, cfg); err != nil {
-				s = state{}
-				logger.Error("gateway datapath update failed", "error", err)
-			}
-			prev = s
-			current.Store(s)
+			logger.Error("gateway refresh failed", "error", err)
 		}
 		select {
 		case <-ctx.Done():
-			cfg.UpstreamHealthy = false
-			_ = backend.ApplyGateway(context.Background(), cfg)
+			_ = reconciler.failClosed(context.Background(), false)
 			return nil
 		case err := <-serverErrors:
-			cfg.UpstreamHealthy = false
-			_ = backend.ApplyGateway(context.Background(), cfg)
+			_ = reconciler.failClosed(context.Background(), false)
 			return fmt.Errorf("gateway service failed: %w", err)
 		case <-tick.C:
 		}
 	}
+
 }
 func main() { os.Exit(mainCode()) }
 
