@@ -255,6 +255,77 @@ class HAFixtureTest(unittest.TestCase):
         self.assertIn("cleanup unverified", printed.getvalue())
         self.assertNotIn("untrusted", printed.getvalue())
 
+    def test_real_adapter_accepts_exact_running_pod_create_input(self):
+        import json
+        from unittest.mock import Mock
+        token = "a" * 32
+        uid = "b" * 32
+        class NamespaceAPI:
+            def get(self, name, timeout):
+                return {"metadata": {"name": name, "uid": uid,
+                        "labels": {f.lifecycle.LABEL: token}}}
+        owner = f.lifecycle.Lifecycle(NamespaceAPI(), token_factory=lambda: token)
+        owner.deadline = owner.clock() + 120
+        owner.seen_absent = set(owner.names)
+        owner.attempted = set(owner.names)
+        owner.created = {name: uid for name in owner.names}
+        owner.owned = dict(owner.created)
+        def transport(argv, *, payload=None, timeout, max_output):
+            self.assertIn("create", argv)
+            self.assertLessEqual(timeout, 12)
+            obj = json.loads(payload)
+            self.assertEqual(obj, f.prepare.running_probe_pod(owner.names[1], owner.names[0], "10.43.0.1"))
+            self.assertEqual(obj["spec"]["containers"][0]["env"][1],
+                             {"name": "API_IP", "value": "10.43.0.1"})
+            return ("v1\tPod\t" + owner.names[1] + "\tsynthetic-client\t" + uid).encode()
+        wire = Mock(side_effect=transport)
+        actual = f.HAFixtureAPI(owner, transport=wire)
+        created = actual.create(f.prepare.running_probe_pod(owner.names[1], owner.names[0], "10.43.0.1"))
+        self.assertEqual(created, {"kind": "Pod", "namespace": owner.names[1],
+                                   "name": "synthetic-client", "uid": uid})
+        self.assertEqual(wire.call_count, 1)
+        # The first POST is quarantined; no ambiguous second attempt.
+        with self.assertRaises(f.StageError) as failure:
+            actual.create(f.prepare.running_probe_pod(owner.names[1], owner.names[0], "10.43.0.1"))
+        self.assertIn("submitted-or-uncertain", str(failure.exception))
+        self.assertEqual(wire.call_count, 1)
+
+    def test_selected_create_classifies_before_vs_after_first_post(self):
+        from unittest.mock import Mock
+        token, uid = "a" * 32, "b" * 32
+        class NamespaceAPI:
+            def get(self, name, timeout):
+                return {"metadata": {"name": name, "uid": uid,
+                        "labels": {f.lifecycle.LABEL: token}}}
+        def fixture(transport):
+            owner = f.lifecycle.Lifecycle(NamespaceAPI(), token_factory=lambda: token)
+            owner.deadline = owner.clock() + 120
+            owner.seen_absent = set(owner.names)
+            owner.attempted = set(owner.names)
+            owner.created = {name: uid for name in owner.names}
+            owner.owned = dict(owner.created)
+            return f.HAFixtureAPI(owner, transport=transport), owner
+        wire = Mock(side_effect=AssertionError("must not send malformed manifest"))
+        api, owner = fixture(wire)
+        malformed = f.prepare.running_probe_pod(owner.names[1], owner.names[0], "10.43.0.1")
+        malformed["spec"]["containers"][0]["command"] = ["sh", "-c", "unsafe"]
+        with self.assertRaises(f.StageError) as failure:
+            api.create(malformed)
+        self.assertIn("local-validation", str(failure.exception))
+        self.assertFalse(api.create_attempts)
+        wire.assert_not_called()
+        def failed_transport(*_args, **_kwargs):
+            raise f.adapter.AdapterError("untrusted credential or admission output")
+        wire = Mock(side_effect=failed_transport)
+        api, owner = fixture(wire)
+        manifest = f.prepare.running_probe_pod(owner.names[1], owner.names[0], "10.43.0.1")
+        with self.assertRaises(f.StageError) as failure:
+            api.create(manifest)
+        self.assertIn("submitted-or-uncertain", str(failure.exception))
+        self.assertNotIn("credential", str(failure.exception))
+        self.assertEqual(api.create_attempts, {("Pod", owner.names[1], "synthetic-client")})
+        self.assertEqual(wire.call_count, 1)
+
     def test_missing_gate_never_constructs_kube_api(self):
         with patch.object(f.run, "ReadOnlyAPI") as api, redirect_stdout(io.StringIO()):
             result = f.main([], environ={})

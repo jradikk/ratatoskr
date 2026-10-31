@@ -39,6 +39,8 @@ class StageError(Blocked):
                         "fixture-manifests", "fixture-object-create",
                         "gateway-two-replica-baseline", "selected-pod-create",
                         "selected-agent-ready", "initial-marker",
+                        "selected-pod-create-local-validation",
+                        "selected-pod-create-submitted-or-uncertain",
                         "uid-owned-replica-delete", "selected-agent-reselection",
                         "selected-reselection-stability", "post-failover-marker"})
 
@@ -59,6 +61,26 @@ class HAFixtureAPI(adapter.FixtureAPI):
     controller Pods have generated names. This read-only exception never adds
     dynamic CREATE/exec or name-only DELETE authority.
     """
+
+    def create(self, obj):
+        """Classify selected CREATE without exposing API output or retrying POST.
+
+        The base adapter quarantines the name before transport. Once that has
+        happened, a timeout/invalid response is ambiguous and namespace cleanup
+        alone may retire the Pod; never reissue or perform name-only adoption.
+        """
+        selected = (isinstance(obj, dict) and obj.get("kind") == "Pod" and
+                    isinstance(obj.get("metadata"), dict) and
+                    obj["metadata"].get("name") == "synthetic-client")
+        if not selected:
+            return super().create(obj)
+        try:
+            return super().create(obj)
+        except adapter.AdapterError:
+            key = ("Pod", self.owner.names[1], "synthetic-client")
+            label = ("selected-pod-create-submitted-or-uncertain" if
+                     key in self.create_attempts else "selected-pod-create-local-validation")
+            raise StageError(label) from None
 
     def get(self, kind, name, namespace):
         if kind != "pod" or name in adapter.RESOURCES["pod"]:
