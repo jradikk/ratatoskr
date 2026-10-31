@@ -4,6 +4,7 @@ package iproute
 
 import (
 	"encoding/binary"
+	"net"
 	"net/netip"
 	"testing"
 
@@ -11,6 +12,33 @@ import (
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
+
+func TestIsIPv4Default(t *testing.T) {
+	for _, tc := range []struct {
+		name, cidr string
+		want       bool
+	}{
+		{"implicit", "", true},
+		{"explicit", "0.0.0.0/0", true},
+		{"zero-host", "0.0.0.0/32", false},
+		{"nondefault", "198.51.100.0/24", false},
+		{"ipv6", "::/0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dst *net.IPNet
+			if tc.cidr != "" {
+				_, parsed, err := net.ParseCIDR(tc.cidr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dst = parsed
+			}
+			if got := isIPv4Default(dst); got != tc.want {
+				t.Fatalf("%s: got %t want %t", tc.name, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestExclusions(t *testing.T) {
 	c := datapath.ClientConfig{Endpoint: netip.MustParseAddr("10.42.2.4"), Exclusions: []netip.Prefix{netip.MustParsePrefix("10.42.8.1/16"), netip.MustParsePrefix("10.42.0.0/16")}}

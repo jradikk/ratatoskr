@@ -250,6 +250,21 @@ func (b *Backend) rejectDualStack() error {
 	return nil
 }
 
+// isIPv4Default recognizes both the implicit nil destination and the explicit
+// 0.0.0.0/0 returned by netlink RouteListFiltered. Only IPv4 default routes
+// may be withdrawn when an endpoint is lost.
+func isIPv4Default(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	bits, total := dst.Mask.Size()
+	if total != 32 || bits != 0 {
+		return false
+	}
+	ip := dst.IP.To4()
+	return ip != nil && ip.Equal(net.IPv4zero)
+}
+
 func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) error {
 	if err := c.Validate(); err != nil {
 		return err
@@ -303,7 +318,7 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 			return err
 		}
 		for _, r := range routes {
-			if r.Dst == nil && r.Type == unix.RTN_UNICAST && int(r.Protocol) == datapath.RouteProtocol {
+			if isIPv4Default(r.Dst) && r.Type == unix.RTN_UNICAST && int(r.Protocol) == datapath.RouteProtocol {
 				if err := b.h.RouteDel(&r); err != nil {
 					return err
 				}
