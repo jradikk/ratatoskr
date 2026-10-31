@@ -238,15 +238,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		}
 	}
 	if selected {
+		revoke := func(cause error) error { return r.revokeSelected(ctx, pod, cause) }
 		var ns corev1.Namespace
 		if err = r.Client.Get(ctx, types.NamespacedName{Name: pod.Namespace}, &ns); err != nil {
-			return err
+			return revoke(err)
 		}
 		name := pod.Labels[GatewayLabel]
 		gwNS := pod.Labels[GatewayNamespace]
 		if a := pod.Annotations[GatewayNamespace]; a != "" {
 			if gwNS != "" && gwNS != a {
-				return errors.New("conflicting gateway namespace")
+				return revoke(errors.New("conflicting gateway namespace"))
 			}
 			gwNS = a
 		}
@@ -254,19 +255,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			gwNS = r.OperatorNamespace
 		}
 		if gwNS == "" {
-			return errors.New("OPERATOR_NAMESPACE required")
+			return revoke(errors.New("OPERATOR_NAMESPACE required"))
 		}
 		gatewayKey = types.NamespacedName{Namespace: gwNS, Name: name}
 		if err = r.Client.Get(ctx, gatewayKey, &gw); err != nil {
-			return err
+			return revoke(err)
 		}
 		var policies api.EgressPolicyList
 		if err = r.Client.List(ctx, &policies, client.InNamespace(pod.Namespace)); err != nil {
-			return err
+			return revoke(err)
 		}
 		cfg, err = Config(pod, &ns, &gw, policies.Items, r.OperatorNamespace)
 		if err != nil {
-			return err
+			return revoke(err)
 		}
 	} else {
 		// A previously persisted non-secret config permits removing ONLY owned
