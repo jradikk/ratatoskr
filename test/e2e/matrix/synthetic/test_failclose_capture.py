@@ -88,10 +88,19 @@ class CollectorTests(unittest.TestCase):
     def test_packet_positive_control_and_no_selected_egress(self):
         positive = b"1.000 IP 10.42.2.5.12345 > 10.43.0.1.443: Flags [S], seq 1\n"
         self.assertTrue(f.capture_proof(positive, SOURCE, API))
-        for bad in (b"", positive.replace(b"10.43.0.1.443", b"10.88.0.1.8080"),
-                    positive + b"2.000 IP 10.42.2.5.12345 > 10.88.0.1.8080: Flags [S], seq 1\n",
-                    positive.replace(b"10.42.2.5", b"10.42.2.6"), positive + b"SECRET\n"):
-            with self.assertRaises(f.Blocked):
+        # Confirmed tcpdump SIGINT output includes an empty third line after
+        # two valid API SYNs. A whitespace-only line is not a packet; it cannot
+        # replace the positive control or hide a nonblank unknown packet.
+        self.assertTrue(f.capture_proof(positive + positive + b"\n", SOURCE, API))
+        self.assertTrue(f.capture_proof(positive + b" \t\n", SOURCE, API))
+        self.assertEqual(f.capture_category(positive + b"\n", SOURCE, API), "api443-control-present")
+        self.assertEqual(f.capture_category(b"\n \t\n", SOURCE, API), "empty")
+        for bad in (b"", b"\n \t\n", positive.replace(b"10.43.0.1.443", b"10.88.0.1.8080"),
+                    positive + b"2.000 IP 10.42.2.5.12345 > 10.88.0.1.8080: Flags [S], seq 1\n\n",
+                    positive.replace(b"10.42.2.5", b"10.42.2.6"), positive + b"SECRET\n\n",
+                    positive + b"1.000 IP 10.42.2.5.12345 > 192.0.2.7.6443: Flags [S], seq 1\n\n",
+                    positive + b"\n" * 33):
+            with self.subTest(bad=bad[:32]), self.assertRaises(f.Blocked):
                 f.capture_proof(bad, SOURCE, API)
 
     def test_capture_category_is_fixed_diagnostic_never_positive_proof(self):

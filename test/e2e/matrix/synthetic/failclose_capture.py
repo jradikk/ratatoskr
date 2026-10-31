@@ -143,11 +143,14 @@ def capture_category(raw, source, api_ip):
     if not isinstance(raw, bytes) or len(raw) > 4096:
         return "oversize-or-invalid"
     try:
-        lines = raw.decode("ascii").splitlines()
+        observed = raw.decode("ascii").splitlines()
+        if len(observed) > 32:
+            return "oversize-or-invalid"
+        # tcpdump can leave one empty/whitespace line on stdout at SIGINT.
+        # It is not a packet and never supplies the positive SYN control.
+        lines = [line for line in observed if line.strip()]
         if not lines:
             return "empty"
-        if len(lines) > 32:
-            return "oversize-or-invalid"
         api, selected, other_443, other_6443, unknown = 0, 0, 0, 0, 0
         pattern = re.compile(r"^[0-9]+\.[0-9]+ IP " + re.escape(source) +
                              r"\.[0-9]{1,5} > ([0-9]{1,3}(?:\.[0-9]{1,3}){3})\.([0-9]{1,5}): Flags \[S\](?:,.*)?$")
@@ -184,10 +187,13 @@ def capture_proof(raw, source, api_ip):
     if not isinstance(raw, bytes) or len(raw) > 4096:
         raise Blocked("Header-only capture exceeded limit.")
     try:
-        lines = raw.decode("ascii").splitlines()
+        observed = raw.decode("ascii").splitlines()
+        if len(observed) > 32:  # Count even blank lines against capture cap.
+            raise ValueError()
+        lines = [line for line in observed if line.strip()]
         pat = re.compile(r"^[0-9]+\.[0-9]+ IP " + re.escape(source) + r"\.[0-9]{1,5} > (" +
                          re.escape(api_ip) + "|" + re.escape(DEST) + r")\.(443|8080): Flags \[S\](?:,.*)?$")
-        if not 1 <= len(lines) <= 32:
+        if not lines:
             raise ValueError()
         api, selected = 0, 0
         for line in lines:
