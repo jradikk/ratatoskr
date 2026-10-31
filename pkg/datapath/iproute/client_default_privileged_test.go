@@ -115,8 +115,6 @@ func TestPrivilegedClientWithdrawSelectedTCPConnect(t *testing.T) {
 					t.Fatal(err)
 				}
 				_ = wrongPort.Close()
-				udpRoute, routeErr := netlink.RouteGetWithOptions(net.ParseIP("198.51.100.7"), &netlink.RouteGetOptions{})
-				t.Logf("unselected route=%+v err=%v eth=%d peer=%d", udpRoute, routeErr, eth.Attrs().Index, peer.Attrs().Index)
 				frame := make([]byte, 2048)
 				controlSeen := false
 				for {
@@ -128,7 +126,6 @@ func TestPrivilegedClientWithdrawSelectedTCPConnect(t *testing.T) {
 						t.Fatal(e)
 					}
 					if n >= 14 {
-						t.Logf("eth0 frame len=%d ll=%+v ether=%x proto=%d dst=%v", n, sa, binary.BigEndian.Uint16(frame[12:14]), frame[23], frame[30:34])
 					}
 					if n >= 42 && binary.BigEndian.Uint16(frame[12:14]) == unix.ETH_P_IP && frame[23] == unix.IPPROTO_UDP && net.IP(frame[30:34]).Equal(net.ParseIP("198.51.100.7")) && binary.BigEndian.Uint16(frame[36:38]) == 9090 {
 						controlSeen = true
