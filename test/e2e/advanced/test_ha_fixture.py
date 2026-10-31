@@ -141,6 +141,120 @@ class HAFixtureTest(unittest.TestCase):
         with self.assertRaises(f.adapter.AdapterError):
             dynamic.list_owned_gateway_pods(GATEWAY, GW_UID)
 
+    def test_stage_is_preserved_after_verified_cleanup(self):
+        from unittest.mock import Mock
+        ids = {component: "containerd://sha256:" + "f" * 64 for component in f.run.COMPONENTS}
+
+        class Owner:
+            names = ("rtk-syn-" + "a" * 16, "rtk-syn-" + "a" * 16 + "-apps")
+            token = "a" * 32
+            deadline = 500
+            closed = False
+            private_dir = None
+            cleanup_verified = False
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                self.cleanup_verified = True
+                # Mirror Lifecycle: unknown exceptions are sanitized after cleanup.
+                if exc_type and not issubclass(exc_type, (f.lifecycle.LifecycleError,
+                                                          KeyboardInterrupt, SystemExit)):
+                    raise f.lifecycle.LifecycleError("Final-gate body failed (details suppressed).")
+            def create_namespaces(self):
+                return self.names
+            def generate_pki(self):
+                self.private_dir = "private-test-placeholder"
+
+        owner = Owner()
+        adapter = Mock()
+        adapter.create.side_effect = f.adapter.AdapterError("raw untrusted API error")
+        with patch.object(f.partial_gateway, "private_contents", return_value=("ca", "cert", "key",
+                    "clientcert", "clientkey", "witnesscert", "witnesskey")):
+            with self.assertRaises(f.StageError) as observed:
+                f.execute(ids, "10.43.0.1", lifecycle_factory=lambda **_kw: owner,
+                          adapter_factory=lambda _owner: adapter)
+        self.assertTrue(owner.cleanup_verified)
+        self.assertEqual(str(observed.exception), "HA fixture blocked at fixture-object-create.")
+        self.assertNotIn("raw untrusted", str(observed.exception))
+
+    def test_failed_cleanup_overrides_any_stage(self):
+        from unittest.mock import Mock
+        ids = {component: "containerd://sha256:" + "f" * 64 for component in f.run.COMPONENTS}
+        class Owner:
+            names = ("rtk-syn-" + "a" * 16, "rtk-syn-" + "a" * 16 + "-apps")
+            token = "a" * 32
+            deadline = 500
+            closed = False
+            private_dir = "private-test-placeholder"
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                raise f.lifecycle.LifecycleError("Final-gate cleanup unverified; no PASS permitted.")
+            def create_namespaces(self):
+                pass
+            def generate_pki(self):
+                pass
+        adapter = Mock()
+        adapter.create.side_effect = f.adapter.AdapterError("untrusted")
+        with patch.object(f.partial_gateway, "private_contents", return_value=("ca", "cert", "key",
+                    "clientcert", "clientkey", "witnesscert", "witnesskey")):
+            with self.assertRaisesRegex(f.lifecycle.LifecycleError, "cleanup unverified"):
+                f.execute(ids, "10.43.0.1", lifecycle_factory=lambda **_kw: Owner(),
+                          adapter_factory=lambda _owner: adapter)
+
+    def test_unexpected_body_error_retains_only_stage(self):
+        ids = {component: "containerd://sha256:" + "f" * 64 for component in f.run.COMPONENTS}
+        class Owner:
+            names = ("rtk-syn-" + "a" * 16, "rtk-syn-" + "a" * 16 + "-apps")
+            token = "a" * 32
+            deadline = 500
+            closed = False
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                pass
+            def create_namespaces(self):
+                raise RuntimeError("unexpected sensitive Kubernetes response")
+        with self.assertRaises(f.StageError) as observed:
+            f.execute(ids, "10.43.0.1", lifecycle_factory=lambda **_kw: Owner())
+        self.assertEqual(str(observed.exception), "HA fixture blocked at owned-namespaces-create.")
+        self.assertNotIn("sensitive", str(observed.exception))
+
+    def test_checkpoint_does_not_leak_untrusted_details_to_cli(self):
+        from unittest.mock import Mock
+        ids = {component: "containerd://sha256:" + "f" * 64 for component in f.run.COMPONENTS}
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_HA_FIXTURE": "1", **{
+            "EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in ids.items()}}
+        printed = io.StringIO()
+        with (patch.object(f.run, "preflight", return_value="operator"),
+              patch.object(f.node_images, "verify", return_value=True),
+              patch.object(f.partial_gateway, "api_service_ip", return_value="10.43.0.1"),
+              redirect_stdout(printed)):
+            result = f.main(["--execute", "--execute-ha-fixture"], environ=env,
+                            readonly_factory=Mock(),
+                            executor=lambda *_: (_ for _ in ()).throw(f.StageError("fixture-object-create")))
+        self.assertEqual(result, 1)
+        self.assertIn("fixture-object-create", printed.getvalue())
+        self.assertNotIn("10.43.0.1", printed.getvalue())
+        self.assertNotIn("containerd://", printed.getvalue())
+
+    def test_cleanup_failure_reports_distinct_message(self):
+        from unittest.mock import Mock
+        ids = {component: "containerd://sha256:" + "f" * 64 for component in f.run.COMPONENTS}
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_HA_FIXTURE": "1", **{
+            "EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in ids.items()}}
+        printed = io.StringIO()
+        with (patch.object(f.run, "preflight", return_value="operator"),
+              patch.object(f.node_images, "verify", return_value=True),
+              patch.object(f.partial_gateway, "api_service_ip", return_value="10.43.0.1"),
+              redirect_stdout(printed)):
+            result = f.main(["--execute", "--execute-ha-fixture"], environ=env,
+                            readonly_factory=Mock(), executor=lambda *_: (_ for _ in ()).throw(
+                                f.lifecycle.LifecycleError("untrusted cleanup internals")))
+        self.assertEqual(result, 1)
+        self.assertIn("cleanup unverified", printed.getvalue())
+        self.assertNotIn("untrusted", printed.getvalue())
+
     def test_missing_gate_never_constructs_kube_api(self):
         with patch.object(f.run, "ReadOnlyAPI") as api, redirect_stdout(io.StringIO()):
             result = f.main([], environ={})

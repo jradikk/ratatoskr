@@ -28,8 +28,24 @@ import run  # noqa: E402
 import ha_live  # noqa: E402
 
 
-class Blocked(Exception):
+class Blocked(lifecycle.LifecycleError):
     """Fixed safe diagnostics only; never expose Kubernetes or PKI bytes."""
+
+
+class StageError(Blocked):
+    """Only code-authored checkpoint labels may cross the cleanup boundary."""
+
+    LABELS = frozenset({"owned-namespaces-create", "fixture-private-pki",
+                        "fixture-manifests", "fixture-object-create",
+                        "gateway-two-replica-baseline", "selected-pod-create",
+                        "selected-agent-ready", "initial-marker",
+                        "uid-owned-replica-delete", "selected-agent-reselection",
+                        "selected-reselection-stability", "post-failover-marker"})
+
+    def __init__(self, label):
+        if label not in self.LABELS:
+            raise ValueError("Unknown HA checkpoint")
+        super().__init__("HA fixture blocked at " + label + ".")
 
 
 BASE = partial_gateway.BASE
@@ -142,7 +158,7 @@ def fixture_manifests(namespace, token, contents):
     return selected
 
 
-def bounded_poll(owner, operation, *, seconds, clock=time.monotonic, sleep=time.sleep):
+def bounded_poll(owner, operation, *, stage, seconds, clock=time.monotonic, sleep=time.sleep):
     deadline = min(owner.deadline, clock() + seconds)
     while clock() < deadline:
         if owner.closed:
@@ -157,7 +173,7 @@ def bounded_poll(owner, operation, *, seconds, clock=time.monotonic, sleep=time.
         remaining = deadline - clock()
         if remaining > 0:
             sleep(min(2, remaining))
-    raise Blocked("Bounded HA fixture checkpoint timed out.")
+    raise Blocked("HA fixture did not converge at " + stage + ".")
 
 
 def owned_gateway_baseline(api, owner, ids):
@@ -277,62 +293,85 @@ def execute(ids, api_ip, *, lifecycle_factory=lifecycle.Lifecycle,
         raise Blocked("Immutable approved image IDs missing.")
     ha_live.ip4(api_ip)
     with lifecycle_factory(duration=650, cleanup_budget=140) as owner:
-        owner.create_namespaces()
-        owner.generate_pki()
-        api = adapter_factory(owner)
-        contents = partial_gateway.private_contents(owner.private_dir)
-        created = {}
-        for obj in fixture_manifests(owner.names[0], owner.token, contents):
-            identity = api.create(obj)
-            key = identity["kind"], identity["namespace"], identity["name"]
-            if key in created or not lifecycle.UID.fullmatch(identity.get("uid", "")):
-                raise Blocked("Fixture object CREATE UID ambiguous.")
-            created[key] = identity["uid"]
-        gw_uid = created[("EgressGateway", owner.names[0], "synthetic")]
-        bounded_poll(owner, lambda: gw_uid if owned_gateway_baseline(api, owner, ids) == gw_uid and
-                     source_server_identity(api, owner, created, ids) else None,
-                     seconds=170, clock=clock, sleep=sleep)
-        # The fixture engineer's reviewed long-lived restricted workload helper
-        # reuses the approved one-shot client image (no new image/probe surface).
-        pod_manifest = prepare.running_probe_pod(owner.names[1], owner.names[0], api_ip)
-        identity = api.create(pod_manifest)
-        if (identity["kind"], identity["namespace"], identity["name"]) != ("Pod", owner.names[1], "synthetic-client"):
-            raise Blocked("Selected fixture Pod CREATE identity invalid.")
-        uid = identity["uid"]
-        def get_snapshot():
-            snap = ha_live.snapshot(lambda _ctx, kind, ns, name: api.get(kind, name, ns),
-                                    "fixture", owner.names[0], "synthetic",
-                                    owner.names[1], "synthetic-client", gateway_uid=gw_uid, pod_uid=uid)
-            if len(snap["active"]) != 2 or source_server_identity(api, owner, created, ids) is None:
-                raise Blocked("Healthy baseline requires two replicas and source server.")
-            pod = api.get("pod", "synthetic-client", owner.names[1])
-            if api.pod_image_id(owner.names[1], "synthetic-client", "client", uid) != ids["selected"]:
-                raise Blocked("Selected fixture image mismatch.")
-            if pod.get("spec", {}).get("containers", [{}])[0].get("imagePullPolicy") != "Never":
-                raise Blocked("Selected fixture image pull policy mismatch.")
-            return snap
-        before = bounded_poll(owner, get_snapshot, seconds=155, clock=clock, sleep=sleep)
-        if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
-            raise Blocked("Initial selected traffic marker/direct path failed.")
-        if source_server_identity(api, owner, created, ids) is None:
-            raise Blocked("Source server changed during initial marker.")
-        # Reaffirm same Pod/Gateway identity after first independent new TCP probe.
-        if get_snapshot() != before:
-            raise Blocked("Fixture identity changed before controlled failover.")
-        remove_chosen_gateway_pod(api, owner, gw_uid, before)
-        after = bounded_poll(owner, lambda: reselected(api, owner, before),
-                             seconds=135, clock=clock, sleep=sleep)
-        sleep(2)
-        if reselected(api, owner, before) != after:
-            raise Blocked("HA endpoint/agent choice changed after observation.")
-        # A NEW TCP connection after agent reselection is required: no claim
-        # that an established flow survives a different gateway/VPN exit.
-        if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
-            raise Blocked("Post-failover selected traffic marker/direct path failed.")
-        if source_server_identity(api, owner, created, ids) is None:
-            raise Blocked("Source server changed during post-failover marker.")
-        if reselected(api, owner, before) != after:
-            raise Blocked("Fixture identity changed during post-failover marker.")
+        stage = "owned-namespaces-create"
+        try:
+            owner.create_namespaces()
+            stage = "fixture-private-pki"
+            owner.generate_pki()
+            api = adapter_factory(owner)
+            stage = "fixture-manifests"
+            contents = partial_gateway.private_contents(owner.private_dir)
+            created = {}
+            stage = "fixture-object-create"
+            for obj in fixture_manifests(owner.names[0], owner.token, contents):
+                identity = api.create(obj)
+                key = identity["kind"], identity["namespace"], identity["name"]
+                if key in created or not lifecycle.UID.fullmatch(identity.get("uid", "")):
+                    raise Blocked("Fixture object CREATE UID ambiguous.")
+                created[key] = identity["uid"]
+            stage = "gateway-two-replica-baseline"
+            gw_uid = created[("EgressGateway", owner.names[0], "synthetic")]
+            bounded_poll(owner, lambda: gw_uid if owned_gateway_baseline(api, owner, ids) == gw_uid and
+                         source_server_identity(api, owner, created, ids) else None,
+                         stage="gateway-two-replica-baseline", seconds=170, clock=clock, sleep=sleep)
+            # The fixture engineer's reviewed long-lived restricted workload helper
+            # reuses the approved one-shot client image (no new image/probe surface).
+            stage = "selected-pod-create"
+            pod_manifest = prepare.running_probe_pod(owner.names[1], owner.names[0], api_ip)
+            identity = api.create(pod_manifest)
+            if (identity["kind"], identity["namespace"], identity["name"]) != ("Pod", owner.names[1], "synthetic-client"):
+                raise Blocked("Selected fixture Pod CREATE identity invalid.")
+            uid = identity["uid"]
+            def get_snapshot():
+                snap = ha_live.snapshot(lambda _ctx, kind, ns, name: api.get(kind, name, ns),
+                                        "fixture", owner.names[0], "synthetic",
+                                        owner.names[1], "synthetic-client", gateway_uid=gw_uid, pod_uid=uid)
+                if len(snap["active"]) != 2 or source_server_identity(api, owner, created, ids) is None:
+                    raise Blocked("Healthy baseline requires two replicas and source server.")
+                pod = api.get("pod", "synthetic-client", owner.names[1])
+                if api.pod_image_id(owner.names[1], "synthetic-client", "client", uid) != ids["selected"]:
+                    raise Blocked("Selected fixture image mismatch.")
+                if pod.get("spec", {}).get("containers", [{}])[0].get("imagePullPolicy") != "Never":
+                    raise Blocked("Selected fixture image pull policy mismatch.")
+                return snap
+            stage = "selected-agent-ready"
+            before = bounded_poll(owner, get_snapshot, stage="selected-agent-ready",
+                                  seconds=155, clock=clock, sleep=sleep)
+            stage = "initial-marker"
+            if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
+                raise Blocked("Initial selected traffic marker/direct path failed.")
+            if source_server_identity(api, owner, created, ids) is None:
+                raise Blocked("Source server changed during initial marker.")
+            # Reaffirm same Pod/Gateway identity after first independent new TCP probe.
+            if get_snapshot() != before:
+                raise Blocked("Fixture identity changed before controlled failover.")
+            stage = "uid-owned-replica-delete"
+            remove_chosen_gateway_pod(api, owner, gw_uid, before)
+            stage = "selected-agent-reselection"
+            after = bounded_poll(owner, lambda: reselected(api, owner, before),
+                                 stage="selected-agent-reselection", seconds=135, clock=clock, sleep=sleep)
+            stage = "selected-reselection-stability"
+            sleep(2)
+            if reselected(api, owner, before) != after:
+                raise Blocked("HA endpoint/agent choice changed after observation.")
+            stage = "post-failover-marker"
+            # A NEW TCP connection after agent reselection is required: no claim
+            # that an established flow survives a different gateway/VPN exit.
+            if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
+                raise Blocked("Post-failover selected traffic marker/direct path failed.")
+            if source_server_identity(api, owner, created, ids) is None:
+                raise Blocked("Source server changed during post-failover marker.")
+            if reselected(api, owner, before) != after:
+                raise Blocked("Fixture identity changed during post-failover marker.")
+        except Blocked:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            # Translate every other body failure inside Lifecycle: __exit__
+            # otherwise erases the stage. No raw exception reaches CLI, even
+            # from a malformed API object or an unexpected fixture bug.
+            raise StageError(stage) from None
     return {"haNewConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
             "wireguard": "not-tested"}
 
@@ -362,6 +401,12 @@ def main(argv=None, environ=None, *, readonly_factory=run.ReadOnlyAPI, executor=
         return 4  # Always incomplete M8; never mark full matrix PASS.
     except (KeyboardInterrupt, SystemExit):
         print("FAILED: synthetic HA gate interrupted; inspect UID-owned namespace cleanup.")
+        return 1
+    except Blocked as failure:
+        print("FAILED: " + str(failure) + " UID-owned cleanup attempted; inspect privately.")
+        return 1
+    except lifecycle.LifecycleError:
+        print("FAILED: HA namespace/private-PKI lifecycle or cleanup unverified; no PASS.")
         return 1
     except BaseException:
         print("FAILED: synthetic HA gate blocked; inspect UID-owned namespace cleanup privately.")
