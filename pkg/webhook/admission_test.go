@@ -183,7 +183,7 @@ func TestProgrammingInitDatapathCapabilitiesAndEnv(t *testing.T) {
 			pod := optedPod()
 			out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
 			init := out.Spec.InitContainers[0]
-			if init.SecurityContext == nil || init.SecurityContext.Capabilities == nil || !slices.Equal(init.SecurityContext.Capabilities.Add, tc.wantCaps) || len(init.SecurityContext.Capabilities.Drop) != 0 || len(init.VolumeMounts) != 1 || len(out.Spec.Volumes) != 1 {
+			if init.SecurityContext == nil || init.SecurityContext.Capabilities == nil || !slices.Equal(init.SecurityContext.Capabilities.Add, tc.wantCaps) || !slices.Equal(init.SecurityContext.Capabilities.Drop, []corev1.Capability{"ALL"}) || len(init.VolumeMounts) != 1 || len(out.Spec.Volumes) != 1 {
 				t.Fatalf("unexpected datapath capabilities or host mounts: %+v", init)
 			}
 			mode := tc.mode
@@ -218,6 +218,61 @@ func TestProgrammingInitDatapathCapabilitiesAndEnv(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProgrammingInitRootOnlyUnderPodNonRootDefaults(t *testing.T) {
+	namespace, gateway := fixture()
+	h := setup(t, namespace, gateway)
+	h.Driver = "init"
+	pod := optedPod()
+	nonRoot := true
+	uid := int64(65532)
+	pod.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: &nonRoot, RunAsUser: &uid}
+	out := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	init := out.Spec.InitContainers[0]
+	sec := init.SecurityContext
+	if sec == nil || sec.RunAsUser == nil || *sec.RunAsUser != 0 || sec.RunAsNonRoot == nil || *sec.RunAsNonRoot ||
+		sec.Privileged == nil || *sec.Privileged || sec.AllowPrivilegeEscalation == nil || *sec.AllowPrivilegeEscalation ||
+		sec.SeccompProfile == nil || sec.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
+		sec.Capabilities == nil || !slices.Equal(sec.Capabilities.Drop, []corev1.Capability{"ALL"}) || !slices.Equal(sec.Capabilities.Add, []corev1.Capability{"NET_ADMIN"}) {
+		t.Fatalf("programming init does not explicitly override Pod-level nonroot safely: %+v", sec)
+	}
+	if out.Spec.SecurityContext == nil || out.Spec.SecurityContext.RunAsUser == nil || *out.Spec.SecurityContext.RunAsUser != uid ||
+		out.Spec.SecurityContext.RunAsNonRoot == nil || !*out.Spec.SecurityContext.RunAsNonRoot || out.Spec.Containers[0].SecurityContext != nil {
+		t.Fatal("programming init changed application Pod security")
+	}
+	if response := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &out, nil)); !response.Allowed {
+		t.Fatalf("safe programming init denied: %+v", response.Result)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*corev1.SecurityContext)
+	}{
+		{"nonroot UID", func(s *corev1.SecurityContext) { v := int64(65532); s.RunAsUser = &v }},
+		{"missing root override", func(s *corev1.SecurityContext) { s.RunAsUser = nil }},
+		{"forged nonroot", func(s *corev1.SecurityContext) { v := true; s.RunAsNonRoot = &v }},
+		{"privileged", func(s *corev1.SecurityContext) { v := true; s.Privileged = &v }},
+		{"allow privilege escalation", func(s *corev1.SecurityContext) { v := true; s.AllowPrivilegeEscalation = &v }},
+		{"drop removed", func(s *corev1.SecurityContext) { s.Capabilities.Drop = nil }},
+		{"extra capability", func(s *corev1.SecurityContext) { s.Capabilities.Add = append(s.Capabilities.Add, "SYS_ADMIN") }},
+		{"seccomp unconfined", func(s *corev1.SecurityContext) { s.SeccompProfile.Type = corev1.SeccompProfileTypeUnconfined }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forged := out.DeepCopy()
+			tc.change(forged.Spec.InitContainers[0].SecurityContext)
+			if response := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)); response.Allowed {
+				t.Fatal("forged init security accepted")
+			}
+		})
+	}
+	agent := setup(t, namespace, gateway)
+	agent.Driver = "agent"
+	waitPod := mutatedPod(t, agent.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
+	wait := waitPod.Spec.InitContainers[0].SecurityContext
+	if wait == nil || wait.RunAsUser == nil || *wait.RunAsUser == 0 || wait.Capabilities != nil && len(wait.Capabilities.Add) != 0 ||
+		waitPod.Spec.SecurityContext.RunAsUser == nil || *waitPod.Spec.SecurityContext.RunAsUser != uid {
+		t.Fatalf("agent wait-init or app privileges changed: %+v", wait)
 	}
 }
 

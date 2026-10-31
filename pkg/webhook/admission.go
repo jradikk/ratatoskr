@@ -160,8 +160,12 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admissio
 		pod.Spec.InitContainers = append([]corev1.Container{agentWaitInit(h.InitImage)}, pod.Spec.InitContainers...)
 	} else {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: configVolume, VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{Path: "client.json", FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.annotations['" + ConfigAnnotation + "']"}}}}}})
-		privileged := false
-		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{Privileged: &privileged, Capabilities: &corev1.Capabilities{Add: h.initCapabilities()}}, Env: []corev1.EnvVar{
+		privileged, nonRoot, root := false, false, int64(0)
+		pod.Spec.InitContainers = append([]corev1.Container{{Name: initName, Image: h.InitImage, Args: []string{"-config=/var/run/ratatoskr/client.json"}, SecurityContext: &corev1.SecurityContext{
+			RunAsUser: &root, RunAsNonRoot: &nonRoot, Privileged: &privileged, AllowPrivilegeEscalation: &privileged,
+			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			Capabilities:   &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}, Add: h.initCapabilities()},
+		}, Env: []corev1.EnvVar{
 			{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
 			{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 			{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
@@ -480,10 +484,13 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 		return fmt.Errorf("expected Ratatoskr init image, entrypoint and config argument")
 	}
 	if h.driver() == "init" {
-		if init.SecurityContext == nil || init.SecurityContext.Privileged == nil || *init.SecurityContext.Privileged ||
-			init.SecurityContext.Capabilities == nil || !slices.Equal(init.SecurityContext.Capabilities.Add, h.initCapabilities()) ||
-			len(init.SecurityContext.Capabilities.Drop) != 0 {
-			return fmt.Errorf("expected unprivileged Ratatoskr init with NET_ADMIN")
+		sec := init.SecurityContext
+		if sec == nil || sec.RunAsUser == nil || *sec.RunAsUser != 0 || sec.RunAsNonRoot == nil || *sec.RunAsNonRoot ||
+			sec.Privileged == nil || *sec.Privileged || sec.AllowPrivilegeEscalation == nil || *sec.AllowPrivilegeEscalation ||
+			sec.SeccompProfile == nil || sec.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault || sec.SeccompProfile.LocalhostProfile != nil ||
+			sec.Capabilities == nil || !slices.Equal(sec.Capabilities.Add, h.initCapabilities()) ||
+			!slices.Equal(sec.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+			return fmt.Errorf("expected root-UID-only Ratatoskr programming init with exact NET_ADMIN capabilities and RuntimeDefault")
 		}
 		if len(init.VolumeMounts) < 1 || len(init.VolumeMounts) > 2 || init.VolumeMounts[0].Name != configVolume ||
 			init.VolumeMounts[0].MountPath != "/var/run/ratatoskr" || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" {
