@@ -14,6 +14,7 @@ except ImportError:
 CONTAINER = re.compile(r"containerd://([a-f0-9]{64})\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 SAMPLE = re.compile(r"ratatoskr_gateway_wireguard_(sample_ok|installed_peers|handshaken_peers|receive_bytes|transmit_bytes) ([0-9]+)\Z")
+OTHER = re.compile(r"ratatoskr_gateway_(?:upstream_healthy|effective_mtu_bytes) [0-9]+\Z|ratatoskr_gateway_wireguard_latest_handshake_age_seconds -?[0-9]+(?:\.[0-9]+)?\Z")
 NODES = fixture.node_images.NODES
 RUNTIME = fixture.node_images.RUNTIME
 
@@ -63,8 +64,12 @@ def parse_metrics(raw):
             if line.startswith("#") or not line:
                 continue
             match = SAMPLE.fullmatch(line)
-            fixture.need(match is not None and match.group(1) not in values,
-                         "WG metrics field, label or duplicate invalid.")
+            if match is None:
+                fixture.need(OTHER.fullmatch(line) is not None,
+                             "WG metrics field or label invalid.")
+                continue
+            fixture.need(match.group(1) not in values,
+                         "WG metrics duplicate field invalid.")
             values[match.group(1)] = int(match.group(2))
         fixture.need(values.get("sample_ok") == 1 and
                      set(values) == {"sample_ok", "installed_peers", "handshaken_peers",

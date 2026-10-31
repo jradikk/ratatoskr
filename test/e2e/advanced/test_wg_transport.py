@@ -53,6 +53,21 @@ class MetricsTest(unittest.TestCase):
         self.assertTrue(all("secret" not in str(cmd).lower() and "--privileged" not in cmd
                             for cmd, _, _ in calls))
 
+    def test_real_gateway_metrics_include_known_public_non_peer_gauges(self):
+        raw = (b"# HELP ratatoskr_gateway_upstream_healthy probe\n"
+               b"ratatoskr_gateway_upstream_healthy 1\n"
+               b"ratatoskr_gateway_effective_mtu_bytes 1400\n"
+               b"ratatoskr_gateway_wireguard_sample_ok 1\n"
+               b"ratatoskr_gateway_wireguard_installed_peers 0\n"
+               b"ratatoskr_gateway_wireguard_handshaken_peers 0\n"
+               b"ratatoskr_gateway_wireguard_latest_handshake_age_seconds -1\n"
+               b"ratatoskr_gateway_wireguard_receive_bytes 0\n"
+               b"ratatoskr_gateway_wireguard_transmit_bytes 0\n")
+        result = wt.parse_metrics(raw)
+        self.assertEqual(result["installed_peers"], 0)
+        self.assertEqual(set(result), {"sample_ok", "installed_peers", "handshaken_peers",
+                                       "receive_bytes", "transmit_bytes"})
+
     def test_unknown_sample_and_peer_keys_rejected(self):
         for data in (b"ratatoskr_gateway_wireguard_sample_ok 0\n",
                      b"ratatoskr_gateway_wireguard_sample_ok 1\n",
