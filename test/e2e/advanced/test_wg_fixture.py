@@ -134,6 +134,43 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertTrue(result["encryptedStartup"] and result["peerRemoved"] and source.deleted)
         self.assertEqual(result["plainGeneve"], "not-tested")
 
+    def test_stage_diagnostic_survives_verified_cleanup_and_hides_sensitive_exception(self):
+        owner = FakeOwner()
+        operator = FakeOperator(owner)
+        def factory(actual):
+            operator.owner = actual
+            return operator
+        with patch.object(w, "manifests", return_value=([{"kind": k, "metadata": {
+                "name": n, "namespace": owner.names[0]}} for k, n in
+                (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                 ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
+                {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
+            def fail(*_args):
+                raise RuntimeError("private-key-material must never reach stdout")
+            with self.assertRaises(w.StageBlocked) as raised:
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                          operator_factory=factory, source_factory=FakeSource,
+                          observer=fail)
+        self.assertEqual(str(raised.exception), "WireGuard synthetic fixture blocked at peer-lifecycle.")
+        self.assertNotIn("private-key-material", str(raised.exception))
+        self.assertTrue(owner.cleaned and operator.cleaned)
+        with self.assertRaises(w.Blocked):
+            w.StageBlocked("private-key-material")
+
+    def test_source_create_stage_classification_and_cleanup_override(self):
+        owner = FakeOwner()
+        class FailingSource(FakeSource):
+            def create(self, obj):
+                raise RuntimeError("SENSITIVE-API-RESPONSE")
+        op = FakeOperator(owner)
+        with patch.object(w, "manifests", return_value=([{"kind": "Secret", "metadata": {
+                "name": "synthetic-server", "namespace": owner.names[0]}}], {}, {})):
+            with self.assertRaises(w.StageBlocked) as raised:
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                          operator_factory=lambda actual: op, source_factory=FailingSource)
+        self.assertEqual(str(raised.exception), "WireGuard synthetic fixture blocked at source-create.")
+        self.assertTrue(owner.cleaned and op.cleaned)
+
     def test_default_entrypoint_never_calls_cluster(self):
         with patch.dict(w.os.environ, {}, clear=True), patch.object(w.run, "ReadOnlyAPI") as api:
             with contextlib.redirect_stdout(io.StringIO()):

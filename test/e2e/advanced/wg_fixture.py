@@ -40,6 +40,22 @@ class Blocked(lifecycle.LifecycleError):
     """Only fixed diagnostics; never include raw Kubernetes or key material."""
 
 
+# Only these authored, non-secret checkpoints may cross cleanup and reach CLI.
+CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
+    "fixture-manifests", "source-create", "operator-secret-create",
+    "operator-gateway-create", "source-ready", "gateway-owned",
+    "peer-baseline", "peer-registration", "peer-revocation",
+    "peer-lifecycle", "cleanup-unverified"})
+
+
+class StageBlocked(Blocked):
+    """Fixed checkpoint only; never wrap raw API output, profile or exception."""
+    def __init__(self, checkpoint):
+        if checkpoint not in CHECKPOINTS:
+            raise Blocked("WireGuard checkpoint classification invalid.")
+        super().__init__("WireGuard synthetic fixture blocked at " + checkpoint + ".")
+
+
 def need(condition, message):
     if not condition:
         raise Blocked(message)
@@ -87,9 +103,12 @@ class OperatorFixture:
         remaining = min(10, getattr(self, "cleanup_deadline", self.owner.deadline) - self.owner.clock())
         need(remaining > 0, "WireGuard fixture deadline expired.")
         try:
-            return self.transport(["kubectl", "--context", lifecycle.CONTEXT,
-                                   "--request-timeout=10s", *args], payload=payload,
-                                  timeout=remaining, max_output=output)
+            response = self.transport(["kubectl", "--context", lifecycle.CONTEXT,
+                                       "--request-timeout=10s", *args], payload=payload,
+                                      timeout=remaining, max_output=output)
+            need(isinstance(response, bytes) and len(response) <= output,
+                 "WireGuard fixture output bound or type violated.")
+            return response
         except (adapter.AdapterError, OSError, ValueError):
             raise Blocked("WireGuard fixture Kubernetes operation failed.") from None
 
@@ -423,10 +442,15 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
                 TypeError, ValueError, AttributeError):
             sleep(min(2, max(0, deadline - clock())))
     else:
-        raise Blocked("Encrypted startup timed out at " + step + ".")
+        raise StageBlocked(step)
 
     step = "peer-registration"
-    client_uid = operator.create_selected(source_api, workload)
+    try:
+        client_uid = operator.create_selected(source_api, workload)
+    except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+        raise
+    except BaseException:
+        raise StageBlocked(step) from None
     while clock() < deadline:
         try:
             pod = source_api.get("pod", CLIENT, owner.names[1])
@@ -455,9 +479,14 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         except (Blocked, adapter.AdapterError, KeyError, TypeError, ValueError, AttributeError):
             sleep(min(2, max(0, deadline - clock())))
     else:
-        raise Blocked("Encrypted startup timed out at " + step + ".")
+        raise StageBlocked(step)
     step = "peer-revocation"
-    operator.delete_selected(source_api)
+    try:
+        operator.delete_selected(source_api)
+    except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+        raise
+    except BaseException:
+        raise StageBlocked(step) from None
     while clock() < deadline:
         try:
             after = metrics_reader(operator, gateway_pod, ids["gateway"])
@@ -467,7 +496,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         except (Blocked, adapter.AdapterError, KeyError, TypeError, ValueError, AttributeError):
             sleep(min(2, max(0, deadline - clock())))
     else:
-        raise Blocked("Encrypted peer revocation timed out at " + step + ".")
+        raise StageBlocked(step)
     return {"encryptedStartup": True, "peerRegistered": True,
             "peerRemoved": True, "plainGeneve": "not-tested",
             "tokenReview": "not-independently-observed"}
@@ -475,20 +504,29 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
 
 def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=OperatorFixture,
             source_factory=adapter.FixtureAPI, api_ip=None, observer=None):
-    """One positive encrypted startup; never awards full gate without injector."""
+    """One partial encrypted lifecycle, with sanitized stages AFTER UID cleanup."""
     need(isinstance(ids, dict) and set(ids) == set(run.COMPONENTS) and
          all(isinstance(x, str) and run.ID_PATTERN.fullmatch(x) for x in ids.values()),
          "Immutable runtime image IDs required.")
     need(api_ip is not None, "Preflight Kubernetes Service IP required.")
     ipv4(api_ip)
     with owner_factory() as owner:
-        owner.create_namespaces()
-        owner.generate_pki()
-        operator = operator_factory(owner)
+        stage = "namespace-create"
+        operator = None
         source_api = None
+        failure = None
+        cleanup_failure = False
+        result = None
         try:
+            owner.create_namespaces()
+            stage = "private-pki"
+            owner.generate_pki()
+            stage = "fixture-adapter"
+            operator = operator_factory(owner)
             source_api = source_factory(owner)
+            stage = "fixture-manifests"
             server, secret, gateway = manifests(owner, owner.private_dir)
+            stage = "source-create"
             created = {(obj["kind"], obj["metadata"]["name"]): source_api.create(obj) for obj in server}
             need(set(created) == {("Secret", "synthetic-server"),
                                   ("ConfigMap", "synthetic-exit-health"),
@@ -498,34 +536,43 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
                      lifecycle.UID.fullmatch(x.get("uid", ""))
                      for (kind, name), x in created.items()),
                  "OpenVPN source resource identities missing.")
+            stage = "operator-secret-create"
             operator.create("Secret", secret)
+            stage = "operator-gateway-create"
             gateway_uid = operator.create("EgressGateway", gateway)
-            if observer is None:
-                observer = observe
-            result = observer(owner, source_api, operator, gateway_uid,
+            stage = "peer-lifecycle"
+            observed = observe if observer is None else observer
+            result = observed(owner, source_api, operator, gateway_uid,
                               selected_pod(owner, operator.name, api_ip), ids)
             need(result == {"encryptedStartup": True, "peerRegistered": True,
                             "peerRemoved": True, "plainGeneve": "not-tested",
                             "tokenReview": "not-independently-observed"},
                  "Encrypted peer lifecycle observation incomplete.")
+        except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+            raise
+        except BaseException:
+            # Never expose an exception that could contain API JSON, Secret
+            # material, kubectl stderr or a profile; only authored stage names.
+            failure = StageBlocked(stage)
         finally:
-            # Selected Pod UID deletion is ordinarily performed in observe().
-            # On an early observer error, retain exact UID cleanup before
-            # removing the operator Gateway; no name-only fallback is allowed.
-            failures = []
-            try:
-                if source_api is not None and "Pod" in operator.attempted:
-                    operator.cleanup_deadline = owner.clock() + 65
-                    operator.delete_selected(source_api)
-            except BaseException:
-                failures.append("selected")
-            try:
-                operator.cleanup()
-            except BaseException:
-                failures.append("operator")
-            if failures:
-                raise Blocked("WireGuard UID-owned cleanup unverified; no PASS permitted.") from None
-    return False  # Explicitly never a full M8 pass.
+            # Even if observer fails after creating Pod, UID-precondition delete
+            # and owner-namespace cleanup must run before surfacing failure.
+            if operator is not None:
+                try:
+                    if source_api is not None and "Pod" in operator.attempted:
+                        operator.cleanup_deadline = owner.clock() + 65
+                        operator.delete_selected(source_api)
+                except BaseException:
+                    cleanup_failure = True
+                try:
+                    operator.cleanup()
+                except BaseException:
+                    cleanup_failure = True
+            if cleanup_failure:
+                failure = StageBlocked("cleanup-unverified")
+        if failure is not None:
+            raise failure
+    return False  # Explicitly never full M8 PASS, even after success.
 
 
 def main(argv=None):
@@ -543,9 +590,13 @@ def main(argv=None):
         node_images.verify({component: ids[component] for component in node_images.TAGS})
         api_ip = partial_gateway.api_service_ip(run.ReadOnlyAPI())
         execute(ids, api_ip=api_ip)
+    except StageBlocked as err:
+        # StageBlocked messages contain only CHECKPOINTS-authored fixed labels.
+        print("FAILED: " + str(err) + " UID-owned cleanup verified or explicitly blocked; no M8 PASS.")
+        return 1
     except (Blocked, lifecycle.LifecycleError, adapter.AdapterError, run.Blocked,
             node_images.Blocked, KeyError, ValueError, TypeError, AttributeError):
-        print("FAILED: WireGuard synthetic fixture blocked; UID-owned cleanup attempted; no M8 PASS.")
+        print("FAILED: WireGuard synthetic preflight or cleanup blocked; no M8 PASS.")
         return 1
     print("INCOMPLETE: encrypted startup and peer lifecycle observed; plaintext rejection and independent TokenReview unverified; no M8 PASS.")
     return 4
