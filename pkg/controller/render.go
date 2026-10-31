@@ -209,7 +209,16 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	if gw.Spec.AllowedNamespaces.NamespaceSelector != nil {
 		peers := []networkingv1.NetworkPolicyPeer{{NamespaceSelector: gw.Spec.AllowedNamespaces.NamespaceSelector.DeepCopy(), PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{GatewayLabel: gw.Name}}}}
 		if mode == "wireguard" {
-			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(int32(datapath.WireGuardPortDefault))}, {Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9443)}}})
+			// WireGuard UDP packets originate from selected workload PodIPs, so
+			// retain the exact namespace+Pod selector on transport ingress.
+			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(int32(datapath.WireGuardPortDefault))}}})
+			// The authenticated node agent uses hostNetwork: its node-source IP
+			// cannot be matched portably by a Pod/Namespace selector. Reachability
+			// on TCP9443 is intentionally broader than authorization: TLS 1.3
+			// pins the gateway PodIP/CA and the server requires a current Pod-UID-
+			// bound audience token, TokenReview and selected Pod identity. Never
+			// broaden UDP51820 or admit plaintext UDP6081 for encrypted mode.
+			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9443)}}})
 		} else {
 			np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: peers, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolUDP), Port: ptrPort(datapath.GenevePort)}}})
 		}

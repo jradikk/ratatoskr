@@ -116,6 +116,21 @@ func TestRenderWireGuardIdentityAndIngress(t *testing.T) {
 	if ports[datapath.GenevePort] || !ports[int32(datapath.WireGuardPortDefault)] || !ports[9443] || !ports[9900] {
 		t.Fatal("encrypted ingress includes plain GENEVE or omits required authenticated ports")
 	}
+	if len(policy.Spec.Ingress) != 3 {
+		t.Fatalf("encrypted gateway requires health, selected WG transport and separately reachable TLS registration: %+v", policy.Spec.Ingress)
+	}
+	health, transport, registration := policy.Spec.Ingress[0], policy.Spec.Ingress[1], policy.Spec.Ingress[2]
+	if len(health.From) != 0 || len(health.Ports) != 1 || health.Ports[0].Port.IntVal != 9900 || *health.Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Fatal("gateway health ingress changed")
+	}
+	if len(transport.From) != 1 || transport.From[0].NamespaceSelector == nil || transport.From[0].NamespaceSelector.MatchLabels["team"] != "red" ||
+		transport.From[0].PodSelector == nil || transport.From[0].PodSelector.MatchLabels[GatewayLabel] != gw.Name ||
+		len(transport.Ports) != 1 || transport.Ports[0].Port.IntVal != int32(datapath.WireGuardPortDefault) || *transport.Ports[0].Protocol != corev1.ProtocolUDP {
+		t.Fatalf("WG UDP transport broadened or missing selected clients: %+v", transport)
+	}
+	if len(registration.From) != 0 || len(registration.Ports) != 1 || registration.Ports[0].Port.IntVal != 9443 || *registration.Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Fatalf("hostNetwork TLS registration unreachable or exposed extra ports: %+v", registration)
+	}
 	gw.Namespace = "other"
 	if _, err := r.render(gw, nil); err == nil {
 		t.Fatal("cross-namespace M4 gateway accepted without scoped RBAC")
