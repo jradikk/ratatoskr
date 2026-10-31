@@ -49,7 +49,7 @@ func run(ctx context.Context, bootstrap bool, dir string) error {
 	if err != nil {
 		return fmt.Errorf("configure webhook manager: %w", err)
 	}
-	h := &ratatoskr.Handler{Client: mgr.GetClient(), Namespace: operatorNamespace(), InitImage: os.Getenv("INIT_IMAGE"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH")}
+	h := &ratatoskr.Handler{Client: mgr.GetClient(), Namespace: operatorNamespace(), AgentNamespace: os.Getenv("NAMESPACE"), InitImage: os.Getenv("INIT_IMAGE"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH")}
 	mgr.GetWebhookServer().Register("/mutate-v1alpha1-pod", &admission.Webhook{Handler: admission.HandlerFunc(h.MutatePod)})
 	mgr.GetWebhookServer().Register("/validate-v1alpha1", &admission.Webhook{Handler: admission.HandlerFunc(h.Validate)})
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

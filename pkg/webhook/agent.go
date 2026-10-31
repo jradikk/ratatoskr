@@ -30,6 +30,16 @@ func agentWaitInit(image string) corev1.Container {
 		},
 	}
 }
+
+// Existing embedders default to the configured operator namespace; the serving
+// webhook explicitly binds AgentNamespace to its deployment namespace.
+func (h *Handler) agentNamespace() string {
+	if h.AgentNamespace != "" {
+		return h.AgentNamespace
+	}
+	return h.Namespace
+}
+
 func validateAgentWaitInit(pod *corev1.Pod, image string) error {
 	init := pod.Spec.InitContainers[0]
 	if init.Name != initName || init.Image != image || len(init.Command) != 0 || len(init.Args) != 1 || init.Args[0] != "-wait-agent" || len(init.Env) != 0 || len(init.VolumeMounts) != 1 || init.VolumeMounts[0].Name != agentShadowVolume || init.VolumeMounts[0].MountPath != defaultSATokenPath || !init.VolumeMounts[0].ReadOnly || init.VolumeMounts[0].SubPath != "" || len(init.VolumeDevices) != 0 {

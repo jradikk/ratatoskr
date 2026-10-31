@@ -39,7 +39,10 @@ const (
 type Handler struct {
 	Client                              client.Client
 	Namespace, InitImage, ClusterDomain string
-	Driver, Datapath                    string
+	// AgentNamespace is the node-agent ServiceAccount namespace, not necessarily
+	// the default gateway namespace for standalone webhook deployments.
+	AgentNamespace   string
+	Driver, Datapath string
 }
 
 func (h *Handler) driver() string {
@@ -396,7 +399,7 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 		if h.driver() == "agent" && old.Labels[GatewayLabel] != "" {
 			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", ReadyAnnotation} {
 				if !sameMapEntry(old.Annotations, pod.Annotations, key) &&
-					(h.Namespace == "" || req.UserInfo.Username != "system:serviceaccount:"+h.Namespace+":ratatoskr-agent") {
+					(h.agentNamespace() == "" || req.UserInfo.Username != "system:serviceaccount:"+h.agentNamespace()+":ratatoskr-agent") {
 					return denied(fmt.Errorf("only the node agent may update agent-owned Pod state"))
 				}
 			}

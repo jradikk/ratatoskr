@@ -119,6 +119,26 @@ func TestAgentStateRequiresAuthenticatedAgentWriter(t *testing.T) {
 	}
 }
 
+func TestAgentWriterNamespaceIsIndependentOfGatewayDefault(t *testing.T) {
+	ns, gw := fixture()
+	h := setup(t, ns, gw)
+	h.Driver = "agent"
+	h.AgentNamespace = "operator-release"
+	p := optedPod()
+	old := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, p, nil)), p)
+	updated := old.DeepCopy()
+	updated.Annotations[ReadyAnnotation] = "true"
+	r := req(t, "Pod", admissionv1.Update, updated, &old)
+	r.UserInfo.Username = "system:serviceaccount:system:ratatoskr-agent"
+	if h.Validate(context.Background(), r).Allowed {
+		t.Fatal("gateway-default namespace must not authorize agent writer")
+	}
+	r.UserInfo.Username = "system:serviceaccount:operator-release:ratatoskr-agent"
+	if !h.Validate(context.Background(), r).Allowed {
+		t.Fatal("explicit deployment namespace agent rejected")
+	}
+}
+
 func TestMutatePodFailClosed(t *testing.T) {
 	ns, g := fixture()
 	h := setup(t, ns, g)
