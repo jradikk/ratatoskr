@@ -370,6 +370,11 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 			if pod.Labels[GatewayLabel] == "" {
 				return admission.Allowed("not opted in")
 			}
+			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend"} {
+				if _, supplied := pod.Annotations[key]; supplied {
+					return denied(fmt.Errorf("agent-owned Pod state may not be supplied on CREATE"))
+				}
+			}
 			if err := h.validateInjectedPod(ctx, req.Namespace, &pod); err != nil {
 				return denied(fmt.Errorf("opted-in pod lacks safe Ratatoskr mutation: %w", err))
 			}
@@ -385,6 +390,16 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) admission
 			!sameMapEntry(old.Labels, pod.Labels, GatewayNamespace) ||
 			!sameMapEntry(old.Annotations, pod.Annotations, GatewayNamespace) {
 			return denied(fmt.Errorf("pod gateway opt-in and gateway namespace are immutable; change the Deployment template and recreate the pod"))
+		}
+		// Agent state hashes are checksums, not authentication. Only the
+		// authenticated agent ServiceAccount may change its Pod state.
+		if h.driver() == "agent" && old.Labels[GatewayLabel] != "" {
+			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", ReadyAnnotation} {
+				if !sameMapEntry(old.Annotations, pod.Annotations, key) &&
+					(h.Namespace == "" || req.UserInfo.Username != "system:serviceaccount:"+h.Namespace+":ratatoskr-agent") {
+					return denied(fmt.Errorf("only the node agent may update agent-owned Pod state"))
+				}
+			}
 		}
 		// A restarted init can read the annotation again. Do not allow a pod
 		// creator to swap a validated policy, exclusion or remote after CREATE.

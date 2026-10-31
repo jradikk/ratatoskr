@@ -80,6 +80,45 @@ func mutatedPod(t *testing.T, response admission.Response, original interface{})
 	}
 	return pod
 }
+func TestAgentStateRequiresAuthenticatedAgentWriter(t *testing.T) {
+	ns, gw := fixture()
+	h := setup(t, ns, gw)
+	h.Driver = "agent"
+	p := optedPod()
+	old := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, p, nil)), p)
+	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", ReadyAnnotation} {
+		t.Run(key, func(t *testing.T) {
+			changed := old.DeepCopy()
+			changed.Annotations[key] = "forged"
+			r := req(t, "Pod", admissionv1.Update, changed, &old)
+			r.UserInfo.Username = "ordinary-user"
+			if h.Validate(context.Background(), r).Allowed {
+				t.Fatal("ordinary Pod patch forged agent state")
+			}
+			r.UserInfo.Username = "system:serviceaccount:other:ratatoskr-agent"
+			if h.Validate(context.Background(), r).Allowed {
+				t.Fatal("other namespace agent accepted")
+			}
+			r.UserInfo.Username = "system:serviceaccount:system:ratatoskr-agent"
+			if !h.Validate(context.Background(), r).Allowed {
+				t.Fatal("authenticated operator agent rejected")
+			}
+		})
+	}
+	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend"} {
+		forged := old.DeepCopy()
+		forged.Annotations[key] = "forged"
+		if h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)).Allowed {
+			t.Fatal("prepopulated agent state accepted on CREATE")
+		}
+	}
+	unchanged := req(t, "Pod", admissionv1.Update, &old, &old)
+	unchanged.UserInfo.Username = "kubelet"
+	if !h.Validate(context.Background(), unchanged).Allowed {
+		t.Fatal("status-style unchanged agent state rejected")
+	}
+}
+
 func TestMutatePodFailClosed(t *testing.T) {
 	ns, g := fixture()
 	h := setup(t, ns, g)
