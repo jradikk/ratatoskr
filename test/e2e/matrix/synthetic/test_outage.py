@@ -118,18 +118,20 @@ class OutageTests(unittest.TestCase):
     def test_ordered_healthy_outage_witness_restore_recovery_and_cleanup(self):
         events = self.run_fake()
         self.assertLess(events.index("healthy-one-shot"), events.index("disable"))
-        self.assertLess(events.index("disable"), events.index("gateway-withdrawal"))
+        self.assertLess(events.index("disable"), events.index("exit-projection"))
+        self.assertLess(events.index("exit-projection"), events.index("gateway-withdrawal"))
         self.assertLess(events.index("gateway-withdrawal"), events.index("probe:synthetic-witness:outage"))
         self.assertLess(events.index("probe:synthetic-client:outage"), events.index("restore"))
         self.assertLess(events.index("restore"), events.index("gateway-recovery"))
         self.assertEqual(events[-1], "cleanup")
 
     def test_every_outage_and_recovery_failure_restores_and_cleans(self):
-        for stage in ("gateway-withdrawal", "outage-still-withdrawn", "gateway-recovery", "agent-recovery"):
+        for stage in ("exit-projection", "gateway-withdrawal", "outage-still-withdrawn",
+                      "gateway-recovery", "agent-recovery"):
             with self.subTest(stage=stage):
                 events = self.run_fake(fail_stage=stage)
                 self.assertEqual(events[-1], "cleanup")
-                if stage != "gateway-withdrawal":
+                if stage != "exit-projection":
                     self.assertIn("restore", events)
 
     def test_uid_gateway_status_never_accepts_stale_or_healthy_outage(self):

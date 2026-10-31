@@ -43,8 +43,8 @@ def ensure_tun(path=TUN):
         raise Invalid()
 
 
-def fetch_marker(timeout=3):
-    """Bind socket to tunnel and enforce one absolute request deadline."""
+def fetch_tunnel(path, expected_line, expected_body, timeout=3):
+    """Bound tunnel-only HTTP probe; never expose response or error details."""
     conn = None
     deadline = time.monotonic() + timeout
     try:
@@ -54,7 +54,7 @@ def fetch_marker(timeout=3):
         sock.settimeout(max(0.001, deadline - time.monotonic()))
         sock.connect(("10.88.0.1", 8080))
         sock.settimeout(max(0.001, deadline - time.monotonic()))
-        sock.sendall(b"GET /marker HTTP/1.0\r\nHost: 10.88.0.1\r\nConnection: close\r\n\r\n")
+        sock.sendall(b"GET " + path + b" HTTP/1.0\r\nHost: 10.88.0.1\r\nConnection: close\r\n\r\n")
         result = bytearray()
         while True:
             remaining = deadline - time.monotonic()
@@ -68,10 +68,10 @@ def fetch_marker(timeout=3):
             if len(result) > 2048:
                 raise Invalid()
         head, sep, body = bytes(result).partition(b"\r\n\r\n")
-        if (time.monotonic() > deadline or not sep or
-                not head.startswith(b"HTTP/1.0 200 ") and
-                not head.startswith(b"HTTP/1.1 200 ") or
-                body != b"ratatoskr-synthetic-vpn-v1\n"):
+        if time.monotonic() > deadline or not sep or body != expected_body:
+            raise Invalid()
+        line = head.split(b"\r\n", 1)[0]
+        if line not in (b"HTTP/1.0 " + expected_line, b"HTTP/1.1 " + expected_line):
             raise Invalid()
         return True
     except (OSError, Invalid):
@@ -81,12 +81,24 @@ def fetch_marker(timeout=3):
             conn.close()
 
 
+def fetch_marker(timeout=3):
+    return fetch_tunnel(b"/marker", b"200 OK", b"ratatoskr-synthetic-vpn-v1\n", timeout)
+
+
+def fetch_exit_off(timeout=3):
+    # Probe-only ConfigMap projection, not Gateway or controller health. The
+    # witness must retain its independent authenticated tun0 throughout.
+    return fetch_tunnel(b"/exit", b"503 Service Unavailable", b"", timeout)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv not in ([], ["--hold"], ["--probe"]):
+    if argv not in ([], ["--hold"], ["--probe"], ["--exit-off"]):
         return 2
     if argv == ["--probe"]:
         return 0 if fetch_marker(timeout=3) else 1
+    if argv == ["--exit-off"]:
+        return 0 if fetch_exit_off(timeout=3) else 1
     child = None
     try:
         if not profile_is_private():

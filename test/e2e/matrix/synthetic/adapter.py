@@ -80,6 +80,7 @@ SERVER_COMMAND = ("python3", "/usr/local/bin/session.py")
 RUNNING_PROBE = {"healthy": ("python3", "/usr/local/bin/check.py", "healthy"),
                  "outage": ("python3", "/usr/local/bin/check.py", "outage-check")}
 WITNESS_COMMAND = ("python3", "/usr/local/bin/witness.py", "--probe")
+WITNESS_EXIT_OFF = ("python3", "/usr/local/bin/witness.py", "--exit-off")
 
 
 def _env():
@@ -508,7 +509,7 @@ class FixtureAPI:
     def probe_running(self, name, uid, image_id, phase, api_ip):
         """Fixed executable probes; return only a trusted exit category, no output."""
         import ipaddress
-        if name not in ("synthetic-client", "synthetic-witness") or phase not in ("healthy", "outage"):
+        if name not in ("synthetic-client", "synthetic-witness") or phase not in ("healthy", "outage", "exit-off"):
             raise AdapterError("Running probe name or phase not allowlisted.")
         try:
             addr = ipaddress.ip_address(api_ip)
@@ -531,6 +532,8 @@ class FixtureAPI:
                 statuses[0].get("imageID") != image_id or specs[0].get("imagePullPolicy") != "Never"):
             raise AdapterError("Running probe container runtime image or readiness invalid.")
         if name == "synthetic-client":
+            if phase == "exit-off":
+                raise AdapterError("Exit-health projection probe requires independent witness.")
             try:
                 from . import prepare as from_prepare
             except ImportError:
@@ -543,11 +546,11 @@ class FixtureAPI:
                 raise AdapterError("Running selected workload command or API IP mismatch.")
             command = (*RUNNING_PROBE[phase], str(addr))
         else:
-            if (phase != "outage" or specs[0].get("args") != ["--hold"] or
+            if (phase not in ("outage", "exit-off") or specs[0].get("args") != ["--hold"] or
                     specs[0].get("image") != "ratatoskr-synthetic-witness:local" or
                     pod["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway")):
                 raise AdapterError("Witness probe must use independent hold fixture during outage.")
-            command = WITNESS_COMMAND
+            command = WITNESS_EXIT_OFF if phase == "exit-off" else WITNESS_COMMAND
         self._namespace(namespace)
         # kubectl exec returns only our fixture exit status; stdout/stderr are
         # discarded. Nonzero is never interpreted as successful fail-close.

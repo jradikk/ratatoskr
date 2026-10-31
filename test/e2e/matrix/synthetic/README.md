@@ -598,7 +598,13 @@ workload. It then starts an **existing long-lived** restricted selected Pod,
 waits for its production wait-init and agent readiness, checks direct TLS/DNS
 and tunnel marker while healthy, starts an independent OpenVPN witness with a
 different certificate, and toggles only the owned probe-only ConfigMap using
-UID/resourceVersion CAS. During Gateway endpoint withdrawal the witness must
+UID/resourceVersion CAS. A separate bounded `exit-projection` phase first
+requires that same witness's `tun0`-bound `/exit` returns exactly HTTP 503 with
+an empty body; an API ConfigMap update alone does not prove kubelet projection.
+Only then does a distinct bounded `gateway-withdrawal` phase wait for
+Ready=False, readyReplicas=0 and no healthy endpoints (without relaxing those
+checks). If either phase fails, restoration and cleanup run and no outage
+coverage is awarded. During Gateway endpoint withdrawal the witness must
 still reach `/marker` through its separate tunnel and the already-running
 selected workload must observe network unreachable (not generic timeout or a
 fresh Pod blocked at init), with direct API path intact. It restores the switch

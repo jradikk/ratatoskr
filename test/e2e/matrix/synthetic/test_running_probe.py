@@ -73,12 +73,14 @@ class RunningTests(unittest.TestCase):
         self.assertTrue(api.probe_running("synthetic-client", UID, IMAGE, "healthy", "10.43.0.1"))
         self.assertTrue(api.probe_running("synthetic-client", UID, IMAGE, "outage", "10.43.0.1"))
         self.assertTrue(api.probe_running("synthetic-witness", UID, IMAGE, "outage", "10.43.0.1"))
+        self.assertTrue(api.probe_running("synthetic-witness", UID, IMAGE, "exit-off", "10.43.0.1"))
         executed = [call for call in wire.calls if "exec" in call[0]]
-        self.assertEqual(len(executed), 3)
+        self.assertEqual(len(executed), 4)
         self.assertEqual([call[0][-4:] for call in executed], [
             ["python3", "/usr/local/bin/check.py", "healthy", "10.43.0.1"],
             ["python3", "/usr/local/bin/check.py", "outage-check", "10.43.0.1"],
-            ["--", "python3", "/usr/local/bin/witness.py", "--probe"]])
+            ["--", "python3", "/usr/local/bin/witness.py", "--probe"],
+            ["--", "python3", "/usr/local/bin/witness.py", "--exit-off"]])
         self.assertTrue(all(call[2] <= 12 and call[3] == 0 and call[1] is None for call in executed))
 
     def test_bad_uid_image_phase_cmd_or_probe_output_never_passes(self):
@@ -99,7 +101,8 @@ class RunningTests(unittest.TestCase):
         for name, phase, ip in (("foreign", "outage", "10.43.0.1"),
                                 ("synthetic-client", "raw-shell", "10.43.0.1"),
                                 ("synthetic-client", "outage", "127.0.0.1"),
-                                ("synthetic-witness", "healthy", "10.43.0.1")):
+                                ("synthetic-witness", "healthy", "10.43.0.1"),
+                                ("synthetic-client", "exit-off", "10.43.0.1")):
             with self.assertRaises(a.AdapterError):
                 api.probe_running(name, UID, IMAGE, phase, ip)
 

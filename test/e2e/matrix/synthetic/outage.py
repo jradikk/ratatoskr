@@ -187,6 +187,13 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             raise Blocked("Probe-only ConfigMap CREATE UID changed.")
         endpoint = baseline["endpoint"]
         with api.exit_health_outage():
+            # API CAS does not prove projected ConfigMap volume changed. The
+            # independent authenticated witness must see an exact tunnel-bound
+            # HTTP 503 (empty body) from /exit before checking controller state.
+            poll(owner, "exit-projection", lambda: (
+                 True if api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"],
+                                           "exit-off", str(address)) else None),
+                 seconds=85, clock=clock, sleep=sleep)
             poll(owner, "gateway-withdrawal", lambda: gateway_state(api, ns, baseline["gatewayUID"],
                  baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=85, clock=clock, sleep=sleep)
             api.probe_running("synthetic-witness", witness_id["uid"], ids["witness"], "outage", str(address))

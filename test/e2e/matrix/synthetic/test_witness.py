@@ -69,6 +69,27 @@ class WitnessTests(unittest.TestCase):
         self.assertTrue(socket.closed)
         self.assertLessEqual(clock[0], 4.0)
 
+    def test_exit_off_requires_exact_tunnel_bound_503_empty_body(self):
+        good = b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+        sock = FakeSocket(good)
+        with patch.object(witness.socket, "socket", return_value=sock):
+            self.assertTrue(witness.fetch_exit_off())
+        self.assertEqual(sock.opt, [(witness.socket.SOL_SOCKET, witness.socket.SO_BINDTODEVICE, b"tun0\0")])
+        self.assertEqual(sock.request, b"GET /exit HTTP/1.0\r\nHost: 10.88.0.1\r\nConnection: close\r\n\r\n")
+        for response in (b"HTTP/1.0 200 OK\r\n\r\n", b"HTTP/1.0 503 Service Unavailable\r\n\r\nNOT_EMPTY",
+                         b"HTTP/1.0 503 Other\r\n\r\n", b"HTTP/1.0 503 Service Unavailable\r\n\r\n" + b"x" * 2049):
+            with self.subTest(response=response[:35]):
+                with patch.object(witness.socket, "socket", return_value=FakeSocket(response)):
+                    self.assertFalse(witness.fetch_exit_off())
+        timeout_sock = FakeSocket(good)
+        timeout_sock.connect = lambda _addr: (_ for _ in ()).throw(TimeoutError("SECRET"))
+        with patch.object(witness.socket, "socket", return_value=timeout_sock):
+            self.assertFalse(witness.fetch_exit_off())
+        with patch.object(witness, "fetch_exit_off", return_value=True):
+            self.assertEqual(witness.main(["--exit-off"]), 0)
+        with patch.object(witness, "fetch_exit_off", return_value=False):
+            self.assertEqual(witness.main(["--exit-off"]), 1)
+
     def test_profile_mode_and_no_cli_credentials(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "client.ovpn"
