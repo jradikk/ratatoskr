@@ -283,7 +283,9 @@ class OperatorFixture:
                    "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
         self._call(["delete", "--raw=/api/v1/namespaces/" + apps + "/pods/" + CLIENT,
                     "-f", "-"], payload=json.dumps(options).encode(), discard_output=True)
-        end = min(getattr(self, "cleanup_deadline", self.owner.deadline), self.owner.clock() + 25)
+        # Five-second fixture termination grace still needs allowance for API
+        # propagation and node delay; never outlive owner cleanup grace.
+        end = min(getattr(self, "cleanup_deadline", self.owner.deadline), self.owner.clock() + 35)
         while self.owner.clock() < end:
             try:
                 observed = self.get_selected_uid()
@@ -369,6 +371,10 @@ def manifests(owner, private):
 def selected_pod(owner, gateway_name, api_ip):
     ipv4(api_ip)
     workload = prepare.running_probe_pod(owner.names[1], owner.names[0], api_ip)
+    # The test-only PID1 hold process has no SIGTERM handler. Kubernetes' 30s
+    # default exceeds the UID-cleanup poll budget; kill after bounded grace.
+    # Do not alter app capabilities, mounts, SA automount or PSA restrictions.
+    workload["spec"]["terminationGracePeriodSeconds"] = 5
     workload["metadata"]["labels"][PREFIX + "gateway"] = gateway_name
     workload["metadata"]["labels"][PREFIX + "gateway-namespace"] = SYSTEM
     workload["metadata"]["labels"][OWN] = owner.token
@@ -413,6 +419,14 @@ def verify_encrypted_ready(gateway, pod, gateway_uid, client_uid, gateway_name):
         raise Blocked("Encrypted endpoint or client config malformed.") from None
 
 
+def _phase_deadline(owner, clock, seconds, reserve):
+    """Bounded stage, leaving the owned workload a separate cleanup window."""
+    end = min(owner.deadline - reserve, clock() + seconds)
+    if owner.closed or end <= clock():
+        raise StageBlocked("peer-lifecycle")
+    return end
+
+
 def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
             clock=time.monotonic, sleep=time.sleep, metrics_reader=None):
     """Execute bounded positive peer startup+revocation, never plaintext PASS."""
@@ -422,7 +436,10 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         import wg_transport
     if metrics_reader is None:
         metrics_reader = wg_transport.read_metrics
-    deadline = min(owner.deadline, clock() + 135)
+    # Source/Gateway setup, selected registration and revocation have separate
+    # bounded windows. Keep 70 seconds for UID-conditional selected cleanup;
+    # no missing phase can borrow unlimited time from the next.
+    startup_deadline = _phase_deadline(owner, clock, 85, 70)
     source_uid = source_api.created[("Pod", owner.names[0], SERVER)]
     need(isinstance(source_uid, str) and lifecycle.UID.fullmatch(source_uid),
          "OpenVPN source CREATE-return UID missing.")
@@ -432,7 +449,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
     # Verify source Pod/Service endpoint and owned Gateway status first. The
     # gateway's upstream health probe and selected marker independently test
     # VPN reachability; we do not inspect OpenVPN private session contents.
-    while clock() < deadline:
+    while clock() < startup_deadline:
         try:
             server = source_api.get("pod", SERVER, owner.names[0])
             service = source_api.get("service", SERVER, owner.names[0])
@@ -485,7 +502,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
             break
         except (Blocked, adapter.AdapterError, partial_gateway.Blocked, KeyError,
                 TypeError, ValueError, AttributeError):
-            sleep(min(2, max(0, deadline - clock())))
+            sleep(min(2, max(0, startup_deadline - clock())))
     else:
         raise StageBlocked(step)
 
@@ -496,7 +513,8 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         raise
     except BaseException:
         raise StageBlocked(step) from None
-    while clock() < deadline:
+    registration_deadline = _phase_deadline(owner, clock, 75, 70)
+    while clock() < registration_deadline:
         try:
             pod = source_api.get("pod", CLIENT, owner.names[1])
             need(pod["metadata"].get("uid") == client_uid and
@@ -522,7 +540,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
                  "Authenticated kernel WireGuard peer/bytes not observed.")
             break
         except (Blocked, adapter.AdapterError, KeyError, TypeError, ValueError, AttributeError):
-            sleep(min(2, max(0, deadline - clock())))
+            sleep(min(2, max(0, registration_deadline - clock())))
     else:
         raise StageBlocked(step)
     step = "peer-revocation"
@@ -532,14 +550,15 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         raise
     except BaseException:
         raise StageBlocked(step) from None
-    while clock() < deadline:
+    revocation_deadline = _phase_deadline(owner, clock, 35, 65)
+    while clock() < revocation_deadline:
         try:
             after = metrics_reader(operator, gateway_pod, ids["gateway"])
             need(after.get("sample_ok") == 1 and after.get("installed_peers") == 0,
                  "Selected Pod peer not revoked after UID delete.")
             break
         except (Blocked, adapter.AdapterError, KeyError, TypeError, ValueError, AttributeError):
-            sleep(min(2, max(0, deadline - clock())))
+            sleep(min(2, max(0, revocation_deadline - clock())))
     else:
         raise StageBlocked(step)
     return {"encryptedStartup": True, "peerRegistered": True,

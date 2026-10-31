@@ -234,6 +234,26 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "WireGuard synthetic fixture blocked at source-create.")
         self.assertTrue(owner.cleaned and op.cleaned)
 
+    def test_selected_fixture_short_grace_preserves_restricted_security(self):
+        owner = FakeOwner()
+        selected = w.selected_pod(owner, "rtk-wg-" + TOKEN[:16], "10.43.0.1")
+        self.assertEqual(selected["spec"]["terminationGracePeriodSeconds"], 5)
+        self.assertFalse(selected["spec"]["automountServiceAccountToken"])
+        app = selected["spec"]["containers"][0]
+        self.assertTrue(app["securityContext"]["runAsNonRoot"])
+        self.assertEqual(app["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        self.assertNotIn("hostNetwork", selected["spec"])
+        self.assertEqual(app["command"], ["python3", "/usr/local/bin/check.py", "hold"])
+
+    def test_phase_deadlines_are_bounded_and_reserve_cleanup(self):
+        owner = FakeOwner()
+        owner.clock = lambda: 100
+        owner.deadline = 240
+        self.assertEqual(w._phase_deadline(owner, lambda: 100, 85, 70), 170)
+        with self.assertRaises(w.StageBlocked):
+            w._phase_deadline(owner, lambda: 171, 75, 70)
+        self.assertEqual(w._phase_deadline(owner, lambda: 120, 35, 65), 155)
+
     def test_default_entrypoint_never_calls_cluster(self):
         with patch.dict(w.os.environ, {}, clear=True), patch.object(w.run, "ReadOnlyAPI") as api:
             with contextlib.redirect_stdout(io.StringIO()):
