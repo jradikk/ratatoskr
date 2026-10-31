@@ -39,6 +39,49 @@ Only local controller/agent/gateway development images were refreshed; nothing
 was published. Plaintext rejection, independent TokenReview evidence, the wider
 compatibility matrix and release provenance remain unverified acceptance gates.
 
+## October 31, 2026 — continued HA, outage and independent token checks
+
+The existing flannel/no-mesh agent/iproute development cluster completed two
+additional explicitly gated synthetic runtime subsets, both returning
+**4 / INCOMPLETE**, never full-matrix PASS:
+
+- Two-replica HA: fresh selected marker traffic and the direct API path succeeded
+  before and after exact UID-preconditioned deletion of the chosen gateway
+  replica. Established-flow continuity, distinct exit addresses and encrypted HA
+  were not asserted.
+- Witnessed outage/recovery, at `56ce37d`: the independent VPN witness observed
+  the upstream health-switch projection and retained its independent marker
+  during Gateway withdrawal. The long-lived selected Pod retained its UID,
+  cluster DNS and pinned direct API access. Root-owned, pinned-netns header-only
+  capture observed direct API SYNs and no selected-destination SYNs while exact
+  owned unreachable-route and marked-rule checks held. Selected marker delivery
+  recovered after probe restoration. Namespace/private fixture cleanup completed.
+
+Two production defects were repaired during this work: zero measured MTU when no
+endpoint is healthy had incorrectly triggered irreversible authorization
+quarantine, and decoded explicit `0.0.0.0/0` routes had escaped nil-only default
+withdrawal. Closed configurations now use a conservative MTU only without a
+healthy endpoint; owned default-route withdrawal recognizes both encodings.
+Healthy missing-MTU configurations and foreign routes remain protected.
+
+TCP connect timeout is not independently accepted as fail-close evidence. The
+new collector requires separately verified source identity, exact closed routing,
+positive direct-API packet control and absence of selected SYN egress. It uses
+existing bounded host sudo diagnostics; no workload capability, runtime/seccomp,
+VM setting or sudo policy was changed. Numeric iproute output, separate mark/mask
+fields and harmless blank tcpdump separators were measured and strictly parsed.
+
+A separate memory-only TokenRequest/TokenReview diagnostic during an owned
+WireGuard lifecycle verified the current Pod UID, ServiceAccount and audience,
+including a rejected wrong-audience review. This verifies Kubernetes token
+binding, **not** that the gateway made its own TokenReview call. Plaintext GENEVE
+rejection and actual gateway-call evidence remain unverified runtime gates.
+
+Final integrated validation passed full Go race tests, vet, lint (0 issues),
+binary builds, privileged component tests and **252 offline Python tests**.
+No release artifact was published or signed; the wider compatibility matrix and
+release gate remain incomplete.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
