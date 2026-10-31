@@ -59,8 +59,8 @@ class CollectorTests(unittest.TestCase):
     def test_exact_owned_fallback_and_mark_not_guessed_table(self):
         closed = [{"dst": "default", "type": "unreachable", "protocol": 186,
                    "metric": 4294967295, "table": TABLE}]
-        rule = [{"priority": 10998, "protocol": 186, "table": TABLE,
-                 "fwmark": "0x200000/0xf00000"}]
+        rule = [{"priority": 10998, "protocol": "186", "table": str(TABLE),
+                 "fwmark": "0x200000", "fwmask": "0xf00000"}]
         self.assertTrue(f.route_proof(json.dumps(closed).encode(), TABLE))
         for route_type in (7, "7"):
             self.assertTrue(f.route_proof(json.dumps([dict(closed[0], type=route_type)]).encode(), TABLE))
@@ -68,12 +68,18 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaises(f.Blocked):
                 f.route_proof(json.dumps([dict(closed[0], type=route_type)]).encode(), TABLE)
         self.assertTrue(f.rule_proof(json.dumps(rule).encode(), TABLE))
+        # Legacy combined form is unambiguous only without fwmask.
+        combined = dict(rule[0], fwmark="0x200000/0xf00000")
+        combined.pop("fwmask")
+        self.assertTrue(f.rule_proof(json.dumps([combined]).encode(), TABLE))
         for bad in ([dict(closed[0], type="unicast")], closed + [dict(closed[0], type="unicast")],
                     [dict(closed[0], metric=0)], [dict(closed[0], protocol="bgp")],
                     [dict(closed[0], protocol="boot")]):
             with self.assertRaises(f.Blocked):
                 f.route_proof(json.dumps(bad).encode(), TABLE)
-        for bad in ([dict(rule[0], priority=10999)], [dict(rule[0], fwmark="0x0/0xf00000")],
+        for bad in ([dict(rule[0], priority=10999)], [dict(rule[0], fwmark="0x0")],
+                    [dict(rule[0], fwmask="0x0")], [dict(rule[0], fwmask=None)],
+                    [dict(rule[0], fwmark="0x200000/0xf00000")],
                     [dict(rule[0], table=10007)], [dict(rule[0], protocol="bgp")],
                     [dict(rule[0], protocol="boot")]):
             with self.assertRaises(f.Blocked):
@@ -166,8 +172,8 @@ class CollectorTests(unittest.TestCase):
             if "route" in argv:
                 return json.dumps([{"dst": "default", "type": "unreachable", "protocol": 186,
                                     "metric": 4294967295, "table": TABLE}]).encode()
-            return json.dumps([{"priority": 10998, "protocol": 186, "table": TABLE,
-                                "fwmark": "0x200000/0xf00000"}]).encode()
+            return json.dumps([{"priority": 10998, "protocol": "186", "table": str(TABLE),
+                                "fwmark": "0x200000", "fwmask": "0xf00000"}]).encode()
         with self.assertRaises(f.Blocked):
             f.prove(Reader(), NS, UID, IMAGE, 7, API, transport=transport, local=local,
                     trigger=lambda: None,

@@ -109,9 +109,24 @@ def rule_proof(raw, table):
         hits = [v for v in values if v.get("priority") == PRIORITY]
         if len(hits) != 1 or not isinstance(hits[0].get("fwmark"), str):
             raise ValueError()
-        mark, sep, mask = hits[0]["fwmark"].partition("/")
-        if (not sep or hits[0].get("protocol") not in (PROTOCOL, str(PROTOCOL)) or
-                hits[0].get("table") not in (table, str(table)) or
+        hit = hits[0]
+        # iproute2 `-N -j` emits separate fwmark/fwmask fields. An older
+        # combined spelling is accepted only if the separate mask is absent;
+        # ambiguous or conflicting forms cannot certify an owned selector.
+        mark, sep, combined_mask = hit["fwmark"].partition("/")
+        separate_mask = hit.get("fwmask")
+        if sep:
+            if separate_mask is not None:
+                raise ValueError()
+            mask = combined_mask
+        else:
+            if not isinstance(separate_mask, str):
+                raise ValueError()
+            mask = separate_mask
+        if (not re.fullmatch(r"0x[0-9a-fA-F]{1,8}", mark) or
+                not re.fullmatch(r"0x[0-9a-fA-F]{1,8}", mask) or
+                hit.get("protocol") not in (PROTOCOL, str(PROTOCOL)) or
+                hit.get("table") not in (table, str(table)) or
                 int(mark, 16) != 0x200000 or int(mask, 16) != 0xf00000):
             raise ValueError()
         return True
