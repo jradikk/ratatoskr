@@ -48,12 +48,30 @@ CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
     "peer-lifecycle", "cleanup-unverified"})
 
 
+CLEANUP_STAGES = frozenset({"selected", "gateway", "secret", "gateway-ambiguous",
+                            "secret-ambiguous", "gateway-delete", "secret-delete"})
+
+
+class CleanupBlocked(Blocked):
+    """Authored cleanup phase, never an underlying kubectl/API error."""
+    def __init__(self, phase):
+        if phase not in CLEANUP_STAGES:
+            raise Blocked("WireGuard cleanup classification invalid.")
+        self.phase = phase
+        super().__init__("WireGuard UID cleanup unverified at " + phase + ".")
+
+
 class StageBlocked(Blocked):
-    """Fixed checkpoint only; never wrap raw API output, profile or exception."""
-    def __init__(self, checkpoint):
-        if checkpoint not in CHECKPOINTS:
+    """Fixed body checkpoint and optional failed cleanup phase only."""
+    def __init__(self, checkpoint, cleanup=None):
+        if checkpoint not in CHECKPOINTS or cleanup is not None and cleanup not in CLEANUP_STAGES:
             raise Blocked("WireGuard checkpoint classification invalid.")
-        super().__init__("WireGuard synthetic fixture blocked at " + checkpoint + ".")
+        self.checkpoint = checkpoint
+        self.cleanup = cleanup
+        message = "WireGuard synthetic fixture blocked at " + checkpoint + "."
+        if cleanup is not None:
+            message += " UID-owned cleanup unverified at " + cleanup + "."
+        super().__init__(message)
 
 
 def need(condition, message):
@@ -276,13 +294,17 @@ class OperatorFixture:
         for kind in ("EgressGateway", "Secret"):
             if kind not in self.attempted:
                 continue
+            phase = "gateway" if kind == "EgressGateway" else "secret"
             try:
                 uid = self.created.get(kind)
-                need(uid is not None and self._get(kind, allow_terminating=True) == uid,
-                     "Ambiguous operator fixture CREATE; manual orphan inspection required.")
+                if uid is None:
+                    raise CleanupBlocked(phase + "-ambiguous")
+                need(self._get(kind, allow_terminating=True) == uid,
+                     "Operator resource UID changed; no name-only cleanup.")
                 _name, path = self._identity(kind)
                 options = {"apiVersion": "v1", "kind": "DeleteOptions",
                            "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
+                phase += "-delete"
                 self._call(["delete", "--raw=" + path, "-f", "-"],
                            payload=json.dumps(options).encode(), output=1024)
                 end = self.owner.clock() + 25
@@ -291,11 +313,11 @@ class OperatorFixture:
                         break
                     time.sleep(1)
                 else:
-                    raise Blocked("Owned operator resource cleanup unverified.")
+                    raise CleanupBlocked(phase)
             except (Blocked, adapter.AdapterError, lifecycle.LifecycleError):
-                failures.append(kind)
+                failures.append(phase)
         if failures:
-            raise Blocked("Owned operator Gateway/Secret cleanup unverified; manual inspection required.")
+            raise CleanupBlocked(failures[0])
 
 
 def manifests(owner, private):
@@ -528,7 +550,7 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
         operator = None
         source_api = None
         failure = None
-        cleanup_failure = False
+        cleanup_failure = None
         result = None
         try:
             owner.create_namespaces()
@@ -576,13 +598,18 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
                         operator.cleanup_deadline = owner.clock() + 65
                         operator.delete_selected(source_api)
                 except BaseException:
-                    cleanup_failure = True
+                    cleanup_failure = "selected"
                 try:
                     operator.cleanup()
+                except CleanupBlocked as err:
+                    if cleanup_failure is None:
+                        cleanup_failure = err.phase
                 except BaseException:
-                    cleanup_failure = True
-            if cleanup_failure:
-                failure = StageBlocked("cleanup-unverified")
+                    if cleanup_failure is None:
+                        cleanup_failure = "gateway"
+            if cleanup_failure is not None:
+                failure = StageBlocked(failure.checkpoint if failure is not None else
+                                       "cleanup-unverified", cleanup_failure)
         if failure is not None:
             raise failure
     return False  # Explicitly never full M8 PASS, even after success.

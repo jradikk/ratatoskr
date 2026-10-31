@@ -134,6 +134,52 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertTrue(result["encryptedStartup"] and result["peerRemoved"] and source.deleted)
         self.assertEqual(result["plainGeneve"], "not-tested")
 
+    def test_cleanup_phase_keeps_original_trusted_body_checkpoint(self):
+        owner = FakeOwner()
+        operator = FakeOperator(owner)
+        def fail_cleanup():
+            operator.cleaned = True
+            raise w.CleanupBlocked("gateway-ambiguous")
+        operator.cleanup = fail_cleanup
+        with patch.object(w, "manifests", return_value=([{"kind": k, "metadata": {
+                "name": n, "namespace": owner.names[0]}} for k, n in
+                (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                 ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
+                {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
+            def fail(*_args):
+                raise RuntimeError("PRIVATE PROFILE DATA")
+            with self.assertRaises(w.StageBlocked) as raised:
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                          operator_factory=lambda _owner: operator, source_factory=FakeSource,
+                          observer=fail)
+        self.assertEqual(str(raised.exception),
+                         "WireGuard synthetic fixture blocked at peer-lifecycle. "
+                         "UID-owned cleanup unverified at gateway-ambiguous.")
+        self.assertNotIn("PRIVATE PROFILE DATA", str(raised.exception))
+        self.assertTrue(owner.cleaned and operator.cleaned)
+
+    def test_cleanup_phase_without_body_failure_is_fixed_label(self):
+        owner = FakeOwner()
+        operator = FakeOperator(owner)
+        def fail_cleanup():
+            raise w.CleanupBlocked("secret-delete")
+        operator.cleanup = fail_cleanup
+        with patch.object(w, "manifests", return_value=([{"kind": k, "metadata": {
+                "name": n, "namespace": owner.names[0]}} for k, n in
+                (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                 ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
+                {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
+            with self.assertRaises(w.StageBlocked) as raised:
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                          operator_factory=lambda _owner: operator, source_factory=FakeSource,
+                          observer=lambda *_args: {"encryptedStartup": True, "peerRegistered": True,
+                              "peerRemoved": True, "plainGeneve": "not-tested",
+                              "tokenReview": "not-independently-observed"})
+        self.assertEqual(str(raised.exception),
+                         "WireGuard synthetic fixture blocked at cleanup-unverified. "
+                         "UID-owned cleanup unverified at secret-delete.")
+        self.assertTrue(owner.cleaned)
+
     def test_stage_diagnostic_survives_verified_cleanup_and_hides_sensitive_exception(self):
         owner = FakeOwner()
         operator = FakeOperator(owner)
