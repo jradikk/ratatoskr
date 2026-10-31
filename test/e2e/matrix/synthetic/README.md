@@ -13,9 +13,15 @@ The runner now stops polling as soon as the UID-pinned one-shot Pod reports
 `pod-failed-unknown`, then attempts the same UID-owned cleanup; waiting or
 transient API errors remain bounded and cannot become success evidence.
 In the separate agent partial smoke, a selected Pod which reaches `Failed`
-now also stops immediately with only `wait-init-failed`, `app-failed` or
-`pod-failed-unknown`; a nonzero app exit is **not** selected tunnel evidence.
+now also stops immediately with an allowlisted wait-init/app subcheck category
+(or `pod-failed-unknown`); a nonzero app exit is **not** selected tunnel evidence.
 The UID-owned namespace and private PKI cleanup still run on that path.
+Recent guarded agent retries (October 31, 2026) reached the restricted wait-init
+and nonroot app but **did not pass marker traffic**. A tokenless public-CA API
+probe correctly accepts only exact 401 Unauthorized or 403 Forbidden. The
+selected marker then timed out during TCP connect. Test-only exit codes
+identify fixed DNS/route/TLS/marker subchecks without logging bodies, errors
+or credentials; no timeout or arbitrary failure counts as fail-closed evidence.
 
 ## Separately gated init-driver/nonrestricted partial traffic (never M8 PASS)
 

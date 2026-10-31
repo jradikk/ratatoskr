@@ -208,8 +208,22 @@ def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.m
                 app = [s for s in status.get("containerStatuses", []) if s.get("name") == "client"]
                 init_exit = init[0].get("state", {}).get("terminated", {}).get("exitCode") if init else None
                 app_exit = app[0].get("state", {}).get("terminated", {}).get("exitCode") if app else None
+                app_failure = {11: "direct-before-failed", 12: "marker-failed",
+                               13: "direct-after-failed", 21: "direct-before-dns-failed",
+                               22: "direct-before-route-failed", 23: "direct-before-tls-connect-failed",
+                               24: "direct-before-tls-verify-failed", 25: "direct-before-tls-status-failed",
+                               26: "direct-before-api-unauthorized", 27: "direct-before-api-success",
+                               28: "direct-before-api-other", 31: "direct-after-dns-failed",
+                               32: "direct-after-route-failed",
+                               33: "direct-after-tls-connect-failed", 34: "direct-after-tls-verify-failed",
+                               35: "direct-after-tls-status-failed", 36: "direct-after-api-unauthorized",
+                               37: "direct-after-api-success", 38: "direct-after-api-other",
+                               41: "marker-unreachable", 43: "marker-connect-timeout", 44: "marker-refused",
+                               45: "marker-response-invalid", 46: "marker-other-failed",
+                               47: "marker-response-timeout"}
                 label = ("wait-init-failed" if init_exit not in (None, 0) else
-                         "app-failed" if app_exit not in (None, 0) else "pod-failed-unknown")
+                         app_failure.get(app_exit, "app-failed") if app_exit not in (None, 0) else
+                         "pod-failed-unknown")
                 raise TerminalFailure("Healthy selected Pod failed at selected-pod-status-" + label + ".")
             if status.get("phase") != "Succeeded":
                 raise Blocked("Healthy selected Pod not completed.")

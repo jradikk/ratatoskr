@@ -723,6 +723,34 @@ PKI were removed, the existing release remained agent/iproute and agent 3/3
 Ready. Full component tests, chart/static checks and 118 synthetic fake tests
 passed for this code; M8/M9 acceptance and live VPN input remain incomplete.
 
+## October 31, 2026 — selected traffic diagnostic, not a PASS
+
+Further gated, UID-owned restricted-agent retries on the same three-node
+flannel cluster with unchanged security context advanced the synthetic
+selected Pod through the capability-free wait-init and into its nonroot app.
+The initially strict direct Kubernetes API check failed **before** the tunnel
+marker: public-CA-verified TLS connected, but the API returned HTTP **401**
+for a tokenless request instead of fixture-required 403. Kubernetes permits
+401 when anonymous authentication is disabled; the helper now accepts **only
+exact 401 Unauthorized or 403 Forbidden** after CA/SNI verification, without
+projecting an API token or treating any successful response as proof. Follow-up
+real selected Pods then passed that direct check but still **failed** the
+selected marker check. Fixed exit categories (no request bodies, profile,
+errors or Pod logs) narrowed this to a **TCP connect timeout** to the tunnel
+marker `10.88.0.1:8080`, before any HTTP response. This is not a verified
+healthy VPN flow and not a fail-close proof. A bounded independent observation
+saw the controller-managed gateway's selected-client allowlist grow from
+zero to one, with the Pod's agent readiness progressing from pending to true;
+those facts do not establish GENEVE delivery, gateway anti-spoof acceptance,
+return-path routing or marker reachability. Later count-only packet sampling
+was inconclusive and no route, firewall, privilege or probe bypass was made.
+Both fixture namespaces/private PKI were verified removed after each run;
+the release stayed agent/iproute with agent 3/3 Ready. The updated no-leak
+fixture passed 123 fake tests plus chart/YAML/matrix static checks; full Go
+race, lint, vet, build and privileged checks passed. The 96-cell M8 matrix
+and live VPN tier remain incomplete/SKIPPED respectively, and M9 publication
+remains withheld.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
