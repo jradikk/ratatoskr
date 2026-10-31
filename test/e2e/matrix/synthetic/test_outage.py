@@ -130,7 +130,9 @@ class OutageTests(unittest.TestCase):
             owner.events.append(stage)
             if fail_stage == stage:
                 raise o.Blocked("Outage/recovery did not converge at " + stage + ".")
-            return {}  # predicate checked separately in focused fake tests
+            if stage == "withdrawn-selected-fail-close":
+                return predicate()
+            return {}  # other stages checked separately in focused fake tests
         with patch.object(o.partial_gateway, "private_contents", return_value=()), \
              patch.object(o.prepare, "manifests", return_value=objects), \
              patch.object(o.prepare, "running_probe_pod", return_value={"kind": "Pod", "metadata": {
