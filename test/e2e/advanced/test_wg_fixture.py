@@ -1,0 +1,231 @@
+"""Offline fake-only adversarial checks for the executable WG fixture."""
+import contextlib
+import io
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.dont_write_bytecode = True
+import wg_fixture as w
+
+TOKEN = "a" * 32
+UID = "b" * 32
+IDS = {key: "containerd://sha256:" + "c" * 64 for key in w.run.COMPONENTS}
+
+
+class FakeOwner(w.lifecycle.Lifecycle):
+    def __init__(self):
+        super().__init__(api=object(), token_factory=lambda: TOKEN)
+        self.deadline = 10_000_000
+        self.private_dir = Path("/absent")
+        self.owned[self.names[0]] = UID
+        self.created_namespaces = False
+        self.cleaned = False
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        self.cleaned = True
+        return False
+    def create_namespaces(self):
+        self.created_namespaces = True
+    def generate_pki(self):
+        return self.private_dir
+
+
+class FakeOperator:
+    def __init__(self, owner):
+        self.owner = owner
+        self.name = "rtk-wg-" + owner.token[:16]
+        self.created = []
+        self.attempted = set()
+        self.cleaned = False
+    def create(self, kind, manifest):
+        self.created.append((kind, manifest["metadata"]["namespace"]))
+        return UID
+    def cleanup(self):
+        self.cleaned = True
+
+
+class FakeSource:
+    def __init__(self, owner):
+        self.owner = owner
+        self.created = []
+    def create(self, obj):
+        self.created.append((obj["kind"], obj["metadata"]["name"]))
+        return {"kind": obj["kind"], "name": obj["metadata"]["name"],
+                "namespace": obj["metadata"]["namespace"], "uid": UID}
+
+
+class WireGuardFixtureTest(unittest.TestCase):
+    def test_live_observer_peer_startup_and_revoke_offline(self):
+        owner = FakeOwner()
+        owner.clock = lambda: 0
+        operator = FakeOperator(owner)
+        gateway_uid = UID
+        gateway_ip = "10.42.0.7"
+        endpoint = {"podName": "gateway-child", "podUID": UID, "podIP": gateway_ip,
+                    "upstreamHealthy": True, "appliedClientConfigHash": "d" * 64,
+                    "wireguardPublicKey": "e" * 43 + "=", "registrationCACert": "-----BEGIN CERTIFICATE-----x"}
+        gateway = {"metadata": {"name": operator.name, "namespace": w.SYSTEM,
+                                "uid": gateway_uid, "generation": 1},
+                   "spec": {"encryption": "wireguard"},
+                   "status": {"observedGeneration": 1, "gatewayID": 42, "readyReplicas": 1,
+                              "conditions": [{"type": "Ready", "status": "True"}],
+                              "endpoints": [endpoint]}}
+        dependency = {"metadata": {"uid": "d" * 32,
+                         "ownerReferences": [{"kind": "EgressGateway", "uid": UID, "controller": True}]}}
+        gateway_pod = {"metadata": {"uid": UID, "name": "gateway-child",
+                       "labels": {w.PREFIX + "gateway-uid": UID},
+                       "ownerReferences": [{"kind": "ReplicaSet", "uid": "f" * 32,
+                                            "name": "gateway-rs", "controller": True}]},
+                       "status": {"podIP": gateway_ip}}
+        replica = {"metadata": {"uid": "f" * 32,
+                  "ownerReferences": [{"kind": "Deployment", "uid": "d" * 32,
+                                       "controller": True}]}}
+        body = {"identity": {"namespace": owner.names[1], "pod": w.CLIENT, "uid": UID},
+                "encryption": "wireguard", "endpoint": gateway_ip, "gatewayID": 42,
+                "gatewayPublicKey": endpoint["wireguardPublicKey"],
+                "registrationCACert": endpoint["registrationCACert"], "podIP": "10.42.1.8"}
+        raw = json.dumps(body)
+        selected = {"metadata": {"namespace": owner.names[1], "name": w.CLIENT,
+                     "uid": UID, "labels": {w.OWN: TOKEN},
+                     "annotations": {w.PREFIX + "agent-config": raw,
+                         w.PREFIX + "agent-hash": w.hashlib.sha256(raw.encode()).hexdigest(),
+                         w.PREFIX + "datapath-ready": "true",
+                         w.PREFIX + "agent-backend": "iproute"}},
+                    "status": {"phase": "Running", "podIP": "10.42.1.8",
+                               "containerStatuses": [{"name": "client", "ready": True,
+                                                       "imageID": IDS["selected"]}]}}
+        source_uid = UID
+        class Source:
+            created = {("Pod", owner.names[0], w.SERVER): {"kind": "Pod", "namespace": owner.names[0], "name": w.SERVER, "uid": source_uid}}
+            def __init__(self): self.deleted = False
+            def get(self, kind, name, namespace):
+                if (kind, name) == ("pod", w.SERVER):
+                    return {"metadata": {"uid": UID}, "status": {}}
+                if (kind, name) == ("service", w.SERVER):
+                    return {"metadata": {"uid": UID}}
+                if (kind, name) == ("pod", w.CLIENT):
+                    return selected
+                raise AssertionError("unexpected source GET")
+            def source_endpoint(self, *_args): return {"kind": "EndpointSlice"}
+            def probe_running(self, *_args): return True
+        source = Source()
+        class Gateway(FakeOperator):
+            def get_object(self, kind, name, namespace):
+                return {"egressgateway": gateway, "deployment": dependency,
+                        "pod": gateway_pod, "replicaset": replica}[kind]
+            def create_selected(self, _source, _workload): return UID
+            def delete_selected(self, _source): source.deleted = True
+        gw = Gateway(owner)
+        samples = iter([{"sample_ok": 1, "installed_peers": 0, "receive_bytes": 0,
+                         "transmit_bytes": 0},
+                        {"sample_ok": 1, "installed_peers": 1, "handshaken_peers": 1,
+                         "receive_bytes": 12, "transmit_bytes": 16},
+                        {"sample_ok": 1, "installed_peers": 0}])
+        workload = w.selected_pod(owner, gw.name, "10.43.0.1")
+        with patch.object(w.partial_gateway, "source_ready", return_value=True):
+            result = w.observe(owner, source, gw, UID, workload, IDS,
+                               metrics_reader=lambda *_args: next(samples),
+                               clock=lambda: 0, sleep=lambda _seconds: self.fail("no retry needed"))
+        self.assertTrue(result["encryptedStartup"] and result["peerRemoved"] and source.deleted)
+        self.assertEqual(result["plainGeneve"], "not-tested")
+
+    def test_default_entrypoint_never_calls_cluster(self):
+        with patch.dict(w.os.environ, {}, clear=True), patch.object(w.run, "ReadOnlyAPI") as api:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(w.main([]), 2)
+            api.assert_not_called()
+
+    def test_operator_resource_uid_preconditions_and_no_name_only_cleanup(self):
+        owner = FakeOwner()
+        calls = []
+        identities = {}
+        def transport(argv, *, payload, timeout, max_output):
+            self.assertEqual(argv[1:3], ["--context", w.lifecycle.CONTEXT])
+            calls.append((argv, payload))
+            if "--ignore-not-found" in argv:
+                kind = argv[argv.index("get") + 1]
+                name = argv[argv.index(kind) + 1]
+                uid = identities.get(kind)
+                return (name + "\t" + uid + "\t" + TOKEN + "\t").encode() if uid else b""
+            if "create" in argv:
+                obj = json.loads(payload)
+                kind = obj["kind"].lower()
+                identities[kind] = UID
+                return (obj["apiVersion"] + "\t" + obj["kind"] + "\t" + w.SYSTEM +
+                        "\t" + obj["metadata"]["name"] + "\t" + UID + "\n").encode()
+            if "delete" in argv:
+                options = json.loads(payload)
+                self.assertEqual(options["preconditions"]["uid"], UID)
+                self.assertIn("--raw=", " ".join(argv))
+                identities.pop("secret" if "/secrets/" in " ".join(argv) else "egressgateway")
+                return b""
+            self.fail("unexpected Kubernetes action")
+        op = w.OperatorFixture(owner, transport=transport)
+        name = op.name
+        for kind, suffix, api in (("Secret", "-upstream", "v1"),
+                                  ("EgressGateway", "", "ratatoskr.skaldhall.io/v1alpha1")):
+            op.create(kind, {"apiVersion": api, "kind": kind, "metadata": {
+                "name": name + suffix, "namespace": w.SYSTEM, "labels": {w.OWN: TOKEN}}})
+        op.cleanup()
+        self.assertFalse(identities)
+        self.assertEqual(sum("delete" in argv for argv, _ in calls), 2)
+        self.assertTrue(all(w.SYSTEM in str(argv) for argv, _ in calls
+                            if "get" in argv or "delete" in argv))
+
+    def test_ambiguous_create_not_deleted_or_retried(self):
+        owner = FakeOwner()
+        calls = []
+        def failed(argv, *, payload, timeout, max_output):
+            calls.append(argv)
+            if "get" in argv:
+                return b""
+            raise w.adapter.AdapterError("ambiguous remote POST")
+        op = w.OperatorFixture(owner, transport=failed)
+        manifest = {"apiVersion": "v1", "kind": "Secret", "metadata": {
+            "name": op.name + "-upstream", "namespace": w.SYSTEM, "labels": {w.OWN: TOKEN}}}
+        with self.assertRaises(w.Blocked):
+            op.create("Secret", manifest)
+        with self.assertRaises(w.Blocked):
+            op.cleanup()
+        self.assertFalse(any("delete" in argv for argv in calls))
+
+    def test_manifest_reuses_private_pki_and_disposable_namespaces(self):
+        owner = FakeOwner()
+        with patch.object(w.partial_gateway, "private_contents", return_value=("CA", "SERVER", "SERVER_KEY", "CLIENT", "CLIENT_KEY", "WITNESS", "WITNESS_KEY")):
+            source, secret, gateway = w.manifests(owner, owner.private_dir)
+        self.assertEqual([(o["kind"], o["metadata"]["name"]) for o in source],
+                         [("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                          ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn")])
+        self.assertEqual(gateway["metadata"]["namespace"], w.SYSTEM)
+        self.assertEqual(gateway["spec"]["encryption"], "wireguard")
+        self.assertEqual(secret["metadata"]["namespace"], w.SYSTEM)
+        self.assertEqual(gateway["spec"]["allowedNamespaces"]["namespaceSelector"]["matchLabels"],
+                         {"ratatoskr-synthetic": owner.names[0]})
+
+    def test_execute_bounded_partial_only_and_cleanup_failure_overrides(self):
+        owner, operator = FakeOwner(), FakeOperator(FakeOwner())
+        def factory(_owner):
+            operator.owner = _owner
+            return operator
+        with patch.object(w, "manifests", return_value=([{"kind": k, "metadata": {
+                "name": n, "namespace": owner.names[0]}} for k, n in
+                (("Secret", "synthetic-server"), ("ConfigMap", "synthetic-exit-health"),
+                 ("Pod", "synthetic-vpn"), ("Service", "synthetic-vpn"))],
+                {"metadata": {"namespace": w.SYSTEM}}, {"metadata": {"namespace": w.SYSTEM}})):
+            result = w.execute(IDS, api_ip="10.43.0.1", owner_factory=lambda: owner,
+                               operator_factory=factory, source_factory=FakeSource,
+                               observer=lambda *_args: {"encryptedStartup": True,
+                                   "peerRegistered": True, "peerRemoved": True,
+                                   "plainGeneve": "not-tested", "tokenReview": "not-independently-observed"})
+        self.assertIs(result, False)
+        self.assertTrue(operator.cleaned and owner.cleaned)
+        self.assertEqual(operator.created, [("Secret", w.SYSTEM), ("EgressGateway", w.SYSTEM)])
+
+
+if __name__ == "__main__":
+    unittest.main()
