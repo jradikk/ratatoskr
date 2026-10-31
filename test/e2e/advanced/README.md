@@ -82,6 +82,59 @@ connection, plus a no-endpoint fail-close check. Parent must not award coverage
 from this observer alone. The collector does not create/own the Gateway, so
 live cleanup and subsequent recovery remain solely with the parent/operator.
 
+## UID-owned two-replica HA traffic fixture (live; never run during authoring)
+
+`ha_fixture.py` is the **separate** executable fixture for an approved existing
+three-node flannel/no-mesh agent/iproute release. Unlike `ha_live.py`, it
+creates two UUID-named namespaces through the synthetic Lifecycle, generates
+fixture PKI in a private 0700 directory, creates one synthetic OpenVPN server,
+a synthetic-client Secret, an EgressGateway with **two replicas**, its Policy,
+and one long-lived selected Pod. Only the ephemeral fixture server profile adds
+`duplicate-cn` so two controller-created gateway replicas can authenticate
+concurrently with the same fixture-only client certificate. Production/plugin
+images, chart privileges and CNI are not changed. It reuses the same approved
+local server and restricted selected app images, the existing release/node
+image-ID preflight, `prepare.running_probe_pod`, and `FixtureAPI.probe_running`
+from `matrix/synthetic` (requires that shared outage fixture commit).
+
+After two UID-verified controller-owned, healthy and config-acknowledged
+replicas are observed, it opens one fresh selected marker TCP connection via
+the fixed, output-discarding `probe_running` command. The runner deletes **only
+the exact chosen fixture gateway Pod** through the Kubernetes UID-preconditioned
+raw DELETE API after rechecking Pod, owner chain and same selected Pod UID.
+Deployment may replace it, but the client's agent config must select a
+*previously healthy surviving replica*, and a second fresh marker TCP
+connection plus direct API/DNS/TLS checks must pass after stable reselection.
+The same synthetic VPN source Pod UID and approved runtime image are checked
+before and after the probes. The old established connection is never claimed
+to survive and no distinct VPN exit IP is inferred from the shared synthetic
+OpenVPN upstream. Initial or post-failover connectivity failure is not a pass.
+Both UUID namespace deletions and private-PKI removal are required by the
+Lifecycle before the runner can return its **partial** result.
+
+Parent execution is **not approved by this file**. After explicit operator
+approval of the existing release and disposable fixture, rebuilt/imported
+approved images on all nodes, and immutable image IDs, invoke only:
+
+```sh
+RATATOSKR_E2E_FINAL_GATE=1 RATATOSKR_E2E_HA_FIXTURE=1 \\
+  EXPECTED_CONTROLLER_IMAGE_ID=... EXPECTED_WEBHOOK_IMAGE_ID=... \\
+  EXPECTED_AGENT_IMAGE_ID=... EXPECTED_GATEWAY_IMAGE_ID=... \\
+  EXPECTED_PLUGIN_IMAGE_ID=... EXPECTED_SERVER_IMAGE_ID=... \\
+  EXPECTED_TOOLS_IMAGE_ID=... EXPECTED_WITNESS_IMAGE_ID=... \\
+  EXPECTED_SELECTED_IMAGE_ID=... \\
+  python3 test/e2e/advanced/ha_fixture.py --execute --execute-ha-fixture
+```
+
+Expected values must be **actual parent-approved immutable runtime image IDs**;
+never paste placeholders into a real run. Missing gates exit 2 before API
+access; unsafe setup, timeout or unverified cleanup exits 1; successful
+*partial* HA traffic evidence exits 4, never full M8 coverage. The runner
+requires a parent-monitored 650-second lifecycle plus a bounded cleanup grace;
+SIGKILL, API loss or node failure may still need manual orphan inspection.
+WireGuard registration, plaintext rejection and peer revoke are **not tested**
+by this plaintext synthetic HA fixture.
+
 ## HA boundary
 
 The Go test checks deterministic 1–3 endpoint selection, reordering stability,
