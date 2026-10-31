@@ -4,6 +4,41 @@
 No version tag, published chart/image, registry push, signature or pull request was
 created. The checked-in chart intentionally remains `0.0.0-dev` / `dev`.
 
+## October 31, 2026 — encrypted agent lifecycle repaired (scoped evidence)
+
+The existing three-node flannel/no-mesh agent/iproute release completed the
+explicitly gated synthetic WireGuard startup and peer-lifecycle runner after
+these fixes:
+
+- Raw UID-precondition DELETE responses are bounded and drained without
+  retaining Gateway/Secret response bodies. Fixture termination grace and
+  registration/cleanup phase deadlines are independently bounded.
+- TCP 9443 registration is reachable from host-network node agents; TLS and
+  Pod-bound TokenReview authorization are unchanged. UDP 51820 remains
+  restricted to authorized selected workload namespace/Pod selectors.
+- Gateway `gnv0` has a strictly owned `169.254.64.3/32` address, avoiding the
+  authenticated GENEVE ingress reverse-path-validation failure. Gateway peer
+  routes apply only to locally generated outer traffic (`iif lo`), so forwarded
+  upstream replies take table-101 LWT GENEVE rather than bypassing encapsulation.
+
+On datapath commit `c406e07` with test-only follow-up `8e04bab`, the runtime
+runner observed encrypted workload startup, the exact synthetic marker and
+preserved direct API checks, a registered/handshaken peer with RX/TX growth,
+UID-conditional selected Pod deletion, and kernel peer removal. It returned
+**4 / INCOMPLETE**, not failure and not full M8 PASS. The run's namespace/private
+PKI and operator-fixture cleanup completed. Earlier failed runs left two
+historical operator-namespace Gateway objects; they were not adopted or deleted
+by name because this run does not retain their CREATE-authorized cleanup state.
+They remain a separate cleanup issue, not evidence of this run's success.
+
+Integrated validation passed full Go race tests, vet, lint (0 issues), binary
+builds, privileged component tests, 30 repeats of the decrypted-INPUT observer,
+and 230 offline Python tests. The encrypted bidirectional namespace regression
+also passed 20 repetitions. No host runtime/seccomp or capabilities were relaxed.
+Only local controller/agent/gateway development images were refreshed; nothing
+was published. Plaintext rejection, independent TokenReview evidence, the wider
+compatibility matrix and release provenance remain unverified acceptance gates.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
