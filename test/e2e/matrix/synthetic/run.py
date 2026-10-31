@@ -256,6 +256,7 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--allow-partial-vpn-smoke", action="store_true")
     parser.add_argument("--execute-partial-gateway", action="store_true")
+    parser.add_argument("--execute-agent-outage", action="store_true")
     parser.add_argument("--execute-init-smoke", action="store_true")
     parser.add_argument("--execute-init-traffic", action="store_true")
     args = parser.parse_args(argv)
@@ -263,7 +264,9 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
     if (not args.execute or env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
             (args.allow_partial_vpn_smoke or args.execute_init_smoke or args.execute_init_traffic) and
             env.get("RATATOSKR_E2E_PARTIAL_VPN_SMOKE") != "1" or
-            args.execute_partial_gateway and not args.allow_partial_vpn_smoke or
+            (args.execute_partial_gateway or args.execute_agent_outage) and not args.allow_partial_vpn_smoke or
+            args.execute_agent_outage and (args.execute_partial_gateway or args.execute_init_smoke or
+                                            env.get("RATATOSKR_E2E_AGENT_OUTAGE") != "1") or
             args.execute_init_smoke and (not args.allow_partial_vpn_smoke or
                                          env.get("RATATOSKR_E2E_INIT_SMOKE") != "1" or
                                          args.execute_partial_gateway) or
@@ -284,7 +287,7 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
             if args.execute_init_smoke and not args.execute_init_traffic:
                 print("INCOMPLETE: init-driver/nonrestricted synthetic smoke BLOCKED before resource creation; parent must explicitly roll and restore the release and approve separate init-driver Pod evidence. No Kubernetes mutation or PKI.")
                 return 4
-            if args.execute_partial_gateway:
+            if args.execute_partial_gateway or args.execute_agent_outage:
                 deployment = api.get("deployment", "ratatoskr-controller", namespace)
                 containers = [c for c in deployment["spec"]["template"]["spec"]["containers"]
                               if c.get("name") == "controller"]
@@ -326,20 +329,21 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
             return 1
         print("INCOMPLETE: init-driver/nonrestricted healthy OpenVPN traffic and direct API path observed; both temporary namespaces/PKI cleanup verified. Agent restriction, fail-close, witness and release restoration NOT TESTED. No M8 PASS.")
         return 4
-    if args.execute_partial_gateway:
+    if args.execute_partial_gateway or args.execute_agent_outage:
         try:
             try:
-                from . import partial_gateway
+                from . import outage, partial_gateway
             except ImportError:
+                import outage
                 import partial_gateway
             if smoke is None:
-                smoke = partial_gateway.execute
+                smoke = outage.execute if args.execute_agent_outage else partial_gateway.execute
             service_ip = partial_gateway.api_service_ip(api)
             smoke(ids, api_ip=service_ip)
         except (KeyboardInterrupt, SystemExit):
             print("FAILED: partial Gateway smoke interrupted; verify cleanup and orphan state.")
             return 1
-        except partial_gateway.Blocked as err:
+        except (partial_gateway.Blocked, outage.Blocked) as err:
             # Only fixed checkpoint labels from our own observer are reported;
             # never serialize arbitrary API responses, profiles or exception chains.
             print("FAILED: " + str(err) + " UID-owned namespaces were cleanup-attempted.")
@@ -353,7 +357,10 @@ def main(argv=None, environ=None, api_factory=ReadOnlyAPI, node_verify=None, smo
         except BaseException:
             print("FAILED: partial Gateway smoke or cleanup blocked; no raw API or private data retained. Inspect UID-owned namespace orphan state privately.")
             return 1
-        print("INCOMPLETE: partial OpenVPN smoke observed real Gateway owner/status/TLS and healthy restricted agent one-shot Pod exit0 with direct API TLS/DNS and server session counter growth; both namespaces/PKI cleanup verified. Counter growth may include probe noise; selected tunnel attribution, fail-close, witness and recovery NOT TESTED. No M8 PASS.")
+        if args.execute_agent_outage:
+            print("INCOMPLETE: restricted agent synthetic healthy/outage/recovery checks completed with independent VPN witness and verified cleanup; other M8 matrix scenarios remain NOT COVERED. No full M8 PASS.")
+        else:
+            print("INCOMPLETE: partial OpenVPN smoke observed real Gateway owner/status/TLS and healthy restricted agent one-shot Pod exit0 with direct API TLS/DNS and server session counter growth; both namespaces/PKI cleanup verified. Counter growth may include probe noise; selected tunnel attribution, fail-close, witness and recovery NOT TESTED. No M8 PASS.")
     elif args.allow_partial_vpn_smoke:
         print("INCOMPLETE: read-only three-node CRI config image IDs matched explicit expectations; release and private probe preflight passed. Partial synthetic VPN smoke remains BLOCKED before resource creation pending runtime safety review. No resources, PKI or Pods created; no VPN traffic tested.")
     else:

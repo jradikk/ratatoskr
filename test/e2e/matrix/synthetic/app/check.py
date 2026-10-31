@@ -208,8 +208,13 @@ def marker_result():
 def main(argv=None, environ=None):
     argv = sys.argv[1:] if argv is None else argv
     env = os.environ if environ is None else environ
+    if argv == ["hold"]:
+        # Run as PID1, not as a kubectl exec process: this keeps the
+        # pre-outage wait-init-completed workload available for fresh probes.
+        time.sleep(600)
+        return 0
     try:
-        if len(argv) != 2 or argv[0] not in ("healthy", "outage"):
+        if len(argv) != 2 or argv[0] not in ("healthy", "outage", "outage-check"):
             raise Invalid()
         mode, approved_api = argv
         api_ip, pod_ip = ip4(approved_api), ip4(env.get("POD_IP"))
@@ -247,9 +252,9 @@ def main(argv=None, environ=None):
                 "tls-verify": 34, "tls-status": 35}[exc.stage]
     except failures:
         return 13  # Unknown direct-path failure after marker.
-    if (mode == "healthy" and result != "healthy") or (mode == "outage" and result != "unreachable"):
+    if (mode == "healthy" and result != "healthy") or (mode != "healthy" and result != "unreachable"):
         return 12
-    return 0 if mode == "healthy" else BLOCKED
+    return 0 if mode in ("healthy", "outage-check") else BLOCKED
 
 
 if __name__ == "__main__":

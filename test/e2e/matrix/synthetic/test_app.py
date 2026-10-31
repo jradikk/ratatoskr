@@ -134,6 +134,18 @@ class ProbeTests(unittest.TestCase):
                     self.assertEqual(app.main(["healthy", "10.43.0.1"], {"POD_IP": "10.42.2.5"}), want)
                     self.assertNotEqual(want, app.BLOCKED)
 
+    def test_long_lived_outage_check_is_zero_only_for_unreachable_and_direct_paths(self):
+        for result, expected in (("unreachable", 0), ("healthy", 12)):
+            with self.subTest(result=result), patch.object(app, "direct_api") as direct, \
+                 patch.object(app, "marker_result", return_value=result):
+                self.assertEqual(app.main(["outage-check", "10.43.0.1"], {"POD_IP": "10.42.2.5"}), expected)
+                self.assertEqual(direct.call_count, 2)
+        for category in ("connect-timeout", "response-timeout", "refused", "other"):
+            with self.subTest(category=category), patch.object(app, "direct_api"), \
+                 patch.object(app, "marker_result", side_effect=app.MarkerFailure(category)):
+                self.assertNotEqual(app.main(["outage-check", "10.43.0.1"],
+                                             {"POD_IP": "10.42.2.5"}), 0)
+
     def test_only_selected_unreachable_errno_qualifies(self):
         import errno
         class Sock:

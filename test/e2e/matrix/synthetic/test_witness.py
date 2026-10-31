@@ -81,6 +81,13 @@ class WitnessTests(unittest.TestCase):
             self.assertFalse(witness.profile_is_private(path))
         self.assertEqual(witness.main(["--debug", "PRIVATE-CREDENTIAL"]), 2)
 
+    def test_bound_probe_mode_requires_exact_tunnel_marker(self):
+        with patch.object(witness, "fetch_marker", return_value=True):
+            self.assertEqual(witness.main(["--probe"]), 0)
+        with patch.object(witness, "fetch_marker", return_value=False):
+            self.assertEqual(witness.main(["--probe"]), 1)
+        self.assertEqual(witness.main(["--probe", "EXTRA"]), 2)
+
     def test_main_fixed_argv_and_one_shot_success(self):
         class Child:
             def __init__(self):

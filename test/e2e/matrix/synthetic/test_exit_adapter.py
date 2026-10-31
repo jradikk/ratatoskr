@@ -49,7 +49,7 @@ class Transport:
             assert argv[5:] == ["-f", "-", "-o", a.CREATE_IDENTITY]
             assert json.loads(payload)["metadata"]["namespace"] == self.namespace
             return ("\t".join(("v1", "ConfigMap", self.namespace, "synthetic-exit-health", self.uid))).encode()
-        assert argv[4:6] == ["replace", "--raw=/api/v1/namespaces/" + self.namespace + "/configmaps/synthetic-exit-health"]
+        assert argv[4:] == ["replace", "--namespace", self.namespace, "-f", "-", "-o", "json"]
         body = json.loads(payload)
         assert body["metadata"]["uid"] == self.uid
         assert body["metadata"]["resourceVersion"] == str(self.version)

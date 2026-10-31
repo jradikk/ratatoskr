@@ -83,8 +83,10 @@ def fetch_marker(timeout=3):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv:
+    if argv not in ([], ["--hold"], ["--probe"]):
         return 2
+    if argv == ["--probe"]:
+        return 0 if fetch_marker(timeout=3) else 1
     child = None
     try:
         if not profile_is_private():
@@ -101,6 +103,15 @@ def main(argv=None):
             if child.poll() is not None:
                 raise Invalid()
             if fetch_marker(timeout=2):
+                if argv == ["--hold"]:
+                    # A separate UID-pinned exec checks marker during withdrawal.
+                    # Bounded Pod lifetime; never report success merely on hold.
+                    until = time.monotonic() + 300
+                    while time.monotonic() < until:
+                        if child.poll() is not None:
+                            raise Invalid()
+                        time.sleep(1)
+                    return 0
                 # Hold authenticated tunnel briefly for bounded server-side
                 # status read of the distinct CN while this Pod is Running.
                 hold = time.monotonic() + 12

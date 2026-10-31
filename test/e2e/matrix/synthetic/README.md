@@ -570,3 +570,51 @@ Local validation only:
 python3 test/e2e/matrix/synthetic/static-check.py
 sh -n test/e2e/matrix/synthetic/server/start.sh
 ```
+
+## Restricted agent existing-workload outage/recovery (authored; NOT executed)
+
+The newly separate `--execute-agent-outage` path is an executable, explicitly
+gated synthetic acceptance runner. It is **not** integrated into the M8
+matrix inventory; even a completed run returns **4 / INCOMPLETE** and covers
+only the named restricted agent synthetic scenario. Local authoring ran fake
+unit tests, not Docker/OpenVPN/kubectl. Parent/operator must first import the
+locally built server, app, witness, plugin, gateway, tools, controller, webhook
+and agent images, pin all nine `EXPECTED_<COMPONENT>_IMAGE_ID` immutable runtime
+identities, and approve the existing flannel/no-mesh agent-mode release with
+`dns.upstreamProbeURL=http://10.88.0.1:8080/exit`, `imagePullPolicy: Never`.
+Only on the final gate, with the exact release/runtime preflight complete:
+
+```sh
+RATATOSKR_E2E_FINAL_GATE=1 RATATOSKR_E2E_PARTIAL_VPN_SMOKE=1 \
+RATATOSKR_E2E_AGENT_OUTAGE=1 \
+python3 test/e2e/matrix/synthetic/run.py --execute \
+  --allow-partial-vpn-smoke --execute-agent-outage
+```
+
+The runner allocates UID-owned namespaces, generates private distinct client/
+witness PKI and only the allowlisted server/Gateway resources, verifies the
+controller-created owner/status/TLS graph and one-shot restricted healthy
+workload. It then starts an **existing long-lived** restricted selected Pod,
+waits for its production wait-init and agent readiness, checks direct TLS/DNS
+and tunnel marker while healthy, starts an independent OpenVPN witness with a
+different certificate, and toggles only the owned probe-only ConfigMap using
+UID/resourceVersion CAS. During Gateway endpoint withdrawal the witness must
+still reach `/marker` through its separate tunnel and the already-running
+selected workload must observe network unreachable (not generic timeout or a
+fresh Pod blocked at init), with direct API path intact. It restores the switch
+on all ordinary exits, waits for same Gateway/Pod UIDs and healthy endpoint,
+then probes the same selected Pod again. All probe execs use fixed argv, expected
+runtime images, bounded subprocess lifetime and discarded stdout/stderr; raw
+API exceptions/credentials remain suppressed. Namespace/PKI cleanup follows
+regardless of assertions; failed cleanup overrides evidence.
+
+**Residual limits:** kubectl exec is not server-side UID-conditional, only
+pre/post UID-checked; a malicious concurrent same-name Pod replacement is not
+atomic proof. Do not infer exhaustive M8 coverage, init-driver acceptance, HA,
+other CNIs/meshes, or real provider compatibility. If a witness fails to stay
+running or ConfigMap projection does not withdraw the health endpoint in time,
+this scenario fails without reinterpreting timeouts as fail-close. SIGKILL/API
+outage still requires private operator orphan remediation.
+
+Offline validation:
+`python3 -m unittest discover -s test/e2e/matrix/synthetic -p 'test_*.py' -q`.

@@ -110,6 +110,17 @@ def selected_probe_pod(namespace, gateway_namespace, phase, api_ip):
                                          "seccompProfile": {"type": "RuntimeDefault"}}}]}}
 
 
+def running_probe_pod(namespace, gateway_namespace, api_ip):
+    """Existing running restricted workload survives gateway endpoint withdrawal."""
+    base = selected_probe_pod(namespace, gateway_namespace, "healthy", api_ip)
+    base["metadata"]["name"] = "synthetic-client"
+    base["spec"].pop("activeDeadlineSeconds")
+    base["spec"]["containers"][0]["command"] = ["python3", "/usr/local/bin/check.py", "hold"]
+    base["spec"]["containers"][0].pop("args")
+    base["spec"]["containers"][0]["env"].append({"name": "API_IP", "value": api_ip})
+    return base
+
+
 def manifests(namespace, image, contents, token, witness_image="ratatoskr-synthetic-witness:local"):
     if witness_image != "ratatoskr-synthetic-witness:local":
         raise ValueError("witness image must be locally built fixture")
@@ -152,7 +163,8 @@ def manifests(namespace, image, contents, token, witness_image="ratatoskr-synthe
         # Probe only through tunnel; no host mounts, SA token or log credentials.
         {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "synthetic-witness", "namespace": namespace,
             "labels": {"app": "synthetic-witness"}}, "spec": {"automountServiceAccountToken": False,
-            "restartPolicy": "Never", "containers": [{"name": "witness", "image": witness_image,
+            "restartPolicy": "Never", "activeDeadlineSeconds": 420,
+            "containers": [{"name": "witness", "image": witness_image, "args": ["--hold"],
                 "imagePullPolicy": "Never", "securityContext": {"runAsUser": 0,
                     "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"], "add": ["NET_ADMIN", "MKNOD"]}},
                 "volumeMounts": [{"name": "witness-pki", "mountPath": "/etc/synthetic", "readOnly": True},

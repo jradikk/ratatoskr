@@ -77,6 +77,9 @@ COMMANDS = {
                        "https://kubernetes.default.svc.cluster.local/api/v1/namespaces/default/pods"),
 }
 SERVER_COMMAND = ("python3", "/usr/local/bin/session.py")
+RUNNING_PROBE = {"healthy": ("python3", "/usr/local/bin/check.py", "healthy"),
+                 "outage": ("python3", "/usr/local/bin/check.py", "outage-check")}
+WITNESS_COMMAND = ("python3", "/usr/local/bin/witness.py", "--probe")
 
 
 def _env():
@@ -245,6 +248,15 @@ class FixtureAPI:
                                                       obj["spec"]["containers"][0]["args"][1])
                 if obj != expected:
                     raise ValueError()
+            if kind == "Pod" and name == "synthetic-client":
+                try:
+                    from . import prepare
+                except ImportError:
+                    import prepare
+                expected = prepare.running_probe_pod(self.owner.names[1], self.owner.names[0],
+                                                     obj["spec"]["containers"][0]["env"][1]["value"])
+                if obj != expected:
+                    raise ValueError()
             if kind == "Secret":
                 keys = {"ca.crt", "server.crt", "server.key", "server.conf"} if name == "synthetic-server" else {"client.ovpn"}
                 if (obj.get("apiVersion") != "v1" or obj.get("type") != "Opaque" or
@@ -320,8 +332,7 @@ class FixtureAPI:
         # A complete object through stdin; no patches or loggable command
         # values. API server's resourceVersion update is the atomic CAS.
         payload = json.dumps(obj, separators=(",", ":")).encode()
-        raw = self._call(["replace", "--raw=/api/v1/namespaces/" + namespace +
-                          "/configmaps/synthetic-exit-health", "-f", "-"],
+        raw = self._call(["replace", "--namespace", namespace, "-f", "-", "-o", "json"],
                          payload=payload, max_output=4096)
         try:
             updated = json.loads(raw)
@@ -493,6 +504,66 @@ class FixtureAPI:
             return session
         except (ValueError, UnicodeError, TypeError, AttributeError):
             raise AdapterError("Sanitized server session output malformed.") from None
+
+    def probe_running(self, name, uid, image_id, phase, api_ip):
+        """Fixed executable probes; return only a trusted exit category, no output."""
+        import ipaddress
+        if name not in ("synthetic-client", "synthetic-witness") or phase not in ("healthy", "outage"):
+            raise AdapterError("Running probe name or phase not allowlisted.")
+        try:
+            addr = ipaddress.ip_address(api_ip)
+            if addr.version != 4 or addr.is_unspecified or addr.is_multicast or addr.is_loopback:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise AdapterError("Running probe API IPv4 invalid.") from None
+        if not isinstance(image_id, str) or not re.fullmatch(r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}", image_id):
+            raise AdapterError("Running probe expected image ID invalid.")
+        namespace = self.owner.names[1] if name == "synthetic-client" else self.owner.names[0]
+        container = "client" if name == "synthetic-client" else "witness"
+        pod = self.get("pod", name, namespace)
+        if (not isinstance(uid, str) or not UID.fullmatch(uid) or
+                pod["metadata"].get("uid") != uid or pod["metadata"].get("deletionTimestamp") or
+                pod.get("status", {}).get("phase") != "Running" or not pod.get("spec", {}).get("nodeName")):
+            raise AdapterError("Running probe Pod identity or state invalid.")
+        statuses = [v for v in pod.get("status", {}).get("containerStatuses", []) if v.get("name") == container]
+        specs = [v for v in pod.get("spec", {}).get("containers", []) if v.get("name") == container]
+        if (len(statuses) != 1 or len(specs) != 1 or statuses[0].get("ready") is not True or
+                statuses[0].get("imageID") != image_id or specs[0].get("imagePullPolicy") != "Never"):
+            raise AdapterError("Running probe container runtime image or readiness invalid.")
+        if name == "synthetic-client":
+            try:
+                from . import prepare as from_prepare
+            except ImportError:
+                import prepare as from_prepare
+            original = from_prepare.running_probe_pod(namespace, self.owner.names[0], str(addr))
+            if (specs[0].get("command") != ["python3", "/usr/local/bin/check.py", "hold"] or
+                    specs[0].get("image") != original["spec"]["containers"][0]["image"] or
+                    specs[0].get("args") or
+                    {x.get("name"): x.get("value") for x in specs[0].get("env", [])}.get("API_IP") != str(addr)):
+                raise AdapterError("Running selected workload command or API IP mismatch.")
+            command = (*RUNNING_PROBE[phase], str(addr))
+        else:
+            if (phase != "outage" or specs[0].get("args") != ["--hold"] or
+                    specs[0].get("image") != "ratatoskr-synthetic-witness:local" or
+                    pod["metadata"].get("labels", {}).get("ratatoskr.skaldhall.io/gateway")):
+                raise AdapterError("Witness probe must use independent hold fixture during outage.")
+            command = WITNESS_COMMAND
+        self._namespace(namespace)
+        # kubectl exec returns only our fixture exit status; stdout/stderr are
+        # discarded. Nonzero is never interpreted as successful fail-close.
+        args = ["kubectl", "--context", CONTEXT, "--request-timeout=10s", "--namespace", namespace,
+                "exec", name, "-c", container, "--", *command]
+        try:
+            raw = self.transport(args, timeout=min(12, self._time()), max_output=0)
+            if raw != b"":
+                raise AdapterError("Running probe emitted unexpected output.")
+        except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+            raise
+        except BaseException:
+            raise AdapterError("Running probe did not complete with expected success exit.") from None
+        if self.get("pod", name, namespace)["metadata"].get("uid") != uid:
+            raise AdapterError("Running probe Pod UID changed during exec.")
+        return True
 
     def exec(self, namespace, name, uid, container, command, *, expected_image_id):
         if (name, container) != ("synthetic-client", "client") or namespace != self.owner.names[1]:

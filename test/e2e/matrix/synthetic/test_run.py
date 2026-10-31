@@ -210,6 +210,37 @@ class GateTests(unittest.TestCase):
                 with self.assertRaises(run.Blocked):
                     run.expected_ids(altered)
 
+    def test_outage_cli_requires_separate_flag_and_never_awards_full_pass(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1", "RATATOSKR_E2E_PARTIAL_VPN_SMOKE": "1"}
+        env.update({"EXPECTED_" + k.upper() + "_IMAGE_ID": v for k, v in IDS.items()})
+        args = ["--execute", "--allow-partial-vpn-smoke", "--execute-agent-outage"]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run.main(args, env, lambda: (_ for _ in ()).throw(AssertionError("API called"))), 2)
+        self.assertIn("SKIPPED", output.getvalue())
+        env["RATATOSKR_E2E_AGENT_OUTAGE"] = "1"
+        called = []
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run.main(args, env, lambda: FakeAPI(),
+                                      lambda _ids, **_kw: None,
+                                      lambda _ids, **kw: called.append(kw)), 1)
+        # FakeAPI does not expose a complete Kubernetes Service; fail closed
+        # before resource creation even when explicit outage opt-in is present.
+        self.assertEqual(called, [])
+        api = FakeAPI()
+        api.objects[("service", "kubernetes", "default", None)] = {"metadata": {
+            "name": "kubernetes", "namespace": "default"},
+            "spec": {"clusterIP": "10.43.0.1", "type": "ClusterIP"}}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(run.main(args, env, lambda: api,
+                                      lambda _ids, **_kw: None,
+                                      lambda _ids, **kw: called.append(kw)), 4)
+        self.assertEqual(called, [{"api_ip": "10.43.0.1"}])
+        self.assertIn("INCOMPLETE", output.getvalue())
+        self.assertNotIn("full M8 PASS.", output.getvalue().replace("No full M8 PASS.", ""))
+
     def test_positive_preflight_never_awards_e2e(self):
         api = FakeAPI()
         self.assertEqual(run.preflight(api, IDS), "operator")
