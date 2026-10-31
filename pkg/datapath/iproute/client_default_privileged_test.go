@@ -125,8 +125,6 @@ func TestPrivilegedClientWithdrawSelectedTCPConnect(t *testing.T) {
 					if e != nil {
 						t.Fatal(e)
 					}
-					if n >= 14 {
-					}
 					if n >= 42 && binary.BigEndian.Uint16(frame[12:14]) == unix.ETH_P_IP && frame[23] == unix.IPPROTO_UDP && net.IP(frame[30:34]).Equal(net.ParseIP("198.51.100.7")) && binary.BigEndian.Uint16(frame[36:38]) == 9090 {
 						controlSeen = true
 					}
