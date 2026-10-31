@@ -73,6 +73,77 @@ def make():
 
 
 class AdapterTests(unittest.TestCase):
+    def test_bounded_real_child_duplex_backpressure_exact_output(self):
+        # Real LOCAL Python child, not kubectl: child emits stdout before
+        # consuming a >pipe-size stdin payload. A sequential writer deadlocks.
+        script = ("import sys,time\n"
+                  "sys.stdout.buffer.write(b'R'*2048);sys.stdout.buffer.flush()\n"
+                  "time.sleep(.02)\n"
+                  "data=sys.stdin.buffer.read()\n"
+                  "sys.stdout.buffer.write(str(len(data)).encode());sys.stdout.buffer.flush()\n")
+        payload = b"n" * 512_000  # inert, no credentials
+        got = a._bounded([sys.executable, "-B", "-c", script], payload=payload,
+                         timeout=5, max_output=2090)
+        self.assertEqual(got, b"R" * 2048 + b"512000")
+        with self.assertRaisesRegex(a.AdapterError, "output exceeded"):
+            a._bounded([sys.executable, "-B", "-c", script], payload=payload,
+                       timeout=5, max_output=2053)
+
+    def test_bounded_local_empty_stdin_eof_failure_and_absolute_timeout(self):
+        eof = "import sys;print(len(sys.stdin.buffer.read()),end='')"
+        self.assertEqual(a._bounded([sys.executable, "-B", "-c", eof], payload=b"",
+                                    timeout=2, max_output=1), b"0")
+        with self.assertRaises(a.AdapterError) as caught:
+            a._bounded([sys.executable, "-B", "-c", "import sys;sys.exit(7)"],
+                       payload=None, timeout=2, max_output=0)
+        self.assertNotIn("7", str(caught.exception))
+        with self.assertRaisesRegex(a.AdapterError, "timed out"):
+            a._bounded([sys.executable, "-B", "-c",
+                        "import time;time.sleep(4)"], payload=b"x" * 65_536,
+                       timeout=.2, max_output=0)
+
+    def test_bounded_partial_writes_and_readiness_races(self):
+        # Inject deterministic short writes and EAGAIN around local Python.
+        # Patching os.write/read globally also affects subprocess internals;
+        # delegate every unrelated file descriptor to the original functions.
+        original_write, original_read = a.os.write, a.os.read
+        events = {"writes": 0, "reads": 0}
+        pipe_fd = {"stdin": None, "stdout": None}
+        original_popen = a.subprocess.Popen
+        def spawn(*args, **kwargs):
+            child = original_popen(*args, **kwargs)
+            pipe_fd["stdin"] = child.stdin.fileno()
+            pipe_fd["stdout"] = child.stdout.fileno()
+            return child
+        def short_write(fd, data):
+            if fd != pipe_fd["stdin"]:
+                return original_write(fd, data)
+            events["writes"] += 1
+            if events["writes"] == 1:
+                raise BlockingIOError()
+            return original_write(fd, data[:min(len(data), 17)])
+        def racing_read(fd, n):
+            if fd != pipe_fd["stdout"]:
+                return original_read(fd, n)
+            events["reads"] += 1
+            if events["reads"] == 1:
+                raise BlockingIOError()
+            return original_read(fd, n)
+        script = "import sys;print(len(sys.stdin.buffer.read()),end='')"
+        with patch.object(a.subprocess, "Popen", side_effect=spawn), \
+             patch.object(a.os, "write", side_effect=short_write), \
+             patch.object(a.os, "read", side_effect=racing_read):
+            self.assertEqual(a._bounded([sys.executable, "-B", "-c", script],
+                                        payload=b"p" * 20_000, timeout=5, max_output=5), b"20000")
+        self.assertGreater(events["writes"], 100)
+        self.assertGreater(events["reads"], 1)
+        with patch.object(a.subprocess, "Popen", side_effect=spawn), \
+             patch.object(a.os, "write", side_effect=lambda fd, data: 0 if fd == pipe_fd["stdin"]
+                          else original_write(fd, data)):
+            with self.assertRaisesRegex(a.AdapterError, "no progress"):
+                a._bounded([sys.executable, "-B", "-c", script],
+                           payload=b"test", timeout=2, max_output=10)
+
     def test_pod_read_checks_uid_and_exact_immutable_image_id(self):
         adapter, fake = make()
         ns = adapter.owner.names[1]

@@ -94,35 +94,64 @@ def _env():
 
 
 def _bounded(argv, *, payload=None, timeout, max_output):
-    """Drain only a capped stdout pipe; stderr discarded, timeout kills group."""
+    """Bounded duplex pipe pump; no shell, output spill or unbounded wait.
+
+    Both pipe ends are nonblocking. Writable/readable readiness is only a hint:
+    interrupted/partial I/O is retried inside the one absolute deadline.
+    """
+    if (not isinstance(argv, (list, tuple)) or not argv or
+            payload is not None and not isinstance(payload, bytes) or
+            type(timeout) not in (int, float) or timeout <= 0 or
+            type(max_output) is not int or max_output < 0):
+        raise AdapterError("Invalid bounded Kubernetes transport input.")
     process = None
     selector = selectors.DefaultSelector()
     output = bytearray()
+    end = time.monotonic() + timeout
     try:
+        if end - time.monotonic() <= 0:
+            raise AdapterError("Bounded Kubernetes operation timed out.")
         process = subprocess.Popen(argv, stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_env(),
                                    start_new_session=True)
+        os.set_blocking(process.stdout.fileno(), False)
         selector.register(process.stdout, selectors.EVENT_READ)
         sent = 0
         if payload is not None:
             os.set_blocking(process.stdin.fileno(), False)
-            selector.register(process.stdin, selectors.EVENT_WRITE)
-        end = time.monotonic() + timeout
+            if payload:
+                selector.register(process.stdin, selectors.EVENT_WRITE)
+            else:
+                process.stdin.close()  # child reading stdin must see EOF
         while selector.get_map():
             remaining = end - time.monotonic()
             if remaining <= 0:
                 raise AdapterError("Bounded Kubernetes operation timed out.")
             for key, _ in selector.select(remaining):
                 if key.fileobj == process.stdin:
+                    remaining = end - time.monotonic()
+                    if remaining <= 0:
+                        raise AdapterError("Bounded Kubernetes operation timed out.")
                     try:
-                        sent += os.write(process.stdin.fileno(), payload[sent:sent + 4096])
+                        written = os.write(process.stdin.fileno(), payload[sent:sent + 4096])
+                    except BlockingIOError:
+                        continue  # writable readiness can race another writer
                     except BrokenPipeError:
                         raise AdapterError("Kubernetes stdin closed before fixture transfer.") from None
+                    if written <= 0:
+                        raise AdapterError("Kubernetes stdin made no progress.")
+                    sent += written
                     if sent == len(payload):
                         selector.unregister(process.stdin)
                         process.stdin.close()
                     continue
-                chunk = os.read(key.fileobj.fileno(), min(4096, max_output + 1 - len(output)))
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise AdapterError("Bounded Kubernetes operation timed out.")
+                try:
+                    chunk = os.read(key.fileobj.fileno(), min(4096, max_output + 1 - len(output)))
+                except BlockingIOError:
+                    continue  # readable readiness can race another reader
                 if chunk:
                     output.extend(chunk)
                     if len(output) > max_output:
@@ -140,7 +169,7 @@ def _bounded(argv, *, payload=None, timeout, max_output):
     finally:
         selector.close()
         if process is not None:
-            # Kill an isolated process group even if kubectl exited but a
+            # Kill an isolated process group even if the child exited but a
             # descendant inherited stdout and kept the pipe open.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
