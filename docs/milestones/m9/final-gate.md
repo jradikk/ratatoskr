@@ -829,6 +829,37 @@ Go race/lint/vet/build/privileged checks passed before deployment; the updated
 synthetic evidence suite passed 125 fake tests. The live VPN profile remains
 absent/SKIPPED and no release was published or signed.
 
+## October 31, 2026 — supplied live VPN, tokenless Germany subset passed
+
+The operator supplied external `openvpn.ovpn`, CA/client certificates, matching
+private key and two-line login file. Private preflight verified certificate
+validity, client key matching and CA verification without printing material.
+The live bundle normalizer staged five fixed-name files under an outside-repo
+0700 directory with 0600 permissions, leaving the originals untouched. No
+IPinfo token was supplied or used; expected country was normalized to **DE**.
+The M1 live lifecycle now uses independent random namespace/owner identifiers,
+a single CREATE-returned UID and UID-preconditioned cleanup, rather than
+name-only adoption/deletion. Offline race and replacement tests passed.
+
+On the existing three-node flannel/no-mesh cluster, the explicitly authorized
+final-gate **direct-config init/iproute live subset** passed: mandatory lifecycle
+preflight/topology, secret creation, direct baseline, gateway readiness, client
+steering, cluster-path preservation, measured MTU, private healthy metric and
+public exit/country check. Tokenless IPinfo returned usable evidence and the
+DE country assertion passed; raw provider/credential logs were suppressed.
+The inner runner exited 0 with status passed, and namespace/Secrets cleanup
+passed. This is NOT the full M8 matrix or the exact original live checklist:
+live failure injection was explicitly SKIPPED; no HA, mesh, alternate CNI,
+WireGuard, provider disruption or complete release acceptance is inferred.
+The prior missing-input skip no longer applies to this supplied-profile subset.
+
+Additional component commits add bounded kernel-measured WireGuard aggregate
+peer/handshake/byte gauges with explicit unavailable sampling, root-UID only
+for the NET_ADMIN programming init (restricted agent wait-init unchanged),
+authenticated writers for agent-owned annotations, and CRI-verified sandbox
+quarantine on failed authorization reads. These component fixes require final
+integrated runtime acceptance; they are not substitutes for those tests.
+
 ## Release blockers / next gate
 
 1. The two flannel/init direct-config cells now distinguish selected from
