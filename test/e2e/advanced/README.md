@@ -102,8 +102,11 @@ replicas are observed, it opens one fresh selected marker TCP connection via
 the fixed, output-discarding `probe_running` command. The runner deletes **only
 the exact chosen fixture gateway Pod** through the Kubernetes UID-preconditioned
 raw DELETE API after rechecking Pod, owner chain and same selected Pod UID.
-Deployment may replace it, but the client's agent config must select a
-*previously healthy surviving replica*, and a second fresh marker TCP
+The exact gateway Pod UID DELETE uses a five-second grace and discards (but
+bounds) the API's potentially full Pod response; it never logs or retries an
+ambiguous deletion. A subsequent owner/status snapshot must prove the chosen
+endpoint gone. Deployment may replace it, but the client's agent config must
+select a *previously healthy surviving replica*, and a second fresh marker TCP
 connection plus direct API/DNS/TLS checks must pass after stable reselection.
 The same synthetic VPN source Pod UID and approved runtime image are checked
 before and after the probes. The old established connection is never claimed

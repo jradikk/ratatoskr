@@ -124,6 +124,39 @@ class HAFixtureAPI(adapter.FixtureAPI):
         except (ValueError, TypeError, KeyError, AttributeError):
             raise adapter.AdapterError("Dynamic gateway Pod UID/owner invalid.") from None
 
+    def delete_chosen_gateway_pod(self, namespace, name, uid):
+        """One UID-preconditioned Pod DELETE; drain but never capture response.
+
+        Kubernetes may return a full Pod (larger than the previous 4 KiB cap).
+        The transport enforces a 1 MiB discard bound and the Lifecycle deadline;
+        a lost/oversize response remains ambiguous, never triggers a retry.
+        """
+        if (namespace != self.owner.names[0] or
+                not isinstance(name, str) or not adapter.GENERATED.fullmatch(name) or
+                not isinstance(uid, str) or not lifecycle.UID.fullmatch(uid)):
+            raise adapter.AdapterError("Chosen gateway Pod delete identity invalid.")
+        self._namespace(namespace)
+        # Recheck owner/status immediately before DELETE as well as at the
+        # caller's preconditioned snapshot: a stale UID cannot be adopted.
+        pod = self.get("pod", name, namespace)
+        if pod["metadata"]["uid"] != uid:
+            raise adapter.AdapterError("Chosen gateway Pod UID changed before DELETE.")
+        options = {"apiVersion": "v1", "kind": "DeleteOptions",
+                   "preconditions": {"uid": uid}, "gracePeriodSeconds": 5,
+                   "propagationPolicy": "Foreground"}
+        payload = json.dumps(options, separators=(",", ":")).encode()
+        argv = ["kubectl", "--context", adapter.CONTEXT, "--request-timeout=10s", "delete",
+                "--raw=/api/v1/namespaces/" + namespace + "/pods/" + name, "-f", "-"]
+        try:
+            result = self.transport(argv, payload=payload, timeout=self._time(),
+                                    max_output=0, discard_output=True, max_discard=1 << 20)
+            if result != b"" or self.owner.clock() >= self.owner.deadline:
+                raise adapter.AdapterError("Chosen gateway Pod delete not confirmed.")
+        except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+            raise
+        except BaseException:
+            raise adapter.AdapterError("Chosen gateway Pod UID DELETE failed or uncertain.") from None
+
     def list_owned_gateway_pods(self, namespace, gateway_uid):
         """Bounded 2-replica variant of the base adapter's one-Pod list."""
         if (namespace != self.owner.names[0] or
@@ -278,21 +311,7 @@ def remove_chosen_gateway_pod(api, owner, gateway_uid, before):
             pod["metadata"].get("deletionTimestamp") or
             pod.get("status", {}).get("podIP") != before["chosen"]):
         raise Blocked("Chosen replica Pod changed before deletion.")
-    options = {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": ep["podUID"]},
-               "propagationPolicy": "Foreground"}
-    raw = api._call(["delete", "--raw=/api/v1/namespaces/" + namespace + "/pods/" + ep["podName"],
-                     "-f", "-"], payload=json.dumps(options, separators=(",", ":")).encode(),
-                    max_output=4096)
-    try:
-        reply = json.loads(raw)
-        if reply.get("kind") not in ("Pod", "Status"):
-            raise ValueError()
-        if reply["kind"] == "Pod" and reply.get("metadata", {}).get("uid") != ep["podUID"]:
-            raise ValueError()
-        if reply["kind"] == "Status" and reply.get("status") != "Success":
-            raise ValueError()
-    except (ValueError, TypeError, KeyError):
-        raise Blocked("Chosen replica UID-conditional delete response unverified.") from None
+    api.delete_chosen_gateway_pod(namespace, ep["podName"], ep["podUID"])
 
 
 def reselected(api, owner, before):

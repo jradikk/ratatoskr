@@ -47,9 +47,8 @@ class FakeFixtureAPI:
         if namespace != GATEWAY:
             raise ValueError()
 
-    def _call(self, args, *, payload=None, max_output=None):
-        self.actions.append((args, payload))
-        return b'{"kind":"Status","status":"Success"}'
+    def delete_chosen_gateway_pod(self, namespace, name, uid):
+        self.actions.append((namespace, name, uid))
 
 
 class HAFixtureTest(unittest.TestCase):
@@ -68,14 +67,99 @@ class HAFixtureTest(unittest.TestCase):
                             "fixture", GATEWAY, "synthetic", CLIENT_NS, "synthetic-client")
         f.remove_chosen_gateway_pod(api, FakeOwner(), GW_UID, before)
         self.assertEqual(len(api.actions), 1)
-        args, payload = api.actions[0]
-        self.assertIn("/pods/synthetic-0", args[1])
-        self.assertEqual(__import__("json").loads(payload)["preconditions"]["uid"],
-                         api.get("pod", "synthetic-0", GATEWAY)["metadata"]["uid"])
+        namespace, name, uid = api.actions[0]
+        self.assertEqual((namespace, name, uid),
+                         (GATEWAY, "synthetic-0", api.get("pod", "synthetic-0", GATEWAY)["metadata"]["uid"]))
         api.frame[("pod", GATEWAY, "synthetic-0")]["metadata"]["uid"] = "changed"
         with self.assertRaises((f.Blocked, h.Blocked)):
             f.remove_chosen_gateway_pod(api, FakeOwner(), GW_UID, before)
         self.assertEqual(len(api.actions), 1)
+
+    def test_real_bounded_delete_discards_large_pod_without_content_or_retry(self):
+        import json
+        token, namespace_uid = "a" * 32, "b" * 32
+        pod_uid = "c" * 32
+        class NamespaceAPI:
+            def get(self, name, timeout):
+                return {"metadata": {"name": name, "uid": namespace_uid,
+                        "labels": {f.lifecycle.LABEL: token}}}
+        owner = f.lifecycle.Lifecycle(NamespaceAPI(), token_factory=lambda: token)
+        owner.deadline = owner.clock() + 60
+        owner.seen_absent = set(owner.names)
+        owner.attempted = set(owner.names)
+        owner.created = {name: namespace_uid for name in owner.names}
+        owner.owned = dict(owner.created)
+        calls = []
+        # Only a fixture-local Python process is run. No kubectl, cluster, or
+        # Secret GET occurs; its large output simulates a Kubernetes Pod body.
+        def transport(argv, **kwargs):
+            calls.append((argv, kwargs))
+            self.assertEqual(argv[4:6], ["delete", "--raw=/api/v1/namespaces/" +
+                             owner.names[0] + "/pods/synthetic-0"])
+            self.assertEqual(kwargs["max_output"], 0)
+            self.assertIs(kwargs["discard_output"], True)
+            self.assertEqual(kwargs["max_discard"], 1 << 20)
+            return f.adapter._bounded(["python3", "-c", "import sys; "
+                "sys.stdin.buffer.read(); sys.stdout.buffer.write(b'private-body' * 2000)"], **kwargs)
+        api = f.HAFixtureAPI(owner, transport=transport)
+        api.get = lambda kind, name, namespace: {"metadata": {"uid": pod_uid}}
+        self.assertIsNone(api.delete_chosen_gateway_pod(owner.names[0], "synthetic-0", pod_uid))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(calls[0][1]["payload"]), {
+            "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": pod_uid},
+            "gracePeriodSeconds": 5, "propagationPolicy": "Foreground"})
+        self.assertLessEqual(calls[0][1]["timeout"], 12)
+        self.assertTrue(api.owner.owned[owner.names[0]] == namespace_uid)
+
+    def test_delete_rejects_oversize_response_foreign_uid_and_name(self):
+        token, namespace_uid = "a" * 32, "b" * 32
+        class NamespaceAPI:
+            def get(self, name, timeout):
+                return {"metadata": {"name": name, "uid": namespace_uid,
+                        "labels": {f.lifecycle.LABEL: token}}}
+        owner = f.lifecycle.Lifecycle(NamespaceAPI(), token_factory=lambda: token)
+        owner.deadline = owner.clock() + 60
+        owner.seen_absent = set(owner.names)
+        owner.attempted = set(owner.names)
+        owner.created = {name: namespace_uid for name in owner.names}
+        owner.owned = dict(owner.created)
+        calls = []
+        def oversize(_argv, **kwargs):
+            calls.append(kwargs)
+            return f.adapter._bounded(["python3", "-c", "import sys; "
+                "sys.stdin.buffer.read(); sys.stdout.buffer.write(b'x' * 1048577)"], **kwargs)
+        api = f.HAFixtureAPI(owner, transport=oversize)
+        api.get = lambda kind, name, namespace: {"metadata": {"uid": "c" * 32}}
+        for namespace, name, uid in ((owner.names[1], "synthetic-0", "c" * 32),
+                                     (owner.names[0], "foreign-pod", "c" * 32),
+                                     (owner.names[0], "synthetic-0", "bad")):
+            with self.assertRaises(f.adapter.AdapterError):
+                api.delete_chosen_gateway_pod(namespace, name, uid)
+        self.assertEqual(len(calls), 0)
+        with self.assertRaises(f.adapter.AdapterError) as error:
+            api.delete_chosen_gateway_pod(owner.names[0], "synthetic-0", "c" * 32)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("xxxxx", str(error.exception))
+
+    def test_delete_blocks_changed_uid_before_transport(self):
+        token, namespace_uid = "a" * 32, "b" * 32
+        class NamespaceAPI:
+            def get(self, name, timeout):
+                return {"metadata": {"name": name, "uid": namespace_uid,
+                        "labels": {f.lifecycle.LABEL: token}}}
+        owner = f.lifecycle.Lifecycle(NamespaceAPI(), token_factory=lambda: token)
+        owner.deadline = owner.clock() + 60
+        owner.seen_absent = set(owner.names)
+        owner.attempted = set(owner.names)
+        owner.created = {name: namespace_uid for name in owner.names}
+        owner.owned = dict(owner.created)
+        from unittest.mock import Mock
+        transport = Mock(return_value=b"")
+        api = f.HAFixtureAPI(owner, transport=transport)
+        api.get = lambda kind, name, namespace: {"metadata": {"uid": "d" * 32}}
+        with self.assertRaises(f.adapter.AdapterError):
+            api.delete_chosen_gateway_pod(owner.names[0], "synthetic-0", "c" * 32)
+        transport.assert_not_called()
 
     def test_removed_client_reselect_is_not_new_traffic_proof(self):
         api = FakeFixtureAPI()
