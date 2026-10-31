@@ -179,98 +179,86 @@ def node_pid(raw):
         raise Blocked("Node host PID invalid.") from None
 
 
-def namespace_path(node_host_pid, sandbox_node_pid, *, readlink=os.readlink, open_fd=os.open, fstat=os.fstat):
-    if (type(node_host_pid) is not int or type(sandbox_node_pid) is not int or
-            not 1 < node_host_pid < 2**31 or not 1 < sandbox_node_pid < 2**31):
-        raise Blocked("Node/sandbox PID invalid.")
-    path = f"/proc/{node_host_pid}/root/proc/{sandbox_node_pid}/ns/net"
-    fd = None
-    try:
-        fd = open_fd(path, os.O_RDONLY | os.O_CLOEXEC)
-        link = readlink(path)
-        info = fstat(fd)
-        match = NS.fullmatch(link)
-        if not match or info.st_ino != int(match.group(1)):
-            raise ValueError()
-        return fd
-    except (OSError, ValueError, TypeError):
-        if fd is not None:
-            os.close(fd)
-        raise Blocked("Selected source nsfs identity cannot be pinned.") from None
+def root_collect(node_host_pid, sandbox_pid, table, source, api_ip, trigger, *,
+                 launcher=subprocess.Popen, clock=time.monotonic):
+    """Fixed sudo helper protocol: READY -> approved trigger -> STOP -> JSON.
 
-
-def capture(argv, trigger, *, timeout=14):
-    """Bounded header-only tcpdump after listening readiness; no pcap retained."""
+    Root opens/pins nsfs itself; caller never traverses root's proc path.
+    A failed/early helper or extra output is never no-egress evidence.
+    """
+    path = os.path.join(os.path.dirname(__file__), "root_capture.py")
+    args = ["sudo", "-n", "/usr/bin/python3", path, str(node_host_pid), str(sandbox_pid),
+            str(table), source, api_ip]
     proc = None
-    sel = selectors.DefaultSelector()
-    out, err = bytearray(), bytearray()
-    end = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()
+    stdout, stderr = bytearray(), bytearray()
+    end = clock() + 32
     try:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, start_new_session=True,
-                                env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ})
+        proc = launcher(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, start_new_session=True,
+                        env={k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ})
         for stream in (proc.stdout, proc.stderr):
             os.set_blocking(stream.fileno(), False)
-            sel.register(stream, selectors.EVENT_READ)
-        ready = False
-        completed = False
-        stop_at = None
-        stopped = False
-        while sel.get_map():
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                raise Blocked("Source SYN capture deadline exceeded.")
-            if completed and not stopped and time.monotonic() >= stop_at:
+            selector.register(stream, selectors.EVENT_READ)
+        ready, sent = False, False
+        while selector.get_map():
+            if clock() >= end:
+                raise Blocked("Root source capture deadline exceeded.")
+            if proc.poll() is not None and not ready:
+                raise Blocked("Root source netns pin or capture readiness failed.")
+            for key, _ in selector.select(min(.1, end-clock())):
                 try:
-                    os.killpg(proc.pid, signal.SIGINT)
-                except ProcessLookupError:
-                    raise Blocked("Source SYN capture exited before bounded completion.") from None
-                stopped = True
-            if proc.poll() is not None and not completed:
-                raise Blocked("Source SYN capture exited before probe readiness.")
-            for key, _ in sel.select(min(remaining, .2)):
-                try:
-                    data = os.read(key.fileobj.fileno(), 1024)
+                    chunk = os.read(key.fileobj.fileno(), 2048)
                 except BlockingIOError:
                     continue
-                if not data:
-                    sel.unregister(key.fileobj)
+                if not chunk:
+                    selector.unregister(key.fileobj)
                     continue
-                target = err if key.fileobj is proc.stderr else out
-                target.extend(data)
-                if len(err) > 2048 or len(out) > 4096:
-                    raise Blocked("Header-only source capture cap exceeded.")
-                if not ready and b"listening on eth0" in err:
-                    ready = True
-            if ready and not completed:
-                # The caller controls only the fixed approved helper probe;
-                # any failure remains a non-pass and the process is reaped.
+                target = stderr if key.fileobj is proc.stderr else stdout
+                target.extend(chunk)
+                if len(stdout) > 86016 or len(stderr) > 1024:
+                    raise Blocked("Root source capture output exceeded cap.")
+            if not ready and stdout:
+                if stdout != b"READY\n":
+                    raise Blocked("Root source capture readiness malformed.")
+                ready = True
                 trigger()
-                completed = True
-                stop_at = time.monotonic() + .5
-        if not ready or not completed or not stopped or proc.poll() not in (0, 130, -signal.SIGINT):
-            raise Blocked("Source SYN capture not started/completed.")
-        return bytes(out)
+                proc.stdin.write(b"STOP\n")
+                proc.stdin.flush()
+                proc.stdin.close()
+                sent = True
+        if not ready or not sent or proc.wait(timeout=max(.001, end-clock())) != 0:
+            raise Blocked("Root source capture did not complete.")
+        raw = bytes(stdout)
+        if not raw.startswith(b"READY\n"):
+            raise Blocked("Root source capture result malformed.")
+        try:
+            result = json.loads(raw[len(b"READY\n"):])
+            if not isinstance(result, dict) or set(result) != {"routeBefore", "ruleBefore", "capture", "routeAfter", "ruleAfter"}:
+                raise ValueError()
+            if any(not isinstance(v, str) for v in result.values()):
+                raise ValueError()
+            return result
+        except (ValueError, UnicodeError, TypeError):
+            raise Blocked("Root source capture result malformed.") from None
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise Blocked("Source SYN capture unavailable.") from None
+        raise Blocked("Root source capture unavailable.") from None
     finally:
-        sel.close()
+        selector.close()
         if proc is not None:
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=2)
+            proc.wait(timeout=2)
+            if proc.stdin:
+                proc.stdin.close()
             proc.stdout.close()
             proc.stderr.close()
 
 
 def prove(api, namespace, uid, image_id, gateway_id, api_ip, *, transport=node_images._bounded,
-          trigger=None, local=local_exec, capture_fn=capture):
+          trigger=None, local=local_exec, collect_fn=root_collect):
     """Require exact UID-bound closed routes and live positive-control capture.
 
     `trigger` is the existing fixed helper `outage-capture` probe; its exit0
@@ -312,39 +300,14 @@ def prove(api, namespace, uid, image_id, gateway_id, api_ip, *, transport=node_i
             raise ValueError()
     except (ValueError, TypeError):
         raise Blocked("Node host PID unavailable.") from None
-    fd = namespace_path(host_pid, pid)
-    try:
-        # nsenter changes network only; ip is read-only and cap/output bounded.
-        # sudo closes inherited FDs, so retain the open FD locally and use
-        # its proc path for nsenter; recheck inode + CRI identity afterward.
-        path = f"/proc/{host_pid}/root/proc/{pid}/ns/net"
-        def same_namespace():
-            try:
-                if os.stat(path).st_ino != os.fstat(fd).st_ino:
-                    raise ValueError()
-            except (OSError, ValueError):
-                raise Blocked("Pinned source netns changed during observation.") from None
-        same_namespace()
-        ns = ["sudo", "-n", "nsenter", "--net=" + path, "--"]
-        table = TABLE_BASE | (gateway_id & 0xffff)
-        route_proof(local(ns + ["/usr/sbin/ip", "-j", "-4", "route", "show", "table", str(table)],
-                          limit=8192), table)
-        rule_proof(local(ns + ["/usr/sbin/ip", "-j", "-4", "rule", "show"], limit=65536), table)
-        recheck()
-        same_namespace()
-        # Fixed BPF: selected destination and known API positive-control only.
-        bpf = ("tcp and src host " + source + " and (dst host " + DEST + " and dst port 8080 or dst host " + api_ip +
-               " and dst port 443) and tcp[tcpflags] & (tcp-syn|tcp-ack) = tcp-syn")
-        command = ns + ["/usr/bin/tcpdump", "-i", "eth0", "-nn", "-l", "-tt", "-s", "96", "-Q", "out", bpf]
-        raw = capture_fn(command, trigger, timeout=14)
-        recheck()
-        same_namespace()
-        capture_proof(raw, source, api_ip)
-        route_proof(local(ns + ["/usr/sbin/ip", "-j", "-4", "route", "show", "table", str(table)],
-                          limit=8192), table)
-        rule_proof(local(ns + ["/usr/sbin/ip", "-j", "-4", "rule", "show"], limit=65536), table)
-        recheck()
-        same_namespace()
-        return True
-    finally:
-        os.close(fd)
+    recheck()
+    table = TABLE_BASE | (gateway_id & 0xffff)
+    result = collect_fn(host_pid, pid, table, source, api_ip, trigger)
+    recheck()
+    for field in ("routeBefore", "routeAfter"):
+        route_proof(result[field].encode("ascii"), table)
+    for field in ("ruleBefore", "ruleAfter"):
+        rule_proof(result[field].encode("ascii"), table)
+    capture_proof(result["capture"].encode("ascii"), source, api_ip)
+    recheck()
+    return True

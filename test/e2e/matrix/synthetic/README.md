@@ -642,3 +642,27 @@ outage still requires private operator orphan remediation.
 
 Offline validation:
 `python3 -m unittest discover -s test/e2e/matrix/synthetic -p 'test_*.py' -q`.
+
+## Root-owned source netns capture when guest proc traversal is denied
+
+The timeout-specific fail-close collector now invokes only the checked-in,
+fixed-argument `root_capture.py` via `sudo -n /usr/bin/python3`. It neither
+changes VM/sudo configuration nor runs in an application Pod. After independent
+Kubernetes Pod UID/image/node/IP and READY CRI sandbox metadata/PID checks, the
+root helper opens `/proc/<node host PID>/root/proc/<sandbox node PID>/ns/net`,
+verifies nsfs `net:[inode]` and `NS_GET_NSTYPE=CLONE_NEWNET`, and keeps the
+file descriptor open throughout fixed, read-only `ip -j` route/rule checks and
+header-only `tcpdump` in that network namespace. The unprivileged caller never
+needs to traverse root's procfs path. The protocol is exactly `READY`, one
+fixed selected helper probe, `STOP`, and one size-capped JSON response; raw
+process errors, packet payloads and capture files are never retained. Before
+and after the root helper, the parent rechecks exact Kubernetes Pod and CRI
+sandbox UID/PID/IP/container identity. Only owned unreachable fallback plus
+marked RPDB selector, captured positive direct-API SYN and **zero** selected
+SYN on source `eth0` can supplement the direct DNS/TLS-preserving timeout.
+Missing passwordless sudo or capture tooling is a hard block; this is not
+authorization to change host policy. A timed-out socket alone never qualifies.
+This root-helper protocol was unit-tested with fake processes only, **not**
+executed against a cluster at authoring time. The selected helper image must
+be rebuilt/imported with the `outage-capture` mode and immutable image ID
+reapproved before any serial final-gate attempt.

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import failclose_capture as f
+import root_capture as root
 
 UID = "a" * 32
 CID = "b" * 64
@@ -80,22 +81,24 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaises(f.Blocked):
                 f.capture_proof(bad, SOURCE, API)
 
-    def test_netns_fd_inode_pinning_or_unavailable_fails_closed(self):
+    def test_root_helper_validates_args_and_pins_netns_type_inode(self):
+        self.assertEqual(root.validated(["321", "123", str(TABLE), SOURCE, API])[:3], (321, 123, TABLE))
+        for bad in (["321", "0", str(TABLE), SOURCE, API], ["321", "123", "10007", SOURCE, API],
+                    ["321", "123", str(TABLE), "10.42.2.5;sh", API]):
+            with self.assertRaises(ValueError):
+                root.validated(bad)
         class Stat:
             st_ino = 713
-        with patch.object(f.os, "close") as close:
-            self.assertEqual(f.namespace_path(20, 30, readlink=lambda path: "net:[713]",
-                          open_fd=lambda path, flags: 70, fstat=lambda fd: Stat()), 70)
-            self.assertEqual(close.call_count, 0)
-            with self.assertRaises(f.Blocked):
-                f.namespace_path(20, 30, readlink=lambda path: "net:[714]",
-                          open_fd=lambda path, flags: 70, fstat=lambda fd: Stat())
-            close.assert_called_once_with(70)
-            with self.assertRaises(f.Blocked):
-                f.namespace_path(20, 30, readlink=lambda path: "mnt:[713]",
-                          open_fd=lambda path, flags: 70, fstat=lambda fd: Stat())
-        with self.assertRaises(f.Blocked):
-            f.namespace_path(0, 30)
+        with patch.object(root.os, "open", return_value=70), patch.object(root.os, "close") as closed, \
+             patch.object(root.os, "readlink", return_value="net:[713]"), \
+             patch.object(root.os, "fstat", return_value=Stat()), \
+             patch.object(root.fcntl, "ioctl", return_value=root.CLONE_NEWNET):
+            self.assertEqual(root.pin_netns(20, 30), 70)
+            closed.assert_not_called()
+            with patch.object(root.fcntl, "ioctl", return_value=0):
+                with self.assertRaises(ValueError):
+                    root.pin_netns(20, 30)
+            closed.assert_called_once_with(70)
 
     def test_proof_exact_fixed_commands_and_pid_uid_rechecks(self):
         class APIReader:
@@ -125,40 +128,26 @@ class CollectorTests(unittest.TestCase):
             if "route" in argv: return route
             if "rule" in argv: return rule
             raise AssertionError("Unexpected host command")
-        def fake_capture(argv, trigger, timeout):
-            seen.append(argv)
-            self.assertIn("src host " + SOURCE, argv[-1])
-            self.assertIn("tcp-syn|tcp-ack", argv[-1])
-            self.assertEqual(argv[argv.index("/usr/bin/tcpdump") + 1:argv.index("/usr/bin/tcpdump") + 4],
-                             ["-i", "eth0", "-nn"])
+        def collect(host, sandbox, table, source, api_ip, trigger):
+            self.assertEqual((host, sandbox, table, source, api_ip), (321, 123, TABLE, SOURCE, API))
             trigger()
-            return b"1.000 IP 10.42.2.5.12345 > 10.43.0.1.443: Flags [S], seq 1\n"
-        class Stat:
-            st_ino = 771
-        with patch.object(f, "namespace_path", return_value=77), \
-             patch.object(f.os, "stat", return_value=Stat()), \
-             patch.object(f.os, "fstat", return_value=Stat()), \
-             patch.object(f.os, "close") as closed:
-            invoked = []
-            self.assertTrue(f.prove(reader, NS, UID, IMAGE, 7, API, transport=transport,
-                                    local=local, capture_fn=fake_capture,
-                                    trigger=lambda: invoked.append(True)))
-            self.assertEqual(invoked, [True])
-            closed.assert_called_once_with(77)
+            return {"routeBefore": route.decode(), "ruleBefore": rule.decode(),
+                    "capture": "1.000 IP 10.42.2.5.12345 > 10.43.0.1.443: Flags [S], seq 1\n",
+                    "routeAfter": route.decode(), "ruleAfter": rule.decode()}
+        invoked = []
+        self.assertTrue(f.prove(reader, NS, UID, IMAGE, 7, API, transport=transport,
+                                local=local, collect_fn=collect,
+                                trigger=lambda: invoked.append(True)))
+        self.assertEqual(invoked, [True])
         self.assertGreaterEqual(reader.calls, 4)
         self.assertTrue(any("inspectp" in argv for argv in seen))
-        self.assertTrue(any("route" in argv for argv in seen))
-        self.assertTrue(any("rule" in argv for argv in seen))
+        self.assertFalse(any("route" in argv or "rule" in argv for argv in seen))
         self.assertTrue(all("sh" not in argv and "-c" not in argv for argv in seen))
         reader = APIReader()
         reader.replace = True
-        with patch.object(f, "namespace_path", return_value=77), \
-             patch.object(f.os, "stat", return_value=Stat()), \
-             patch.object(f.os, "fstat", return_value=Stat()), \
-             patch.object(f.os, "close"):
-            with self.assertRaises(f.Blocked):
-                f.prove(reader, NS, UID, IMAGE, 7, API, transport=transport, local=local,
-                        capture_fn=fake_capture, trigger=lambda: None)
+        with self.assertRaises(f.Blocked):
+            f.prove(reader, NS, UID, IMAGE, 7, API, transport=transport, local=local,
+                    collect_fn=collect, trigger=lambda: None)
 
     def test_proof_missing_api_positive_or_closed_default_never_passes(self):
         class Reader:
@@ -172,17 +161,15 @@ class CollectorTests(unittest.TestCase):
                                     "metric": 4294967295, "table": TABLE}]).encode()
             return json.dumps([{"priority": 10998, "protocol": 186, "table": TABLE,
                                 "fwmark": "0x200000/0xf00000"}]).encode()
-        class Stat:
-            st_ino = 771
-        with patch.object(f, "namespace_path", return_value=77), \
-             patch.object(f.os, "stat", return_value=Stat()), \
-             patch.object(f.os, "fstat", return_value=Stat()), \
-             patch.object(f.os, "close"):
-            with self.assertRaises(f.Blocked):
-                f.prove(Reader(), NS, UID, IMAGE, 7, API, transport=transport, local=local,
-                        trigger=lambda: None, capture_fn=lambda _argv, trigger, **_kw: (trigger(), b"")[1])
+        with self.assertRaises(f.Blocked):
+            f.prove(Reader(), NS, UID, IMAGE, 7, API, transport=transport, local=local,
+                    trigger=lambda: None,
+                    collect_fn=lambda host, sandbox, table, source, api_ip, trigger: {
+                        "routeBefore": local(["route"]).decode(), "ruleBefore": local(["rule"]).decode(),
+                        "capture": "", "routeAfter": local(["route"]).decode(),
+                        "ruleAfter": local(["rule"]).decode()})
 
-    def test_capture_callback_requires_readiness_not_just_timeout(self):
+    def test_root_capture_client_requires_ready_and_bounded_result(self):
         class FakeStream:
             def fileno(self): return 7
             def close(self): pass
@@ -190,6 +177,7 @@ class CollectorTests(unittest.TestCase):
             pid = 12345
             stdout = FakeStream()
             stderr = FakeStream()
+            stdin = FakeStream()
             def poll(self): return 0
             def wait(self, timeout): return 0
         with patch.object(f.subprocess, "Popen", return_value=FakeProc()), \
@@ -198,7 +186,7 @@ class CollectorTests(unittest.TestCase):
             selector.return_value.get_map.return_value = {1: 1}
             callback = []
             with self.assertRaises(f.Blocked):
-                f.capture(["approved"], lambda: callback.append(True), timeout=.3)
+                f.root_collect(321, 123, TABLE, SOURCE, API, lambda: callback.append(True))
             self.assertEqual(callback, [])
 
 
