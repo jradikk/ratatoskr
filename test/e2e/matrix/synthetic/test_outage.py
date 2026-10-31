@@ -197,6 +197,52 @@ class OutageTests(unittest.TestCase):
             o.observe_running_selected(api, owner.names[1], UID, IMAGE, base, "10.43.0.1", diagnosis)
         self.assertEqual(diagnosis, {"category": "api-unavailable"})
 
+    def test_selected_fail_closed_waits_for_agent_and_actual_unreachable(self):
+        class Selected:
+            def __init__(self):
+                self.ready = "true"
+                self.probes = 0
+            def get(self, kind, name, namespace):
+                assert (kind, name) == ("pod", "synthetic-client")
+                return {"metadata": {"uid": UID, "annotations": {o.evidence.PREFIX + "datapath-ready": self.ready}},
+                        "status": {"phase": "Running"}}
+            def probe_running(self, _name, _uid, _image, phase, _ip):
+                assert phase == "outage"
+                self.probes += 1
+                if self.probes == 1:
+                    raise o.adapter.AdapterError("unreachable not yet observed")
+                return True
+        selected = Selected()
+        self.assertIsNone(o.selected_fail_closed(selected, "apps", UID, IMAGE, "10.43.0.1"))
+        self.assertEqual(selected.probes, 0, "readiness pending must precede probe")
+        selected.ready = "pending"
+        owner = Owner()
+        now = [0]
+        owner.clock = lambda: now[0]
+        owner.deadline = 20
+        def sleep(seconds):
+            now[0] += seconds
+        outcome = o.poll(owner, "withdrawn-selected-fail-close", lambda: o.selected_fail_closed(
+            selected, "apps", UID, IMAGE, "10.43.0.1"), seconds=8,
+            clock=owner.clock, sleep=sleep)
+        self.assertEqual(outcome["metadata"]["uid"], UID)
+        self.assertEqual(selected.probes, 2)
+        self.assertLessEqual(now[0], 8)
+        selected.ready = "true"
+        selected.probes = 0
+        now[0] = 0
+        with self.assertRaisesRegex(o.Blocked, "did not converge at withdrawn-selected-fail-close"):
+            o.poll(owner, "withdrawn-selected-fail-close", lambda: o.selected_fail_closed(
+                selected, "apps", UID, IMAGE, "10.43.0.1"), seconds=4,
+                clock=owner.clock, sleep=sleep)
+        self.assertEqual(selected.probes, 0, "ready marker must not qualify for withdrawn state")
+        self.assertEqual(now[0], 4)
+        selected.ready = "pending"
+        selected.get = lambda *_args: {"metadata": {"uid": "replacement", "annotations": {
+            o.evidence.PREFIX + "datapath-ready": "pending"}}, "status": {"phase": "Running"}}
+        with self.assertRaisesRegex(o.Blocked, "identity changed"):
+            o.selected_fail_closed(selected, "apps", UID, IMAGE, "10.43.0.1")
+
     def test_probe_body_failure_preserves_fixed_stage_after_verified_cleanup(self):
         owner = Owner()
         api = API(owner)

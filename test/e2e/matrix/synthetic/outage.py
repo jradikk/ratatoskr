@@ -173,6 +173,29 @@ def marker_ready(api, namespace, uid, image_id):
     return True
 
 
+def selected_fail_closed(api, namespace, uid, image_id, api_ip):
+    """Only observed agent withdrawal AND actual unreachable+direct API qualify.
+
+    The gateway controller can withdraw status before the node agent processes
+    its watch. A pre-withdrawal tunnel timeout is not fail-close evidence.
+    Pending readiness alone is likewise not proof of unreachable routing.
+    """
+    pod = api.get("pod", "synthetic-client", namespace)
+    meta = pod.get("metadata", {})
+    if meta.get("uid") != uid or meta.get("deletionTimestamp"):
+        raise Blocked("Running selected Pod identity changed during outage.")
+    if meta.get("annotations", {}).get(evidence.PREFIX + "datapath-ready") != "pending":
+        return None
+    if pod.get("status", {}).get("phase") != "Running":
+        return None
+    # probe_running only returns True for exit 0 of fixed outage-check, which
+    # requires ENETUNREACH/EHOSTUNREACH for the selected marker destination
+    # AND independently verified direct DNS, TLS and denied Kubernetes API.
+    if api.probe_running("synthetic-client", uid, image_id, "outage", api_ip) is not True:
+        return None
+    return pod
+
+
 def witness_ready(api, namespace, uid, image_id, server_uid, server_image_id):
     pod = api.get("pod", "synthetic-witness", namespace)
     if pod["metadata"].get("uid") != uid:
@@ -300,7 +323,9 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
                 # The running selected Pod had its wait-init exit successfully BEFORE
                 # withdrawal; a newly created outage Pod could remain blocked at init.
                 stage = "withdrawn-selected-fail-close"
-                api.probe_running("synthetic-client", uid, ids["selected"], "outage", str(address))
+                poll(owner, "withdrawn-selected-fail-close", lambda: selected_fail_closed(
+                     api, apps, uid, ids["selected"], str(address)), seconds=85,
+                     clock=clock, sleep=sleep)
                 stage = "outage-still-withdrawn"
                 poll(owner, "outage-still-withdrawn", lambda: gateway_state(api, ns, baseline["gatewayUID"],
                      baseline["gatewayPodUID"], healthy=False, endpoint=endpoint), seconds=8, clock=clock, sleep=sleep)
