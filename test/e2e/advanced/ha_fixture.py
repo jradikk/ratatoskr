@@ -36,6 +36,89 @@ BASE = partial_gateway.BASE
 IMAGE = "ratatoskr-synthetic-client:local"
 
 
+class HAFixtureAPI(adapter.FixtureAPI):
+    """Permit only status-identified, owner-verified synthetic gateway Pod GETs.
+
+    The base adapter intentionally allows only fixed workload Pod names. HA
+    controller Pods have generated names. This read-only exception never adds
+    dynamic CREATE/exec or name-only DELETE authority.
+    """
+
+    def get(self, kind, name, namespace):
+        if kind != "pod" or name in adapter.RESOURCES["pod"]:
+            return super().get(kind, name, namespace)
+        if (namespace != self.owner.names[0] or
+                not isinstance(name, str) or not adapter.GENERATED.fullmatch(name)):
+            raise adapter.AdapterError("Dynamic gateway Pod GET not allowlisted.")
+        self._namespace(namespace)
+        gateway = super().get("egressgateway", "synthetic", namespace)
+        deployment = super().get("deployment", "synthetic", namespace)
+        gateway_uid = gateway.get("metadata", {}).get("uid")
+        if (not lifecycle.UID.fullmatch(gateway_uid or "") or
+                not ha_live.owner(deployment, "EgressGateway", gateway_uid) or
+                gateway.get("metadata", {}).get("deletionTimestamp")):
+            raise adapter.AdapterError("Dynamic gateway Pod owner unavailable.")
+        matching = [e for e in gateway.get("status", {}).get("endpoints", [])
+                    if e.get("podName") == name and e.get("upstreamHealthy") is True]
+        if (len(matching) != 1 or
+                not lifecycle.UID.fullmatch(matching[0].get("podUID", "")) or
+                not re.fullmatch(r"[a-f0-9]{64}", matching[0].get("appliedClientConfigHash", ""))):
+            raise adapter.AdapterError("Dynamic Pod not in current applied Gateway status.")
+        raw = self._call(["get", "pod", name, "--namespace", namespace, "-o", "json"],
+                         max_output=32768)
+        try:
+            pod = json.loads(raw)
+            meta = pod["metadata"]
+            refs = [r for r in meta.get("ownerReferences", [])
+                    if r.get("kind") == "ReplicaSet" and r.get("controller") is True]
+            if (pod.get("kind") != "Pod" or meta.get("name") != name or
+                    meta.get("namespace") != namespace or
+                    meta.get("uid") != matching[0]["podUID"] or
+                    pod.get("status", {}).get("podIP") != matching[0].get("podIP") or
+                    meta.get("deletionTimestamp") or len(refs) != 1 or
+                    not adapter.GENERATED.fullmatch(refs[0].get("name", ""))):
+                raise ValueError()
+            rs = super().get("replicaset", refs[0]["name"], namespace)
+            if (rs.get("metadata", {}).get("uid") != refs[0].get("uid") or
+                    not ha_live.owner(rs, "Deployment", deployment["metadata"]["uid"])):
+                raise ValueError()
+            return pod
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise adapter.AdapterError("Dynamic gateway Pod UID/owner invalid.") from None
+
+    def list_owned_gateway_pods(self, namespace, gateway_uid):
+        """Bounded 2-replica variant of the base adapter's one-Pod list."""
+        if (namespace != self.owner.names[0] or
+                not isinstance(gateway_uid, str) or not lifecycle.UID.fullmatch(gateway_uid)):
+            raise adapter.AdapterError("HA Gateway UID or namespace invalid.")
+        self._namespace(namespace)
+        selector = ("ratatoskr.skaldhall.io/gateway-name=synthetic,"
+                    "ratatoskr.skaldhall.io/gateway-uid=" + gateway_uid)
+        raw = self._call(["get", "pods", "--namespace", namespace, "-l", selector, "-o", "json"],
+                         max_output=32768)
+        try:
+            items = json.loads(raw)
+            pods = items["items"]
+            if items.get("kind") != "List" or not isinstance(pods, list) or len(pods) != 2:
+                raise ValueError()
+            names = set()
+            for pod in pods:
+                meta = pod["metadata"]
+                name = meta["name"]
+                if (pod.get("kind") != "Pod" or name in names or
+                        not adapter.GENERATED.fullmatch(name) or
+                        meta.get("namespace") != namespace or
+                        meta.get("labels", {}).get("ratatoskr.skaldhall.io/gateway-name") != "synthetic" or
+                        meta.get("labels", {}).get("ratatoskr.skaldhall.io/gateway-uid") != gateway_uid or
+                        not lifecycle.UID.fullmatch(meta.get("uid", "")) or
+                        meta.get("deletionTimestamp")):
+                    raise ValueError()
+                names.add(name)
+            return pods
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise adapter.AdapterError("HA Gateway Pod list identity/count invalid.") from None
+
+
 def fixture_manifests(namespace, token, contents):
     """Copy stock synthetic manifests; only change ephemeral server and replicas."""
     objects = prepare.manifests(namespace, "ratatoskr-synthetic-openvpn:local", contents, token)
@@ -188,7 +271,7 @@ def reselected(api, owner, before):
 
 
 def execute(ids, api_ip, *, lifecycle_factory=lifecycle.Lifecycle,
-            adapter_factory=adapter.FixtureAPI, clock=time.monotonic, sleep=time.sleep):
+            adapter_factory=HAFixtureAPI, clock=time.monotonic, sleep=time.sleep):
     if (set(ids) != set(run.COMPONENTS) or
             any(not run.ID_PATTERN.fullmatch(v) for v in ids.values())):
         raise Blocked("Immutable approved image IDs missing.")

@@ -94,6 +94,53 @@ class HAFixtureTest(unittest.TestCase):
         annotations[h.PREFIX + "agent-hash"] = hashlib.sha256(raw.encode()).hexdigest()
         self.assertEqual(f.reselected(api, FakeOwner(), before)["chosen"], B)
 
+    def test_default_adapter_dynamic_pod_get_requires_status_and_owner(self):
+        import json
+        from unittest.mock import Mock
+        api = FakeFixtureAPI()
+        dynamic = f.HAFixtureAPI.__new__(f.HAFixtureAPI)
+        dynamic.owner = FakeOwner()
+        dynamic._namespace = lambda ns: None if ns == GATEWAY else self.fail("foreign namespace")
+        def transport(args, *, max_output=262144, payload=None):
+            if args[0] != "get" or args[1] not in {"pod", "egressgateway", "deployment", "replicaset"}:
+                self.fail("unexpected fixture GET")
+            return json.dumps(api.get(args[1], args[2], GATEWAY)).encode()
+        dynamic._call = Mock(side_effect=transport)
+        self.assertEqual(dynamic.get("pod", "synthetic-0", GATEWAY)["metadata"]["uid"],
+                         api.get("pod", "synthetic-0", GATEWAY)["metadata"]["uid"])
+        self.assertEqual(dynamic.get("pod", "synthetic-1", GATEWAY)["metadata"]["uid"],
+                         api.get("pod", "synthetic-1", GATEWAY)["metadata"]["uid"])
+        self.assertIs(f.execute.__kwdefaults__["adapter_factory"], f.HAFixtureAPI)
+        with self.assertRaises(f.adapter.AdapterError):
+            dynamic.get("pod", "arbitrary", GATEWAY)
+        endpoints = api.get("egressgateway", "synthetic", GATEWAY)["status"]["endpoints"]
+        endpoints[0]["appliedClientConfigHash"] = ""
+        with self.assertRaises(f.adapter.AdapterError):
+            dynamic.get("pod", "synthetic-0", GATEWAY)
+        endpoints[0]["appliedClientConfigHash"] = "a" * 64
+        api.get("replicaset", "synthetic-rs", GATEWAY)["metadata"]["ownerReferences"] = []
+        with self.assertRaises(f.adapter.AdapterError):
+            dynamic.get("pod", "synthetic-0", GATEWAY)
+
+    def test_default_adapter_two_gateway_pod_list_requires_owner_labels(self):
+        import json
+        from unittest.mock import Mock
+        api = FakeFixtureAPI()
+        dynamic = f.HAFixtureAPI.__new__(f.HAFixtureAPI)
+        dynamic.owner = FakeOwner()
+        dynamic._namespace = lambda ns: None if ns == GATEWAY else self.fail("foreign namespace")
+        gateway_pods = [api.get("pod", f"synthetic-{i}", GATEWAY) for i in range(2)]
+        for pod in gateway_pods:
+            pod["kind"] = "Pod"
+            pod["metadata"]["labels"] = {"ratatoskr.skaldhall.io/gateway-name": "synthetic",
+                                         "ratatoskr.skaldhall.io/gateway-uid": GW_UID}
+        dynamic._call = Mock(side_effect=lambda _args, *, max_output=32768: json.dumps(
+            {"kind": "List", "items": gateway_pods}).encode())
+        self.assertEqual(len(dynamic.list_owned_gateway_pods(GATEWAY, GW_UID)), 2)
+        gateway_pods[0]["metadata"]["labels"]["ratatoskr.skaldhall.io/gateway-uid"] = "other"
+        with self.assertRaises(f.adapter.AdapterError):
+            dynamic.list_owned_gateway_pods(GATEWAY, GW_UID)
+
     def test_missing_gate_never_constructs_kube_api(self):
         with patch.object(f.run, "ReadOnlyAPI") as api, redirect_stdout(io.StringIO()):
             result = f.main([], environ={})
