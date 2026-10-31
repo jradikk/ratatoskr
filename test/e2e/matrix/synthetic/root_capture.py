@@ -67,8 +67,11 @@ def collect(host, sandbox, table, source, api, *, clock=time.monotonic):
     capture = None
     try:
         prefix = ["/usr/bin/nsenter", "--net=/proc/self/fd/" + str(fd), "--"]
-        route = prefix + ["/usr/sbin/ip", "-j", "-4", "route", "show", "table", str(table)]
-        rule = prefix + ["/usr/sbin/ip", "-j", "-4", "rule", "show"]
+        # -N forces numeric route/rule protocol IDs. Without it protocol 186
+        # is rendered as the host rt_protos alias `bgp`, which the strict
+        # owner-protocol parser must not infer from an editable name mapping.
+        route = prefix + ["/usr/sbin/ip", "-N", "-j", "-4", "route", "show", "table", str(table)]
+        rule = prefix + ["/usr/sbin/ip", "-N", "-j", "-4", "rule", "show"]
         before_route = bounded(route, fd, timeout=4, limit=8192)
         before_rule = bounded(rule, fd, timeout=4, limit=65536)
         bpf = ("tcp and src host " + source + " and (dst host 10.88.0.1 and dst port 8080 or dst host " + api +

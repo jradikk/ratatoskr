@@ -64,11 +64,13 @@ class CollectorTests(unittest.TestCase):
         self.assertTrue(f.route_proof(json.dumps(closed).encode(), TABLE))
         self.assertTrue(f.rule_proof(json.dumps(rule).encode(), TABLE))
         for bad in ([dict(closed[0], type="unicast")], closed + [dict(closed[0], type="unicast")],
-                    [dict(closed[0], metric=0)], [dict(closed[0], protocol="boot")]):
+                    [dict(closed[0], metric=0)], [dict(closed[0], protocol="bgp")],
+                    [dict(closed[0], protocol="boot")]):
             with self.assertRaises(f.Blocked):
                 f.route_proof(json.dumps(bad).encode(), TABLE)
         for bad in ([dict(rule[0], priority=10999)], [dict(rule[0], fwmark="0x0/0xf00000")],
-                    [dict(rule[0], table=10007)], [dict(rule[0], protocol="boot")]):
+                    [dict(rule[0], table=10007)], [dict(rule[0], protocol="bgp")],
+                    [dict(rule[0], protocol="boot")]):
             with self.assertRaises(f.Blocked):
                 f.rule_proof(json.dumps(bad).encode(), TABLE)
 
