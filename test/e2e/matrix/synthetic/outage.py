@@ -88,6 +88,19 @@ def selected_ready(api, apps, name, uid, image_id, baseline, *, api_ip):
     return pod
 
 
+def marker_ready(api, namespace, uid, image_id):
+    """Only the exact selected Pod netns's UP dummy marker qualifies."""
+    raw = api.exec(namespace, "synthetic-client", uid, "client", "agent-marker",
+                   expected_image_id=image_id)
+    if not isinstance(raw, str) or len(raw) > 4096:
+        raise Blocked("Selected agent marker output invalid.")
+    value = json.loads(raw)
+    if not isinstance(value, list) or len(value) != 1:
+        raise Blocked("Selected agent marker missing.")
+    evidence.assert_agent_marker(value[0])
+    return True
+
+
 def witness_ready(api, namespace, uid, image_id, server_uid, server_image_id):
     pod = api.get("pod", "synthetic-witness", namespace)
     if pod["metadata"].get("uid") != uid:
@@ -154,6 +167,7 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             raise Blocked("Running selected Pod CREATE identity mismatch.")
         poll(owner, "running-selected", lambda: selected_ready(api, apps, "synthetic-client", uid,
              ids["selected"], baseline, api_ip=str(address)), seconds=90, clock=clock, sleep=sleep)
+        marker_ready(api, apps, uid, ids["selected"])
         api.probe_running("synthetic-client", uid, ids["selected"], "healthy", str(address))
         witness_items = [item for item in objects if item["kind"] == "Pod" and
                          item["metadata"].get("name") == "synthetic-witness" and

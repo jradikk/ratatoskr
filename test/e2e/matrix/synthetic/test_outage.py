@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Adversarial fake-only outage orchestration; never invokes kubectl/PKI."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -60,6 +61,11 @@ class API:
         if kind == "pod" and name == "synthetic-client":
             return {"metadata": {"uid": UID}}
         raise AssertionError("Unexpected fake API GET")
+    def exec(self, namespace, name, uid, container, command, *, expected_image_id):
+        assert (namespace, name, uid, container, command) == (self.owner.names[1], "synthetic-client", UID,
+                                                              "client", "agent-marker")
+        return json.dumps([{"ifname": "rtk-ready", "flags": ["UP"],
+                            "linkinfo": {"info_kind": "dummy"}}])
     def probe_running(self, name, uid, _image, phase, _api_ip):
         assert uid == UID
         self.owner.events.append("probe:" + name + ":" + phase)
