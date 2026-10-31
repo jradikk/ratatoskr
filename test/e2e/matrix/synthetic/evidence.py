@@ -280,7 +280,10 @@ def assert_direct_paths(exclusions, dns_ip, api_ip, dns_name, api_code, route, c
 
 
 def assert_fail_close(down, marker_failed, direct_ok):
-    need(down.get("status", {}).get("readyReplicas") == 0 and
+    # The API field is `json:"readyReplicas,omitempty"`: a legitimate zero is
+    # absent in Kubernetes JSON, never necessarily serialized as literal 0.
+    replicas = down.get("status", {}).get("readyReplicas", 0)
+    need(type(replicas) is int and replicas == 0 and
          condition(down, "Ready", "False", down["metadata"]["generation"]) and
          not any(e.get("upstreamHealthy") for e in down.get("status", {}).get("endpoints", [])) and
          marker_failed is True and direct_ok is True, "Selected path did not fail closed with direct cluster paths intact.")

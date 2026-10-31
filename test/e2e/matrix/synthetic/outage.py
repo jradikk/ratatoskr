@@ -54,8 +54,11 @@ def gateway_state(api, namespace, uid, pod_uid, *, healthy, endpoint):
                 matched[0].get("upstreamHealthy") is True):
             return None
     elif not (evidence.condition(gw, "Ready", "False", gw["metadata"]["generation"]) and
-              status.get("readyReplicas") == 0 and not any(item.get("upstreamHealthy") for item in
-                                                             status.get("endpoints", []))):
+              # Go's `json:"readyReplicas,omitempty"` omits legitimate zero.
+              # Reject bools/strings/negatives; never treat a missing Ready=False
+              # condition or a healthy endpoint as withdrawal.
+              type(status.get("readyReplicas", 0)) is int and status.get("readyReplicas", 0) == 0 and
+              not any(item.get("upstreamHealthy") for item in status.get("endpoints", []))):
         return None
     pod = api.list_owned_gateway_pods(namespace, uid)
     if pod["metadata"].get("uid") != pod_uid:

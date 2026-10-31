@@ -134,6 +134,34 @@ class OutageTests(unittest.TestCase):
                 if stage != "exit-projection":
                     self.assertIn("restore", events)
 
+    def test_withdrawal_accepts_omitted_zero_but_not_malformed_or_healthy_status(self):
+        class StatusAPI:
+            def __init__(self):
+                self.status = {"observedGeneration": 4,
+                               "conditions": [{"type": "Ready", "status": "False", "observedGeneration": 4}],
+                               "endpoints": [{"podIP": "10.42.0.5", "upstreamHealthy": False}]}
+            def get(self, *_):
+                return {"metadata": {"uid": UID, "generation": 4}, "status": self.status}
+            def list_owned_gateway_pods(self, *_):
+                return {"metadata": {"uid": UID}}
+        api = StatusAPI()
+        self.assertIsNotNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+        api.status["readyReplicas"] = 0
+        self.assertIsNotNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+        for value in (True, "0", None, -1, 1):
+            with self.subTest(value=value):
+                api.status["readyReplicas"] = value
+                self.assertIsNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+        api.status.pop("readyReplicas")
+        api.status["endpoints"][0]["upstreamHealthy"] = True
+        self.assertIsNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+        api.status["endpoints"][0]["upstreamHealthy"] = False
+        api.status["conditions"][0]["status"] = "True"
+        self.assertIsNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+        api.status["conditions"][0]["status"] = "False"
+        api.status["observedGeneration"] = 3
+        self.assertIsNone(o.gateway_state(api, "ns", UID, UID, healthy=False, endpoint="10.42.0.5"))
+
     def test_uid_gateway_status_never_accepts_stale_or_healthy_outage(self):
         class StatusAPI:
             def get(self, *_):
