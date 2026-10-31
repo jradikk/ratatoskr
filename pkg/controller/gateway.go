@@ -389,6 +389,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		return r.block(ctx, &gw, "RenderFailed", err)
 	}
+	expectedAppliedHash, err := expectedGatewayConfigHash(resources, &gw)
+	if err != nil {
+		return r.block(ctx, &gw, "RenderFailed", err)
+	}
 	for _, obj := range resources {
 		if err := r.apply(ctx, &gw, obj); err != nil {
 			return r.block(ctx, &gw, "ApplyFailed", err)
@@ -442,10 +446,13 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			continue
 		}
 		seenPodIPs[p.Status.PodIP] = true
-		ep := api.GatewayEndpoint{PodName: p.Name, PodIP: p.Status.PodIP}
+		// Status is rebuilt from current managed Pods on every reconcile. The
+		// Pod UID is public even before an ack; the hash remains empty unless this
+		// exact Pod has applied the latest owner-controlled ConfigMap bytes.
+		ep := api.GatewayEndpoint{PodName: p.Name, PodIP: p.Status.PodIP, PodUID: string(p.UID)}
 		if podReady(p) {
 			info, e := r.info(ctx, p.Status.PodIP)
-			if e == nil && info.Ready && net.ParseIP(info.ExitIP) != nil {
+			if e == nil && info.Ready && net.ParseIP(info.ExitIP) != nil && (info.PodUID == "" || info.PodUID == string(p.UID)) {
 				publicIdentityReady := true
 				if gw.Spec.Encryption == "wireguard" {
 					// A public key/certificate from an arbitrary Pod is not a trust
@@ -455,6 +462,9 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 						return r.block(ctx, &gw, "GatewayPodIdentityFailed", e)
 					}
 					publicIdentityReady = managed && validPublishedIdentity(p.Annotations[registrationCAAnnotation], p.Annotations[wireguardKeyAnnotation]) && info.WireguardMTU >= 576
+				}
+				if validGatewayAck(p, info, expectedAppliedHash) {
+					ep.AppliedClientConfigHash = expectedAppliedHash
 				}
 				if info.measured() && publicIdentityReady {
 					// Use the smallest healthy replica budget so a client moved to

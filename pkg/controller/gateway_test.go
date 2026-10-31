@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -385,6 +388,71 @@ func TestGatewayAppliedConfigHashUsesExactRenderedBytes(t *testing.T) {
 		t.Fatal("unowned ConfigMap trusted")
 	}
 }
+func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
+	// Membership acknowledgment is independent of upstream readiness and
+	// measured MTU: stale ack must not starve clients of a healthy fallback.
+	r, gw := fixture(t)
+	gw.Status.GatewayID = 42
+	ctx := context.Background()
+	if err := r.Status().Update(ctx, gw); err != nil {
+		t.Fatal(err)
+	}
+	createOwnedReplicaSet(t, r, gw)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-1", Namespace: gw.Namespace, UID: "pod-uid", Labels: map[string]string{ownerUIDLabel: string(gw.UID), IdentityLabel: gw.Name}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", UID: "rs-uid"}}, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}, Status: corev1.PodStatus{PodIP: "10.42.0.5", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+	if err := r.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	current := gatewayInfo{ExitIP: "198.51.100.9", Ready: true, PodMTU: 1500, GeneveMTU: 1400, UpstreamMTU: 1400, EffectiveMTU: 1400, MSS: 1360, PodUID: string(pod.UID)}
+	r.HTTPClient = &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		data, _ := json.Marshal(current)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
+	})}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}}
+	fetch := func() api.GatewayEndpoint {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		var result api.EgressGateway
+		if err := r.Get(ctx, request.NamespacedName, &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Status.Endpoints) != 1 || !result.Status.Endpoints[0].UpstreamHealthy || result.Status.MTU.EffectiveMTU != 1400 {
+			t.Fatalf("ack unexpectedly changed health or MTU: %+v", result.Status)
+		}
+		return result.Status.Endpoints[0]
+	}
+	ep := fetch()
+	if ep.PodUID != string(pod.UID) || ep.AppliedClientConfigHash != "" {
+		t.Fatalf("ready upstream with no ack not represented independently: %+v", ep)
+	}
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, &cm); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(cm.Data["gateway.json"]))
+	want := hex.EncodeToString(sum[:])
+	current.AppliedClientConfigHash = want
+	ep = fetch()
+	if ep.AppliedClientConfigHash != want {
+		t.Fatalf("current applied hash not acknowledged: %+v", ep)
+	}
+	current.AppliedClientConfigHash = strings.Repeat("b", 64)
+	ep = fetch()
+	if ep.AppliedClientConfigHash != "" {
+		t.Fatal("stale hash persisted")
+	}
+	current.AppliedClientConfigHash = want
+	current.PodUID = "old-pod"
+	ep = fetch()
+	if ep.AppliedClientConfigHash != "" || ep.UpstreamHealthy {
+		t.Fatalf("old Pod identity was trusted: %+v", ep)
+	}
+}
+
 func TestGatewayAckRequiresMatchingPodUIDAndAppliedHash(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "current-pod"}}
