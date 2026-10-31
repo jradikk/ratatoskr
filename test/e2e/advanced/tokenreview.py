@@ -84,7 +84,9 @@ def validate_review(obj, namespace, uid, service_account, *, positive):
             type(obj.get("status")) is dict)
     status = obj["status"]
     if not positive:
-        require(status.get("authenticated") is False)
+        # Kubernetes omits the false zero value (authenticated,omitempty).
+        # Accept only absence or an exact boolean false, never null/0/strings.
+        require("authenticated" not in status or status["authenticated"] is False)
         return
     user = status.get("user")
     require(status.get("authenticated") is True and

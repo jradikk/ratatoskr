@@ -64,6 +64,13 @@ class TokenReviewTest(unittest.TestCase):
                     with contextlib.redirect_stdout(io.StringIO()):
                         self.assertEqual(t.main(["--execute"]), 2)
 
+    def test_negative_review_accepts_omitted_false_only(self):
+        t.validate_review({"kind": "TokenReview", "status": {}}, NS, UID, SA, positive=False)
+        for value in (None, 0, "false", True):
+            with self.subTest(value=value), self.assertRaises(t.Blocked):
+                t.validate_review({"kind": "TokenReview", "status": {"authenticated": value}},
+                                  NS, UID, SA, positive=False)
+
     def test_identity_and_pure_validators_reject_replacement_and_invalid_review(self):
         t.identity(NS, UID, SA, OWNER, GATEWAY)
         t.validate_pod(pod(), NS, UID, SA, OWNER, GATEWAY)
