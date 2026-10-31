@@ -170,6 +170,23 @@ class OperatorFixture:
         self.created[kind] = uid
         return uid
 
+    def get_selected_uid(self):
+        """Bounded metadata-only Pod GET with explicit absent result and no logs."""
+        apps = self.owner.names[1]
+        need(apps in self.owner.owned, "Selected workload namespace not owned.")
+        template = 'jsonpath={.metadata.name}{"\\t"}{.metadata.uid}{"\\t"}{.metadata.labels.ratatoskr\\.skaldhall\\.io/synthetic-lifecycle}'
+        raw = self._call(["get", "pod", CLIENT, "-n", apps, "--ignore-not-found",
+                          "-o", template], output=256)
+        if not raw.strip():
+            return None
+        try:
+            name, uid, token = raw.decode("ascii").rstrip("\n").split("\t")
+            need(name == CLIENT and lifecycle.UID.fullmatch(uid) and token == self.owner.token,
+                 "Selected workload metadata UID or owner label changed.")
+            return uid
+        except (UnicodeError, ValueError, AttributeError):
+            raise Blocked("Selected workload metadata response malformed.") from None
+
     def create_selected(self, source_api, payload):
         """Only one approved long-lived workload; server-returned UID is pinned."""
         apps = self.owner.names[1]
@@ -178,7 +195,7 @@ class OperatorFixture:
             need(payload == selected_pod(self.owner, self.name, api_ip) and
                  source_api._namespace(apps) == apps,
                  "Selected encrypted workload manifest/namespace invalid.")
-            need(source_api.get("pod", CLIENT, apps) is None and "Pod" not in self.attempted,
+            need(self.get_selected_uid() is None and "Pod" not in self.attempted,
                  "Selected workload preexists or CREATE retried.")
         except (KeyError, IndexError, TypeError, AttributeError, adapter.AdapterError):
             raise Blocked("Selected encrypted workload preflight failed.") from None
@@ -188,7 +205,7 @@ class OperatorFixture:
                          output=256)
         uid = created_identity(raw, "Pod", apps, CLIENT)
         try:
-            need(source_api.get("pod", CLIENT, apps)["metadata"].get("uid") == uid,
+            need(self.get_selected_uid() == uid,
                  "Selected workload UID changed on CREATE recheck.")
         except (KeyError, TypeError, AttributeError, adapter.AdapterError):
             raise Blocked("Selected workload UID recheck unavailable.") from None
@@ -201,15 +218,8 @@ class OperatorFixture:
             return
         apps = self.owner.names[1]
         uid = self.created.get("Pod")
-        need(uid is not None and source_api._namespace(apps) == apps,
-             "Selected workload CREATE UID ambiguous; cleanup unverified.")
-        try:
-            observed = source_api.get("pod", CLIENT, apps)
-            need(observed["metadata"].get("uid") == uid and
-                 observed["metadata"].get("labels", {}).get(OWN) == self.owner.token,
-                 "Selected workload UID/ownership changed; no name-only deletion.")
-        except (KeyError, TypeError, AttributeError, adapter.AdapterError):
-            raise Blocked("Selected workload UID recheck failed.") from None
+        need(uid is not None and self.get_selected_uid() == uid,
+             "Selected workload CREATE UID ambiguous or changed; no name-only deletion.")
         options = {"apiVersion": "v1", "kind": "DeleteOptions",
                    "preconditions": {"uid": uid}, "propagationPolicy": "Foreground"}
         self._call(["delete", "--raw=/api/v1/namespaces/" + apps + "/pods/" + CLIENT,
@@ -217,9 +227,11 @@ class OperatorFixture:
         end = min(getattr(self, "cleanup_deadline", self.owner.deadline), self.owner.clock() + 25)
         while self.owner.clock() < end:
             try:
-                if source_api.get("pod", CLIENT, apps) is None:
+                observed = self.get_selected_uid()
+                if observed is None:
                     return
-            except adapter.AdapterError:
+                need(observed == uid, "Selected workload replacement UID appeared during cleanup.")
+            except (adapter.AdapterError, Blocked):
                 raise Blocked("Selected workload UID cleanup GET failed.") from None
             time.sleep(1)
         raise Blocked("Selected workload UID-conditional deletion unverified.")
@@ -347,13 +359,9 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
     if metrics_reader is None:
         metrics_reader = wg_transport.read_metrics
     deadline = min(owner.deadline, clock() + 135)
-    source_identity = source_api.created[("Pod", owner.names[0], SERVER)]
-    need(isinstance(source_identity, dict) and
-         source_identity.get("namespace") == owner.names[0] and
-         source_identity.get("kind") == "Pod" and source_identity.get("name") == SERVER and
-         lifecycle.UID.fullmatch(source_identity.get("uid", "")),
+    source_uid = source_api.created[("Pod", owner.names[0], SERVER)]
+    need(isinstance(source_uid, str) and lifecycle.UID.fullmatch(source_uid),
          "OpenVPN source CREATE-return UID missing.")
-    source_uid = source_identity["uid"]
     step = "source-ready"
     gateway_pod = None
     initial = None

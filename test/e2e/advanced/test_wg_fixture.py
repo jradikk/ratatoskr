@@ -101,7 +101,7 @@ class WireGuardFixtureTest(unittest.TestCase):
                                                        "imageID": IDS["selected"]}]}}
         source_uid = UID
         class Source:
-            created = {("Pod", owner.names[0], w.SERVER): {"kind": "Pod", "namespace": owner.names[0], "name": w.SERVER, "uid": source_uid}}
+            created = {("Pod", owner.names[0], w.SERVER): source_uid}
             def __init__(self): self.deleted = False
             def get(self, kind, name, namespace):
                 if (kind, name) == ("pod", w.SERVER):
