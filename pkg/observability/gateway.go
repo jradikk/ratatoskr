@@ -16,6 +16,11 @@ import (
 // consulting authenticated live kernel state.
 func GatewayHandler(snapshot func() (ready bool, effectiveMTU int)) http.Handler {
 	registry := prometheus.NewRegistry()
+	registerGatewayMetrics(registry, snapshot)
+	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+}
+
+func registerGatewayMetrics(registry *prometheus.Registry, snapshot func() (bool, int)) {
 	registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "ratatoskr_gateway_upstream_healthy",
 		Help: "1 when the gateway has a healthy upstream and applied ready datapath, otherwise 0.",
@@ -36,5 +41,4 @@ func GatewayHandler(snapshot func() (ready bool, effectiveMTU int)) http.Handler
 		}
 		return float64(effectiveMTU)
 	}))
-	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }

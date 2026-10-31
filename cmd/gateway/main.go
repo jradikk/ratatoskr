@@ -31,6 +31,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
+	"github.com/skaldhall/ratatoskr/pkg/wireguard"
 
 	mdns "github.com/miekg/dns"
 )
@@ -323,10 +324,15 @@ func run(ctx context.Context, configPath string) error {
 	// The health API remains on the pod network for probes/controller. Metrics
 	// are deliberately bound to loopback only; do not add a public Service or
 	// NetworkPolicy ingress without an explicit scrape-authentication design.
-	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: observability.GatewayHandler(func() (bool, int) {
+	gatewaySnapshot := func() (bool, int) {
 		s := current.Load().(state)
 		return s.ready, s.effectiveMTU
-	}), ReadHeaderTimeout: 3 * time.Second}
+	}
+	metricsHandler := observability.GatewayHandler(gatewaySnapshot)
+	if cfg.Encryption == "wireguard" {
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, datapath.WireGuardDevice, wireguard.KernelDevice)
+	}
+	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
 	metricsListener, err := net.Listen("tcp4", metrics.Addr)
 	if err != nil {
 		return fmt.Errorf("listen private gateway metrics: %w", err)
