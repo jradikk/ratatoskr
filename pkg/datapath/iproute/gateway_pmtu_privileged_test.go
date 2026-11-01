@@ -13,9 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 func TestPrivilegedGatewayLowCarrierPMTU(t *testing.T) {
@@ -174,5 +175,4 @@ func verifyLowMTUPayloads(t *testing.T, gw, cl *Backend, gatewayNS, clientNS, up
 			t.Fatal("oversized selected UDP escaped in plaintext on client eth0")
 		}
 	}
-	// Verify the explicit minimum is refused without installing a client tunnel.
 }
