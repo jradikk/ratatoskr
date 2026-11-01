@@ -1,5 +1,6 @@
 """Tiny synthetic OCI archives only; no images, credentials or extraction."""
 import copy
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -28,15 +29,34 @@ def descriptor(data, media, platform=None):
     return result
 
 
+def tiny_layer(arch):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        directory = tarfile.TarInfo("app/")
+        directory.type = tarfile.DIRTYPE
+        tar.addfile(directory)
+        file = tarfile.TarInfo("app/.wh.old")  # empty regular OCI whiteout
+        file.size = 0
+        tar.addfile(file, io.BytesIO(b""))
+        file = tarfile.TarInfo("app/" + arch)
+        data = (arch + "-synthetic-layer").encode()
+        file.size = len(data)
+        tar.addfile(file, io.BytesIO(data))
+    return out.getvalue()
+
+
 def blobs_and_entries():
     entries = [("oci-layout", encoded({"imageLayoutVersion": "1.0.0"}))]
     index = {"schemaVersion": 2, "mediaType": oci.IMAGE_INDEX, "manifests": []}
     for arch in ("amd64", "arm64"):
-        layer = (arch + "-synthetic-layer").encode()
-        config = encoded({"os": "linux", "architecture": arch, "config": {"Env": []}})
+        uncompressed = tiny_layer(arch)
+        layer = gzip.compress(uncompressed, mtime=0) if arch == "amd64" else uncompressed
+        media = "application/vnd.oci.image.layer.v1.tar+gzip" if arch == "amd64" else "application/vnd.oci.image.layer.v1.tar"
+        config = encoded({"os": "linux", "architecture": arch, "config": {"Env": []},
+                          "rootfs": {"type": "layers", "diff_ids": ["sha256:" + hashlib.sha256(uncompressed).hexdigest()]}})
         manifest = encoded({"schemaVersion": 2, "mediaType": oci.IMAGE_MANIFEST,
                             "config": descriptor(config, oci.IMAGE_CONFIG),
-                            "layers": [descriptor(layer, "application/vnd.oci.image.layer.v1.tar+gzip")]})
+                            "layers": [descriptor(layer, media)]})
         for blob in (layer, config, manifest):
             entries.append(("blobs/sha256/" + hashlib.sha256(blob).hexdigest(), blob))
         index["manifests"].append(descriptor(manifest, oci.IMAGE_MANIFEST, arch))
@@ -142,6 +162,7 @@ class ArchiveTests(unittest.TestCase):
         base = blobs_and_entries()
         for config_override in ({"os": "linux", "architecture": "arm64"}, {"os": "windows", "architecture": "amd64"}):
             changed = copy.deepcopy(base)
+            config_override["rootfs"] = json.loads(changed[2][1])["rootfs"]
             config = encoded(config_override)
             original_manifest = json.loads(changed[3][1])
             changed[2] = ("blobs/sha256/" + hashlib.sha256(config).hexdigest(), config)
@@ -186,6 +207,86 @@ class ArchiveTests(unittest.TestCase):
         path.write_bytes(raw)
         with path.open("rb") as f, self.assertRaises(oci.Rejected):
             oci.verify(f)
+
+    def test_layer_diffid_and_rootfs_cardinality(self):
+        base = blobs_and_entries()
+        for mut in (lambda c: c["rootfs"]["diff_ids"].__setitem__(0, "sha256:" + "0" * 64),
+                    lambda c: c["rootfs"]["diff_ids"].clear(),
+                    lambda c: c["rootfs"].update(type="unknown"),
+                    lambda c: c.pop("rootfs")):
+            changed = copy.deepcopy(base)
+            config = json.loads(changed[2][1])
+            mut(config)
+            data = encoded(config)
+            changed[2] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+            manifest = json.loads(changed[3][1])
+            manifest["config"] = descriptor(data, oci.IMAGE_CONFIG)
+            data = encoded(manifest)
+            changed[3] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+            index = json.loads(changed[-1][1])
+            index["manifests"][0] = descriptor(data, oci.IMAGE_MANIFEST, "amd64")
+            changed[-1] = ("index.json", encoded(index))
+            self.check(changed)
+
+    def test_digest_valid_malformed_layer_and_unsupported_zstd(self):
+        for layer in (b"valid-hash-but-not-a-tar", gzip.compress(b"not-a-tar", mtime=0)):
+            changed = copy.deepcopy(blobs_and_entries())
+            changed[1] = ("blobs/sha256/" + hashlib.sha256(layer).hexdigest(), layer)
+            manifest = json.loads(changed[3][1])
+            manifest["layers"][0] = descriptor(layer, "application/vnd.oci.image.layer.v1.tar+gzip")
+            data = encoded(manifest)
+            changed[3] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+            index = json.loads(changed[-1][1])
+            index["manifests"][0] = descriptor(data, oci.IMAGE_MANIFEST, "amd64")
+            changed[-1] = ("index.json", encoded(index))
+            self.check(changed)
+        changed = copy.deepcopy(blobs_and_entries())
+        manifest = json.loads(changed[3][1])
+        manifest["layers"][0]["mediaType"] = "application/vnd.oci.image.layer.v1.tar+zstd"
+        data = encoded(manifest)
+        changed[3] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+        index = json.loads(changed[-1][1])
+        index["manifests"][0] = descriptor(data, oci.IMAGE_MANIFEST, "amd64")
+        changed[-1] = ("index.json", encoded(index))
+        self.check(changed)
+
+    def test_layer_unsafe_paths_links_duplicates_and_limits(self):
+        def layer(entries):
+            out = io.BytesIO()
+            with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+                for name, kind in entries:
+                    item = tarfile.TarInfo(name)
+                    item.type = kind
+                    if kind == tarfile.SYMTYPE:
+                        item.linkname = "../escape"
+                    tar.addfile(item, io.BytesIO(b"") if item.isfile() else None)
+            return out.getvalue()
+        for members in ([ ("../escape", tarfile.REGTYPE) ],
+                        [ ("/absolute", tarfile.REGTYPE) ],
+                        [ ("app/dup", tarfile.REGTYPE), ("app/dup", tarfile.REGTYPE) ],
+                        [ ("app/link", tarfile.SYMTYPE) ],
+                        [ ("app/parent", tarfile.DIRTYPE), ("app/parent", tarfile.REGTYPE) ]):
+            changed = copy.deepcopy(blobs_and_entries())
+            raw = layer(members)
+            layer_blob = gzip.compress(raw, mtime=0)
+            changed[1] = ("blobs/sha256/" + hashlib.sha256(layer_blob).hexdigest(), layer_blob)
+            config = json.loads(changed[2][1])
+            config["rootfs"]["diff_ids"][0] = "sha256:" + hashlib.sha256(raw).hexdigest()
+            data = encoded(config)
+            changed[2] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+            manifest = json.loads(changed[3][1])
+            manifest["config"] = descriptor(data, oci.IMAGE_CONFIG)
+            manifest["layers"][0] = descriptor(layer_blob, "application/vnd.oci.image.layer.v1.tar+gzip")
+            data = encoded(manifest)
+            changed[3] = ("blobs/sha256/" + hashlib.sha256(data).hexdigest(), data)
+            index = json.loads(changed[-1][1])
+            index["manifests"][0] = descriptor(data, oci.IMAGE_MANIFEST, "amd64")
+            changed[-1] = ("index.json", encoded(index))
+            self.check(changed)
+        with patch.object(oci, "MAX_EXPANDED_LAYER", 100):
+            self.check(blobs_and_entries())
+        with patch.object(oci, "MAX_LAYER_MEMBERS", 2):
+            self.check(blobs_and_entries())
 
     def test_limits_no_write_or_extract(self):
         base = blobs_and_entries()

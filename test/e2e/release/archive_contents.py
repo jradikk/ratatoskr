@@ -4,8 +4,8 @@ Only one separately supplied regular, single-link tar FD is read. It validates
 a conservative two-platform OCI image layout; external SBOM/provenance and
 cryptographic signature verification remain distinct release gates.
 """
+import gzip
 import hashlib
-import io
 import json
 import os
 import re
@@ -18,8 +18,11 @@ IMAGE_INDEX = "application/vnd.oci.image.index.v1+json"
 IMAGE_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 IMAGE_CONFIG = "application/vnd.oci.image.config.v1+json"
 LAYERS = {"application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip",
-          "application/vnd.oci.image.layer.v1.tar+zstd", "application/vnd.oci.image.layer.nondistributable.v1.tar",
+          "application/vnd.oci.image.layer.nondistributable.v1.tar",
           "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip"}
+MAX_EXPANDED_LAYER = 1 << 30
+MAX_EXPANDED_TOTAL = 4 << 30
+MAX_LAYER_MEMBERS = 4096
 ARCHES = frozenset(("amd64", "arm64"))
 MAX_MEMBERS = 4096
 MAX_SMALL = 64 << 20
@@ -112,6 +115,94 @@ def _headers(fileobj, size):
     raise Rejected("OCI tar termination missing")
 
 
+
+class _Slice:
+    """Read only one compressed blob's byte span from the already-open FD."""
+    def __init__(self, source, offset, length):
+        self.source, self.offset, self.length, self.position = source, offset, length, 0
+
+    def read(self, size=-1):
+        size = self.length - self.position if size < 0 else min(size, self.length - self.position)
+        if size <= 0:
+            return b""
+        self.source.seek(self.offset + self.position)
+        chunk = self.source.read(size)
+        self.position += len(chunk)
+        return chunk
+
+
+def _layer(source, offset, length, media, *, remaining, member_budget):
+    """Hash bounded uncompressed tar bytes while checking every layer entry."""
+    compressed = _Slice(source, offset, length)
+    stream = gzip.GzipFile(fileobj=compressed, mode="rb") if media.endswith("+gzip") else compressed
+    digest = hashlib.sha256()
+    expanded = 0
+    seen = set()
+    count = 0
+
+    def take(size):
+        nonlocal expanded
+        if size < 0 or size > MAX_EXPANDED_LAYER - expanded or size > remaining - expanded:
+            raise Rejected("expanded OCI layer exceeds limit")
+        chunk = stream.read(size)
+        if len(chunk) != size:
+            raise Rejected("OCI layer truncated")
+        expanded += size
+        digest.update(chunk)
+        return chunk
+
+    try:
+        while True:
+            header = take(512)
+            if not any(header):
+                if not any(take(512)):
+                    # Consume all remaining decompressed padding under bounds;
+                    # gzip also checks its own CRC and complete trailer here.
+                    while block := stream.read(min(1 << 20, MAX_EXPANDED_LAYER - expanded + 1,
+                                                   remaining - expanded + 1)):
+                        if expanded + len(block) > min(MAX_EXPANDED_LAYER, remaining) or any(block):
+                            raise Rejected("OCI layer has nonzero trailing bytes or exceeds bound")
+                        digest.update(block)
+                        expanded += len(block)
+                    if not media.endswith("+gzip") and compressed.position != length:
+                        raise Rejected("OCI layer contains unread bytes")
+                    return digest.hexdigest(), expanded, count
+                raise Rejected("OCI layer missing double-zero termination")
+            if (count >= member_budget or count >= MAX_LAYER_MEMBERS or
+                    header[156:157] not in (b"0", b"\x00", b"5") or
+                    header[257:263] != b"ustar\x00" or header[263:265] != b"00" or
+                    any(header[345:500]) or any(header[157:257])):
+                raise Rejected("OCI layer extended, link or unsupported tar header")
+            try:
+                checksum = int(header[148:156].strip(b"\x00 "), 8)
+                size = int(header[124:136].strip(b"\x00 "), 8)
+                name = header[:100].split(b"\x00", 1)[0].decode("ascii")
+            except (UnicodeError, ValueError):
+                raise Rejected("OCI layer header malformed") from None
+            directory = header[156:157] == b"5"
+            canonical = name[:-1] if directory and name.endswith("/") else name
+            if (checksum != sum(header[:148]) + sum(b"        ") + sum(header[156:]) or
+                    not canonical or len(name) > 100 or canonical.startswith("/") or
+                    "\\" in canonical or any(part in ("", ".", "..") for part in canonical.split("/")) or
+                    canonical in seen or directory and size != 0):
+                raise Rejected("OCI layer path or header unsafe")
+            seen.add(canonical)
+            count += 1
+            # Empty regular files, including overlay .wh.* whiteouts, are valid.
+            payload = size + (-size % 512)
+            while payload:
+                chunk = min(payload, 1 << 20)
+                take(chunk)
+                payload -= chunk
+    except Rejected:
+        raise
+    except (OSError, EOFError, gzip.BadGzipFile):
+        raise Rejected("OCI layer gzip or tar stream malformed") from None
+    finally:
+        if media.endswith("+gzip"):
+            stream.close()
+
+
 def verify(fileobj):
     """Return structural/digest verification only; never attest a release.
 
@@ -127,7 +218,7 @@ def verify(fileobj):
             raise Rejected("archive must be nonempty single-link regular file within bound")
         expected_names = _headers(fileobj, before.st_size)
         fileobj.seek(0)
-        members, blobs = {}, {}
+        members, blobs, offsets = {}, {}, {}
         total = 0
         try:
             with tarfile.open(fileobj=fileobj, mode="r:") as archive:
@@ -164,6 +255,7 @@ def verify(fileobj):
                     if read != member.size:
                         raise Rejected("OCI member truncated")
                     members[name] = (read, h.hexdigest(), bytes(small) if small is not None else None)
+                    offsets[name] = member.offset_data
                     if BLOB.fullmatch(name):
                         if h.hexdigest() != name.rsplit("/", 1)[1]:
                             raise Rejected("OCI blob path digest differs from bytes")
@@ -188,6 +280,7 @@ def verify(fileobj):
                 len(index["manifests"]) != 2 or set(index) != {"schemaVersion", "mediaType", "manifests"}):
             raise Rejected("OCI index schema or manifest count unsupported")
         seen, referenced = set(), set()
+        expanded_total, layer_count = 0, 0
         def blob(desc, media, *, platform=False):
             path = _descriptor(desc, media, platform=platform)
             if path not in blobs or blobs[path][0] != desc["size"]:
@@ -211,10 +304,33 @@ def verify(fileobj):
             config = _json(blob(manifest["config"], {IMAGE_CONFIG}))
             if config.get("os") != "linux" or config.get("architecture") != architecture:
                 raise Rejected("OCI image config platform differs from descriptor")
-            for layer in manifest["layers"]:
+            rootfs = config.get("rootfs")
+            if (type(rootfs) is not dict or set(rootfs) != {"type", "diff_ids"} or
+                    rootfs["type"] != "layers" or type(rootfs["diff_ids"]) is not list or
+                    len(rootfs["diff_ids"]) != len(manifest["layers"]) or
+                    any(type(d) is not str or not d.startswith("sha256:") or
+                        not HASH.fullmatch(d[7:]) for d in rootfs["diff_ids"])):
+                raise Rejected("OCI config rootfs layer diffIDs missing or malformed")
+            for layer, diff_id in zip(manifest["layers"], rootfs["diff_ids"]):
+                path = _descriptor(layer, LAYERS)
                 blob(layer, LAYERS)
+                if path not in members:
+                    raise Rejected("OCI layer blob missing")
+                member_offset = offsets[path]
+                uncompressed, used, count = _layer(fileobj, member_offset, layer["size"],
+                    layer["mediaType"], remaining=MAX_EXPANDED_TOTAL - expanded_total,
+                    member_budget=MAX_LAYER_MEMBERS - layer_count)
+                expanded_total += used
+                layer_count += count
+                if uncompressed != diff_id[7:]:
+                    raise Rejected("OCI layer bytes do not match config rootfs diffID")
         if seen != ARCHES or referenced != set(blobs):
             raise Rejected("OCI platform missing or unreferenced blob present")
+        final = os.fstat(fileobj.fileno())
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns,
+            before.st_nlink) != (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns,
+                                final.st_ctime_ns, final.st_nlink):
+            raise Rejected("OCI archive changed during layer verification")
         return {"contentVerified": True, "signatureVerified": False, "releaseReady": False,
                 "platforms": ("linux/amd64", "linux/arm64"), "blobCount": len(blobs)}
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:

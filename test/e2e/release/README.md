@@ -85,8 +85,24 @@ platform, and every blob must be referenced. Extra attestation manifests with
 those need a separate reviewed policy. If your builder emits Docker mediaTypes,
 compressed outer archives, root directories, embedded attestations or other
 extensions, the strict validator blocks pending review rather than declaring
-them verified. It does not inspect config environment or layer contents and
-must not log those bytes. Its result reports `contentVerified: true` for this
+them verified. It does not inspect config environment values or log layer
+contents. Layer validation accepts only uncompressed or gzip-compressed ustar
+tar streams. It streams decompression with a 1 GiB
+expanded limit per layer, 4 GiB expanded limit across both platforms, and
+4,096 normalized regular-file/directory entries total. Zero-byte regular
+files (including OCI `.wh.*` whiteouts) and empty directories are allowed;
+absolute/traversal/backslash names, duplicate paths, links, devices,
+GNU/PAX/sparse extensions and nonzero trailing data are rejected. Every
+uncompressed layer SHA-256 must equal the corresponding config
+`rootfs.diff_ids` entry in manifest order (`rootfs.type=layers`, exact count).
+Compressed blob SHA-256 remains independently checked. zstd layers are
+explicitly refused because no bounded reviewed parser is installed. This
+first conservative policy may reject legitimate distroless images with
+symlinks, directories encoded using extensions, or extra attestations; such
+archives require a separate reviewed policy rather than an unverified pass.
+No layer is extracted, executed or logged.
+
+Its result reports `contentVerified: true` for this
 bounded layout only, `signatureVerified: false`, `releaseReady: false`.
 
 Local, cluster-free tests: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest
