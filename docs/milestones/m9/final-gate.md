@@ -437,6 +437,22 @@ Chart packaging/security checks also passed. No archive was extracted or staged;
 no signature or trusted build-provenance verification is claimed. Runtime
 compatibility approvals, Linux 5.10 resources and plaintext ingress remain open.
 
+## Continued release goal — sanitized failure-transition Events
+
+At `65a33ac`, controller reconcile failure reporting uses fixed authored reasons
+and public messages instead of underlying error text in Events, status conditions
+and logs. Unknown reason inputs map to a generic category. Warning Events emit
+only after successful status persistence for a new failure transition; identical
+resyncs do not produce additional Events. Tests cover changed reasons, recovery
+followed by failure, private-text exclusion, failed status writes and ordinary
+pending health behavior. No runtime resource or privilege changes were made.
+
+Full Go race/vet/lint/build and privileged checks passed alongside 346 Python
+tests. This is component validation; the updated controller image has not been
+runtime-deployed in this slice. It does not complete all failure Events or the
+full observability gate. Remaining compatibility approvals, Linux 5.10 resources,
+plaintext ingress and trusted release artifact verification are still open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
