@@ -321,6 +321,21 @@ resource/module preflight and a restoration plan. Linux 5.10 and the remaining
 mandatory release gates are still outstanding; no compatibility pass is inferred
 from this new runner or its fake tests.
 
+## Continued release goal — non-certifying compatibility applicability
+
+At `934915c`, a pure applicability contract preserves all 96 configuration
+identities per fake/live mode. The 24 eBPF-plus-WireGuard combinations require
+explicit refusal evidence; the other 72 are traffic-evidence candidates, not
+verified compatible configurations. Scenario applicability follows the declared
+mode and driver/datapath/encryption constraints. Every decision explicitly
+returns accepted=false and does not evaluate or manufacture runtime evidence.
+
+All 23 offline matrix tests, static inventory checks and diff checks passed.
+No runner, coverage status, cluster topology or production setting was changed.
+The existing flannel cluster remains preserved pending explicit approval for a
+serial Calico replacement/run/restoration procedure. Baseline Linux 5.10 and
+all outstanding release acceptance requirements remain open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
