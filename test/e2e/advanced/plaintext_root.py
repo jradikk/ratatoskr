@@ -62,7 +62,7 @@ def pin(host, pid):
 def run(argv, fd, *, limit=HEX_NFT, timeout=4):
     result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, timeout=timeout, check=False,
-                            pass_fds=(fd,), env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+                            pass_fds=(fd,) if fd >= 0 else (), env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
     if result.returncode or len(result.stdout) > limit:
         raise ValueError()
     return result.stdout

@@ -135,6 +135,14 @@ class DenialTests(unittest.TestCase):
         with self.assertRaises(d.Blocked):
             d.sandbox_id(json.dumps(listing).encode(), "f" * 32, "apps", "synthetic-client")
 
+    def test_already_entered_sender_does_not_pass_invalid_fd(self):
+        import subprocess
+        result = r.run([sys.executable, "-c", "pass"], -1, limit=0, timeout=2)
+        self.assertEqual(result, b"")
+        with patch.object(r.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"")) as mocked:
+            r.run(["fixed-command"], 9, limit=0, timeout=2)
+            self.assertEqual(mocked.call_args.kwargs["pass_fds"], (9,))
+
     def test_root_fixed_args_frame_and_no_dynamic_command(self):
         self.assertEqual(r.validated(["321", "123", "322", "124", SOURCE, GATEWAY, "7"]),
                          (321, 123, 322, 124, SOURCE, GATEWAY, 7))
