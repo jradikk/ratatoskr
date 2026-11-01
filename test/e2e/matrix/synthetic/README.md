@@ -689,3 +689,38 @@ the same approved identity through **all** paths, verify actual CNI and release
 preflight before writes, and separately authorize the disposable fixture. No
 CNI/cluster creation or destruction, release change, or coverage update occurs
 in this incremental plumbing change.
+
+## Separately gated existing-Calico healthy-only synthetic subset
+
+`calico_healthy.py` is a **standalone** partial acceptance path, not dispatched
+by `run.py`, CI, the M8 matrix, or any release command. It defaults to SKIPPED
+with no API, Docker, credential or filesystem activity. An operator must first
+approve an **already-existing** Calico/no-mesh three-node cluster and an aligned
+agent/iproute development release with exact immutable runtime image IDs. This
+runner does not install a CNI, create/delete a cluster, roll a release, change
+Helm values, or make an unsupported mesh/init/WireGuard/outage claim.
+
+Only on that already-approved context, invoke explicitly:
+
+```sh
+RATATOSKR_E2E_FINAL_GATE=1 RATATOSKR_E2E_CALICO_HEALTHY=1 \
+  EXPECTED_CONTROLLER_IMAGE_ID=... EXPECTED_WEBHOOK_IMAGE_ID=... \
+  EXPECTED_AGENT_IMAGE_ID=... EXPECTED_GATEWAY_IMAGE_ID=... \
+  EXPECTED_PLUGIN_IMAGE_ID=... EXPECTED_SERVER_IMAGE_ID=... \
+  EXPECTED_TOOLS_IMAGE_ID=... EXPECTED_WITNESS_IMAGE_ID=... \
+  EXPECTED_SELECTED_IMAGE_ID=... \
+  python3 test/e2e/matrix/synthetic/calico_healthy.py --execute-calico-healthy
+```
+
+Use real parent-approved immutable IDs, not placeholders. The fixed Calico
+context, exact Ready node names/control-plane role, kube-system testenv
+`variant=calico` and `mesh=none`, webhook/release mode, image IDs on **all three**
+Calico nodes, controller's fixture image/probe references, and Kubernetes
+Service IP are checked before any fixture write. The only mutation is the
+existing bounded `partial_gateway` synthetic VPN/selected Pod fixture, whose
+owner creates fresh unique namespaces and UID-conditionally cleans them and its
+private PKI. An unsafe/ambiguous cleanup is FAILED, never a pass. Successful
+scoped healthy traffic and verified cleanup return **4 / INCOMPLETE**: no
+outage/fail-close or full CNI/mesh matrix acceptance is inferred. A separate
+approved environment and user go/no-go are needed before provisioning or
+replacing any existing cluster. `coverage.json` remains unchanged.

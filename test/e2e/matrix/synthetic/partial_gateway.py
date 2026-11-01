@@ -288,8 +288,11 @@ def healthy_selected(api, owner, ids, created, baseline, api_ip, *, clock=time.m
 
 
 def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapter.FixtureAPI,
-            observer=observe, selected_observer=healthy_selected, api_ip=None):
-    """Only call after triple-opt-in preflight+node CRI and fourth CLI gate."""
+            observer=observe, selected_observer=healthy_selected, api_ip=None,
+            environment=run.synthetic_environment.FLANNEL):
+    """Only call after explicit parent preflight+node CRI and healthy CLI gate."""
+    if type(environment) is not run.synthetic_environment.Environment:
+        raise Blocked("Partial Gateway environment identity invalid before mutation.")
     if not isinstance(ids, dict) or set(ids) != set(run.COMPONENTS):
         raise Blocked("Nine immutable expected image IDs required.")
     for value in ids.values():
@@ -303,8 +306,15 @@ def execute(ids, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=adapt
             raise ValueError()
     except (TypeError, ValueError):
         raise Blocked("Preflight API ClusterIP invalid before mutation.") from None
-    # `with` owns cleanup even on Secret CREATE timeout or failed observation.
-    with lifecycle_factory() as owner:
+    # The default flannel path preserves existing fake factory signatures.
+    # Calico requires an environment-aware owner before any fixture operation.
+    factory_args = {} if environment == run.synthetic_environment.FLANNEL else {"environment": environment}
+    with lifecycle_factory(**factory_args) as owner:
+        api = getattr(owner, "api", None)
+        if (getattr(owner, "environment", run.synthetic_environment.FLANNEL) != environment or
+                getattr(api, "environment", run.synthetic_environment.FLANNEL) != environment or
+                (environment != run.synthetic_environment.FLANNEL and api is None)):
+            raise Blocked("Partial Gateway owner/API context mismatch before mutation.")
         owner.create_namespaces()
         owner.generate_pki()
         api = adapter_factory(owner)
