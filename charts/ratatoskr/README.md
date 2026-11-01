@@ -19,11 +19,19 @@ gateway namespace. Verify the six component images (`controller`, `webhook`,
 and tag before installing. Do not put VPN profiles, keys or credentials in
 Helm values or chart files.
 
+Create a values file with your actual Service CIDRs and CRI socket path, then
+install a published version:
+
 ```sh
-helm lint charts/ratatoskr --strict
-helm upgrade --install ratatoskr charts/ratatoskr \
-  --namespace ratatoskr-system --create-namespace --wait
+helm upgrade --install ratatoskr oci://ghcr.io/jradikk/charts/ratatoskr \
+  --version 0.1.0 --values ratatoskr-values.yaml \
+  --namespace ratatoskr-system --create-namespace --wait --timeout 5m
 ```
+
+The [project quickstart](../../README.md#install-with-helm) walks through the
+values file, VPN Secret, gateway, namespace authorization, and workload setup.
+For an offline/mirrored chart, substitute its archive or local chart directory
+for the OCI reference. Use a version available in the registry.
 
 The default image registry is `docker.io/jradikk`; the default tag is the chart
 `appVersion` (`0.1.0`). Use `image.registry`, `image.tag` and

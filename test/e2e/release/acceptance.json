@@ -63,7 +63,7 @@
         "test/evidence/history/runtime-validation.md",
         "pkg/dns/forward_wire_test.go"
       ],
-      "remaining": "Local UDP/TCP split forwarding and external SERVFAIL passed. Runtime upstream0 binding and supported CNI/mesh configurations remain unverified."
+      "remaining": "UDP/TCP split forwarding and upstream0-bound external DNS passed component tests. Verify DNS behavior across the supported runtime/CNI/mesh configurations."
     },
     {
       "id": "payload-integrity",
@@ -226,7 +226,7 @@
       "status": "OPEN",
       "requirement": "Real alternative CNI/mesh gateway/client fixture and cross-node traffic; enumerating is not implementing",
       "evidence": [],
-      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+      "remaining": "Scoped flannel and Calico healthy/outage tests passed. Verify Cilium, Cilium encryption, sidecar/ambient mesh, and the required supported configuration combinations against the candidate."
     },
     {
       "id": "linux-5-10-baseline",

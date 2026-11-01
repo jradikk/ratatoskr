@@ -57,7 +57,7 @@ def check_agent(docs, socket, datapath, dev=False):
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
     assert container["image"] == (
-        "ghcr.io/skaldhall/ratatoskr-agent:dev" if dev else
+        "docker.io/jradikk/ratatoskr-agent:dev" if dev else
         "docker.io/jradikk/ratatoskr-agent:0.1.0")
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
@@ -144,7 +144,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                                 ("DaemonSet", "agent")):
         if (workload, "ratatoskr-" + component) in docs:
             image = docs[workload, "ratatoskr-" + component]["spec"]["template"]["spec"]["containers"][0]["image"]
-            expected = ("ghcr.io/skaldhall/ratatoskr-" + component + ":dev" if dev else
+            expected = ("docker.io/jradikk/ratatoskr-" + component + ":dev" if dev else
                         "docker.io/jradikk/ratatoskr-" + component + ":0.1.0")
             assert image == expected, image
     if driver == "agent":
@@ -232,7 +232,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                  "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP", "GATEWAY_UPSTREAM_PROBE_URL"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"] == (
-        "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev" if dev else
+        "docker.io/jradikk/ratatoskr-upstream-openvpn:dev" if dev else
         "docker.io/jradikk/ratatoskr-upstream-openvpn:0.1.0")
     assert ctrl_env["DRIVER"]["value"] == driver
     assert ctrl_env["DATAPATH"]["value"] == datapath

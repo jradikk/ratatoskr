@@ -9,7 +9,7 @@ The clean child checkout was synchronized by creating a new branch directly at
 parent commit `67237a9`. The parent had already integrated M1's separate commit,
 so the old child branch could not fast-forward; no reset, merge, parent files or
 uncommitted work were overwritten. This assignment changes only `test/e2e/**`
-and `docs/milestones/m8/**`.
+and `test/evidence/history/compatibility.md`.
 
 Before this change, `test/e2e/ci/run.sh` and `test/e2e/live/run.sh` merely called
 M1's flannel/no-mesh/init/iproute/unencrypted direct-config runner. They exercised
