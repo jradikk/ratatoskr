@@ -281,6 +281,23 @@ platform). Actual alternate-CNI execution remains pending completion of plumbing
 and an approved serial cluster replacement/restoration procedure. The Linux
 5.10 runner requirement and other mandatory release gates remain open.
 
+## Continued release goal — immutable node CRI verification
+
+At `3f401a3`, read-only node image verification accepts the same immutable
+Environment as preflight and fixture APIs. Non-default environments require the
+exact preflighted node tuple before Docker/CRI calls; immutable image IDs are
+checked on all three nodes. Default flannel behavior is unchanged. Advanced
+fixture node helpers and public CLI dispatch remain flannel-only, so this does
+not enable or accept Calico traffic.
+
+The existing flannel same-workload gateway replacement and externally coordinated
+agent restart fixture completed with exit 4 / PARTIAL after this seam was added,
+with fresh healthy traffic and owned cleanup. Full Go race/vet/lint/build and
+privileged checks passed, alongside 310 offline Python tests (92 advanced,
+164 synthetic, 29 M1, 20 matrix, five platform). No cluster topology, CNI,
+capabilities or runtime settings were changed. Actual alternative-CNI acceptance
+still requires complete fixture plumbing and an approved serial environment run.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
