@@ -33,7 +33,7 @@ def rule(doc, resource, api_group=None):
     return matching[0]
 
 
-def check_agent(docs, socket, datapath):
+def check_agent(docs, socket, datapath, dev=False):
     role = docs["ClusterRole", "ratatoskr-agent"]
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
@@ -56,7 +56,9 @@ def check_agent(docs, socket, datapath):
     assert pod["dnsPolicy"] == "ClusterFirstWithHostNet"
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
-    assert container["image"].endswith("/ratatoskr-agent:dev")
+    assert container["image"] == (
+        "ghcr.io/skaldhall/ratatoskr-agent:dev" if dev else
+        "docker.io/jradikk/ratatoskr-agent:0.1.0")
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
     assert container["ports"] == [{"name": "health", "containerPort": 8081}]
@@ -87,7 +89,7 @@ def check_agent(docs, socket, datapath):
 
 
 def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock",
-          controller_replicas=1, webhook_replicas=1, leader=False):
+          controller_replicas=1, webhook_replicas=1, leader=False, dev=False):
     expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
@@ -138,8 +140,15 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
             {"kind": "ServiceAccount", "name": "ratatoskr-controller", "namespace": NAMESPACE}
         ]
     assert not any(kind == "Secret" for kind, _ in docs)
+    for workload, component in (("Deployment", "controller"), ("Deployment", "webhook"),
+                                ("DaemonSet", "agent")):
+        if (workload, "ratatoskr-" + component) in docs:
+            image = docs[workload, "ratatoskr-" + component]["spec"]["template"]["spec"]["containers"][0]["image"]
+            expected = ("ghcr.io/skaldhall/ratatoskr-" + component + ":dev" if dev else
+                        "docker.io/jradikk/ratatoskr-" + component + ":0.1.0")
+            assert image == expected, image
     if driver == "agent":
-        check_agent(docs, socket, datapath)
+        check_agent(docs, socket, datapath, dev=dev)
     # Host mounts and capabilities are only granted to the node-local agent;
     # the controller/webhook never receive the node CRI or netns paths.
     for kind, name in (("Deployment", "ratatoskr-controller"),
@@ -222,7 +231,9 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                  "IMAGE_PULL_POLICY", "DRIVER", "DATAPATH", "CLUSTER_DOMAIN",
                  "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP", "GATEWAY_UPSTREAM_PROBE_URL"):
         assert name in ctrl_env, name
-    assert ctrl_env["OPENVPN_IMAGE"]["value"].endswith("/ratatoskr-upstream-openvpn:dev")
+    assert ctrl_env["OPENVPN_IMAGE"]["value"] == (
+        "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev" if dev else
+        "docker.io/jradikk/ratatoskr-upstream-openvpn:0.1.0")
     assert ctrl_env["DRIVER"]["value"] == driver
     assert ctrl_env["DATAPATH"]["value"] == datapath
     assert ctrl_env["GATEWAY_UPSTREAM_PROBE_URL"]["value"] == ""
@@ -307,7 +318,7 @@ def check_package():
             target = Path(tmp) / str(index)
             target.mkdir()
             helm("package", str(CHART), "--destination", str(target))
-            archive = target / "ratatoskr-0.0.0-dev.tgz"
+            archive = target / "ratatoskr-0.1.0.tgz"
             assert archive.is_file()
             package_paths.append(archive)
         digests = [hashlib.sha256(path.read_bytes()).digest() for path in package_paths]
@@ -325,7 +336,9 @@ def check_package():
             assert not any(name.startswith("ratatoskr/tests/") or name.endswith((".tmp", ".swp"))
                            for name in names)
             metadata = yaml.safe_load(archive.extractfile("ratatoskr/Chart.yaml"))
-            assert metadata["version"] == "0.0.0-dev" and metadata["appVersion"] == "dev"
+            assert metadata["version"] == "0.1.0" and metadata["appVersion"] == "0.1.0"
+            assert metadata["home"] == "https://github.com/jradikk/ratatoskr"
+            assert metadata["sources"] == ["https://github.com/jradikk/ratatoskr"]
         release_dir = Path(tmp) / "release"
         release_dir.mkdir()
         helm("package", str(CHART), "--destination", str(release_dir),
@@ -350,9 +363,9 @@ if __name__ == "__main__":
     helm("lint", str(CHART), "--strict", "--set", "datapath=ebpf")
     helm("lint", str(CHART), "--strict", "--set", "driver=init", "--set", "datapath=ebpf")
     check(render(), "agent")
-    check(render("-f", str(ROOT / "hack" / "dev-values.yaml")), "init")
+    check(render("-f", str(ROOT / "hack" / "dev-values.yaml")), "init", dev=True)
     check(render("-f", str(ROOT / "hack" / "dev-values.yaml"),
-                 "--set", "driver=agent"), "agent", socket="/run/k3s/containerd/containerd.sock")
+                 "--set", "driver=agent"), "agent", socket="/run/k3s/containerd/containerd.sock", dev=True)
     check(render("--set", "driver=init"), "init")
     check(render("--set", "datapath=ebpf"), "agent", "ebpf")
     check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")

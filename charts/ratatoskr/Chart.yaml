@@ -2,14 +2,12 @@ apiVersion: v2
 name: ratatoskr
 description: Label-driven egress gateways for Kubernetes (GENEVE in-cluster, pluggable VPN upstreams).
 type: application
-# Development metadata only. At release time set BOTH --version and
-# --app-version to the same immutable release tag (without a leading v).
-version: 0.0.0-dev
-appVersion: "dev"
+version: 0.1.0
+appVersion: "0.1.0"
 kubeVersion: ">=1.29.0-0"
-home: https://github.com/skaldhall/ratatoskr
+home: https://github.com/jradikk/ratatoskr
 sources:
-  - https://github.com/skaldhall/ratatoskr
+  - https://github.com/jradikk/ratatoskr
 keywords:
   - egress
   - vpn
