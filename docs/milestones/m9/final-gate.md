@@ -470,6 +470,27 @@ privacy-safe controller preserved this scoped runtime path, not every failure
 Event or full compatibility. No topology/security changes or release artifacts
 were made; mandatory gates and pending approvals remain unchanged.
 
+## Continued release goal — outage environment and deterministic metadata control
+
+At `bb79cb9`, the outage fixture and source no-egress collector accept the same
+immutable owner Environment. Mixed owner/API contexts and nodes are rejected
+before Docker or root-helper operations. Flannel remains the default; no public
+Calico outage runner or alternate-CNI acceptance was enabled.
+
+The existing flannel witnessed healthy/outage/recovery runner completed with
+exit 4 / INCOMPLETE and verified cleanup. Full validation initially failed at
+an unprogrammed metadata-fixture DNS positive control. The disposable veth test
+now pins both neighbor entries (`e432c0a`), eliminating initial ARP resolution
+as a timing dependency. The exact cause of that single timeout is not proven;
+no production networking behavior was changed. Ten metadata-test repetitions
+and the subsequent full privileged suite passed.
+
+Final Go race/vet/lint/build and privileged checks passed, together with 352
+Python tests (93 advanced, 174 synthetic, 29 M1, 23 matrix, five platform,
+28 release). Calico replacement approval, external Linux 5.10 resources,
+plaintext ingress proof and artifact trust requirements remain open. No cluster
+was replaced and no release artifact was staged or published.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
