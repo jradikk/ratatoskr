@@ -52,8 +52,8 @@ def check_agent(docs, socket, datapath, dev=False):
     assert ds["selector"]["matchLabels"] == ds["template"]["metadata"]["labels"]
     assert pod["serviceAccountName"] == "ratatoskr-agent"
     assert pod["automountServiceAccountToken"] is True
-    assert pod["hostPID"] is True and pod["hostNetwork"] is True
-    assert pod["dnsPolicy"] == "ClusterFirstWithHostNet"
+    assert pod["hostPID"] is True and pod["hostNetwork"] is False
+    assert pod["dnsPolicy"] == "ClusterFirst"
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
     assert container["image"] == (

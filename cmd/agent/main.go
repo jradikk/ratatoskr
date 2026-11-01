@@ -33,12 +33,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Metrics remain local to this node's host network namespace. The agent has
-// one DaemonSet Pod per node; no Service, listener on the Pod IP, or RBAC is
-// added for scraping.
+// Metrics stay on loopback inside the agent Pod's own network namespace.
+// No Service, listener on the Pod IP, or RBAC is added for scraping.
 const agentMetricsAddr = "127.0.0.1:9903"
 
-// Host-network probes must use a configurable node port, not a common app port.
+// Health uses the chart-selected port inside the agent Pod's network namespace.
 func agentHealthAddress() (string, error) {
 	port := os.Getenv("HEALTH_PORT")
 	if port == "" {

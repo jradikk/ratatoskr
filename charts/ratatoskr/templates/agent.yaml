@@ -74,9 +74,10 @@ spec:
       serviceAccountName: ratatoskr-agent
       automountServiceAccountToken: true
       hostPID: true
-      # Registration uses the host network namespace, not a steered client netns.
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
+      # Registration uses this agent Pod's own network namespace, never a
+      # selected client's steered namespace; hostPID remains for CRI identity.
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
       containers:
         - name: agent
           image: {{ include "ratatoskr.image" (list . "agent") | quote }}

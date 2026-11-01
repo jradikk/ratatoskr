@@ -74,17 +74,21 @@ connections are the relevant acceptance proof, not established-flow continuity.
 
 ## Trust boundary for node namespace entry
 
-The agent runs with hostNetwork, hostPID, NET_ADMIN and SYS_ADMIN, and mounts a
-node CRI socket plus host `/var/run/netns` (HostToContainer propagation). It
+The agent runs with an ordinary Pod network namespace, hostPID, NET_ADMIN and
+SYS_ADMIN, and mounts a node CRI socket plus host `/var/run/netns`
+(HostToContainer propagation). At bootstrap an uncached own-Pod GET verifies
+`hostNetwork: false` and `hostPID: true`. It pins its own thread namespace for
+restoration and a separate `/proc/1/ns/net` host-PID-1 FD as a forbidden anchor;
+these must differ. Opening the host anchor is not a fallback workload path. It
 requires a unique READY CRI sandbox whose namespace, name, Pod UID and PodIP
 match the Kubernetes workload. Its **CRI-authoritative** verbose sandbox info
 must contain a PID and exactly one `runtimeSpec.linux.namespaces` network path.
 A live pidfd pins that process, whose cgroup must contain the workload UID.
 The path must be a direct child under `/var/run/netns`, opened with confined
 `openat2` flags and validated as an nsfs network-namespace FD; the agent
-rejects its authenticated host-namespace anchor. Repeated CRI and pinned-FD
-checks precede mutation. Namespace entry/restoration occurs on one locked OS
-thread. There is **no `/proc/<pid>/ns/net` fallback** and no claim of independent
+rejects both its own and the host namespace anchors. Repeated CRI and
+pinned-FD checks precede mutation. Namespace entry/restoration to the **own
+agent Pod namespace** occurs on one locked OS thread. There is **no `/proc/<pid>/ns/net` fallback** and no claim of independent
 PID-to-path namespace attestation beyond the CRI trust contract
 ([ADR-0014](adr/0014-cri-netns-agent.md)). CRI-socket access grants broad
 node authority and Kubernetes RBAC cannot scope `list pods` by node field
@@ -167,7 +171,7 @@ warns. Status only reports measured healthy endpoint MTU.
 
 Gateway and agent expose narrow process-lifetime programming counters/errors/
 duration on separate loopback-only metrics listeners (`127.0.0.1:9902` in the
-Gateway Pod netns, `127.0.0.1:9903` in the agent's host netns). These are not
+Gateway Pod netns, `127.0.0.1:9903` in the agent Pod netns). These are not
 per-workload metrics or a network-accessible scrape Service. Health and
 readiness have separate endpoints. Unit and disposable-netns packet tests,
 bounded synthetic fixtures and platform-specific live tests exercise distinct

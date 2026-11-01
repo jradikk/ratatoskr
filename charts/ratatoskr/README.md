@@ -69,8 +69,8 @@ judge endpoint readiness.
 
 ## Security and operations
 
-The agent runs as root with hostPID/hostNetwork, NET_ADMIN/SYS_ADMIN (plus
-BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
+The agent runs as root with hostPID and a separate Pod network namespace
+(`hostNetwork: false`), NET_ADMIN/SYS_ADMIN (plus BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
 and a cluster-wide token-request permission for short-lived bound registration.
 **Treat the agent as node-root-equivalent** and restrict its placement and
 ability to modify its ServiceAccount. In agent mode only, it may GET

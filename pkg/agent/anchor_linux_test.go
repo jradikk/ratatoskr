@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"os"
+	goruntime "runtime"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -22,7 +23,7 @@ func validOwnPod() (*corev1.Pod, OwnPod) {
 	for _, field := range fields {
 		env = append(env, corev1.EnvVar{Name: field.name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: field.path}}})
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: true, HostPID: true, ServiceAccountName: "ratatoskr-agent", Containers: []corev1.Container{{Name: "agent", Env: env}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: false, HostPID: true, ServiceAccountName: "ratatoskr-agent", Containers: []corev1.Container{{Name: "agent", Env: env}}}}
 	return pod, id
 }
 func TestTrustedOwnPodIdentity(t *testing.T) {
@@ -37,7 +38,7 @@ func TestTrustedOwnPodIdentity(t *testing.T) {
 		{"forged UID", func(_ *corev1.Pod, id *OwnPod) { id.UID = "fake" }},
 		{"missing UID", func(_ *corev1.Pod, id *OwnPod) { id.UID = "" }},
 		{"node mismatch", func(_ *corev1.Pod, id *OwnPod) { id.Node = "other" }},
-		{"nonhost network", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostNetwork = false }},
+		{"host network", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostNetwork = true }},
 		{"nonhost PID", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostPID = false }},
 		{"service account mismatch", func(p *corev1.Pod, _ *OwnPod) { p.Spec.ServiceAccountName = "default" }},
 		{"deleting", func(p *corev1.Pod, _ *OwnPod) { now := metav1.Now(); p.DeletionTimestamp = &now }},
@@ -83,51 +84,48 @@ func TestUncachedOwnPodRecheck(t *testing.T) {
 		t.Fatal("API unavailable accepted")
 	}
 }
-func TestWrongThreadAgainstPinnedHostAnchor(t *testing.T) {
-	if verifiedHost.Load() != nil {
-		t.Skip("another test established host anchor")
+func TestSeparateAnchorsRejectOwnAndHost(t *testing.T) {
+	if verifiedNamespaces.Load() != nil {
+		t.Skip("another test established process anchors")
 	}
-	self, err := os.Open("/proc/thread-self/ns/net")
+	goruntime.LockOSThread()
+	defer goruntime.UnlockOSThread()
+	own, err := os.Open("/proc/thread-self/ns/net")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer self.Close()
+	defer own.Close()
+	// Without hostPID in the unit process, PID1's netns may be the same as
+	// ours. Never silently treat equal namespaces as a safe host anchor.
+	if _, err := validateAnchors(own, own); err == nil {
+		t.Fatal("agent namespace accepted as host PID1 anchor")
+	}
+	ordinary, err := os.CreateTemp(t.TempDir(), "not-a-network-namespace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ordinary.Close()
+	if _, err := validateAnchors(own, ordinary); err == nil {
+		t.Fatal("regular file accepted as host namespace anchor")
+	}
+	if _, err := validateAnchors(ordinary, own); err == nil {
+		t.Fatal("regular file accepted as agent namespace anchor")
+	}
+	if err := rejectHost(own); err == nil {
+		t.Fatal("unbootstrapped own namespace accepted")
+	}
+	if err := checkThreadOwn(); err == nil {
+		t.Fatal("unbootstrapped agent thread accepted")
+	}
+	// A synthetic host inode exercises the rejection independently from the
+	// privileged two-netns component regression below.
 	var stat unix.Stat_t
-	if err := unix.Fstat(int(self.Fd()), &stat); err != nil {
+	if err := unix.Fstat(int(own.Fd()), &stat); err != nil {
 		t.Fatal(err)
 	}
-	verifiedHost.Store(&hostAnchor{fd: self, stat: stat})
-	defer verifiedHost.Store(nil)
-	if err := checkThreadHost(); err != nil {
-		t.Fatal(err)
-	}
-	if err := rejectHost(self); err == nil {
-		t.Fatal("host candidate accepted")
-	}
-	verifiedHost.Store(&hostAnchor{fd: self, stat: unix.Stat_t{Dev: stat.Dev, Ino: stat.Ino + 1}})
-	if err := checkThreadHost(); err == nil {
-		t.Fatal("mismatched pinned host anchor accepted")
-	}
-	verifiedHost.Store(&hostAnchor{fd: self, stat: stat})
-}
-
-func TestBootstrapRequiredAndOwnHostRejected(t *testing.T) {
-	// Tests run in a separate process without a verified agent bootstrap.
-	if verifiedHost.Load() != nil {
-		t.Skip("another test established host anchor")
-	}
-	self, err := os.Open("/proc/thread-self/ns/net")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer self.Close()
-	if _, err := hostStat(); err == nil {
-		t.Fatal("unverified host anchor accepted")
-	}
-	if err := rejectHost(self); err == nil {
-		t.Fatal("unverified own namespace accepted")
-	}
-	if err := checkThreadHost(); err == nil {
-		t.Fatal("unverified thread accepted")
+	verifiedNamespaces.Store(&namespaceAnchors{ownFD: own, hostFD: own, ownStat: stat, hostStat: unix.Stat_t{Dev: stat.Dev, Ino: stat.Ino + 1}})
+	defer verifiedNamespaces.Store(nil)
+	if err := checkThreadOwn(); err == nil {
+		t.Fatal("mismatched host anchor accepted")
 	}
 }

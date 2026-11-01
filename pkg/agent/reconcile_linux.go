@@ -382,8 +382,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		}); err != nil {
 			return err
 		}
-		// Registration MUST happen in host netns: host routing has no client WG
-		// /32 policy, and its socket uses a TLS-pinned gateway PodIP, not DNS.
+		// Registration MUST happen in the agent Pod's own netns: its
+		// ordinary CNI route has no selected-client WG /32 policy. The
+		// socket uses a TLS-pinned gateway PodIP, not DNS. AgentHostNetwork
+		// selects in-memory token/unmarked dialing; it does not require
+		// the agent Pod itself to use hostNetwork.
 		if err = registration.RegisterClient(ctx, registration.ClientRequest{GatewayPodIP: cfg.Endpoint, RegistrationCACert: []byte(cfg.RegistrationCACert), ClientPublicKey: publicKey, AgentHostNetwork: true, TokenProvider: func(ctx context.Context) (string, error) { return podBoundToken(ctx, r.Tokens, pod) }}); err != nil {
 			return fmt.Errorf("authenticate gateway peer: %w", err)
 		}
@@ -501,7 +504,7 @@ func (r *Reconciler) Sync(ctx context.Context) error {
 	if err := r.VerifyOwnPod(ctx); err != nil {
 		return fmt.Errorf("recheck own agent Pod before sync: %w", err)
 	}
-	if err := checkThreadHost(); err != nil {
+	if err := checkThreadOwn(); err != nil {
 		return err
 	}
 	var pods corev1.PodList
