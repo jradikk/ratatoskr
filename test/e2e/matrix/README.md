@@ -1,5 +1,36 @@
 # M8 incomplete coverage matrix
 
+## Pure applicability inventory (not an acceptance or waiver)
+
+`applicability.py` reads the existing `coverage.json` **only when explicitly
+called by an offline reviewer**; it cannot access Kubernetes, run traffic,
+change cluster state, or mark `coverage.json`/the release ledger PASSED. It
+requires the exact 4×3×2×2×2 axis contract and 25 known traffic scenarios;
+schema/axis/scenario drift blocks until reviewed. `cells(coverage, "fake")`
+and `cells(coverage, "live")` each enumerate 96 distinct identities. The only
+explicitly unsupported cells are the **24 eBPF+WireGuard combinations per
+mode**: they require observed, authorized refusal evidence, **not** a traffic
+PASS or a waiver. The other 72 are traffic-evidence *candidates*, not a
+statement that those combinations are verified supported.
+
+`decide(coverage, cell)` returns `traffic-required` or `refusal-required`.
+`decide(coverage, cell, scenario)` returns `traffic-required` or
+`not-applicable` after the scenario's declared fake/live mode, specific
+driver/datapath/encryption and known unencrypted eBPF tunnel constraints.
+For an unsupported cell, every traffic scenario is `not-applicable` **only
+because the whole cell requires refusal evidence**. A scenario's
+`not-applicable` result cannot remove that cell from the 96-cell inventory,
+excuse a failed required test, or count as acceptance. Every decision explicitly
+includes `accepted: false`; independent human review remains mandatory before
+any scenario or compatibility claim. No provider/disruption traffic is inferred
+from fake mode and no internet query is made by this contract.
+
+Run offline only:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/matrix -p test_applicability.py
+```
+
 ## Existing-release API/admission-only tier (final gate only)
 
 Use `--execute --api-admission-only` to run only bounded API assertions, or
