@@ -13,6 +13,33 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/advanced -p '
 go test ./test/e2e/advanced
 ```
 
+## Existing selected Pod after singleton Gateway Pod replacement (authored, not executed)
+
+`agent_lifecycle.py` is a separate, explicit final-gate **partial** fixture for
+`driver=agent`, one plaintext gateway replica and one long-lived restricted
+selected Pod. Its import and ungated CLI never access the cluster. A parent
+operator must first preflight the same locally built images, release and flannel
+context as the existing synthetic fixture; no DaemonSet restart or Helm change
+is made by the runner. Only with parent approval, the immutable image-ID
+preflight, and both `RATATOSKR_E2E_FINAL_GATE=1` and
+`RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT=1`, invoke
+the following command:
+
+```sh
+python3 test/e2e/advanced/agent_lifecycle.py --execute --execute-agent-gateway-replacement
+```
+
+The runner creates disposable UID-owned namespaces and exact synthetic objects,
+checks owner-linked one-replica Gateway status, the exact applied
+`gateway.json` hash and selected Pod UID/config, executes the fixed healthy
+direct-API/marker probe, and performs **one** five-second-grace,
+UID-preconditioned delete of that verified fixture Gateway Pod. It waits for a
+new Gateway Pod UID **and IP** with a fresh applied-config hash and the
+unchanged selected Pod UID, updated endpoint, UP marker and fixed healthy
+probe. Missing/stale acknowledgements and replaced selected Pods cannot qualify.
+It always returns partial/incomplete, not full matrix PASS, and makes no
+assertion about established-flow continuity, WireGuard or agent restart.
+
 ## M4/M5 integration contract (not an executable live runner)
 
 A future **parent-authorized final-gate collector** must construct a dictionary
