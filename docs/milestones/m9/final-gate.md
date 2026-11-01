@@ -259,6 +259,28 @@ restart acceptance pass.
 Full workload traffic/flow/drop observability, Linux 5.10, broader compatibility
 and plaintext ingress acceptance remain open. No release artifact was published.
 
+## Continued release goal — late IPv6 packets and immutable CNI context
+
+At `6f68157`, a disposable veth regression positively observes IPv4 and IPv6
+traffic before enforcing the IPv6 guard. Late global IPv6 assignment then
+requires persistent IPv4 quarantine, readiness-marker removal and no IPv4/IPv6
+packet delivery. Removing the address does not clear quarantine. This is
+component packet evidence, not live-CNI acceptance.
+
+At `2c752de` and `9f4be71`, read-only preflight and fixture namespace/API operations
+accept an immutable flannel/Calico environment. API calls, direct probe exec and
+UID-preconditioned cleanup use the owner environment; mixed contexts are refused.
+Flannel defaults remain unchanged. Calico CLI dispatch, node image/CRI inspection
+and advanced fixtures are not completely wired, so no Calico traffic execution
+or compatibility acceptance is claimed. The existing cluster was not deleted,
+reconfigured or duplicated.
+
+Full Go race tests, vet, lint, builds and privileged components passed, alongside
+309 offline Python tests (92 advanced, 163 synthetic, 29 M1, 20 matrix, five
+platform). Actual alternate-CNI execution remains pending completion of plumbing
+and an approved serial cluster replacement/restoration procedure. The Linux
+5.10 runner requirement and other mandatory release gates remain open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:

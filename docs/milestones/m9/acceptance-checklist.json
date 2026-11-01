@@ -159,10 +159,13 @@
     },
     {
       "id": "ipv6-runtime-guard",
-      "status": "OPEN",
+      "status": "PARTIAL",
       "requirement": "IPv6 present at init and assigned later, fail-closed without bypass",
-      "evidence": [],
-      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+      "evidence": [
+        "pkg/agent/ipv6_packet_privileged_test.go",
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Late IPv6 packet quarantine and persistent IPv4/IPv6 denial passed in disposable namespaces. Actual supported CNI/runtime and final-source coverage remain unverified."
     },
     {
       "id": "ha-affinity-failover",
