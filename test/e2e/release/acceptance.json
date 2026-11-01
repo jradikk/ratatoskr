@@ -245,7 +245,7 @@
     {
       "id": "release-artifact-provenance",
       "status": "OPEN",
-      "requirement": "Prepare matching versioned local binaries, multiarch images and chart with SBOM, checksums and verified provenance.",
+      "requirement": "Build and publish matching versioned binaries, multiarch images and chart through GitHub Actions with SBOM, checksums and verified provenance.",
       "evidence": [],
       "remaining": "No final-source release acceptance recorded."
     },
