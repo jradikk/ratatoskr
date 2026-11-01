@@ -28,8 +28,18 @@ class Blocked(Exception):
     """Only fixed, secret-free stage names."""
 
 
+class ConnectBlocked(Blocked):
+    """Direct PodIP cannot be reached from the verified node network namespace."""
+
+
+class TLSBlocked(Blocked):
+    """Pinned gateway CA, PodIP SAN or TLS 1.3 handshake failed."""
+
+
 STAGES = frozenset({"authorization", "identity-pre", "token-request", "peer-before",
-                    "gateway-request", "identity-post", "peer-after", "marker-after"})
+                    "gateway-request", "gateway-request-connect", "gateway-request-tls",
+                    "gateway-request-http", "gateway-request-netns", "gateway-request-input",
+                    "identity-post", "peer-after", "marker-after"})
 
 
 def stage(name, action):
@@ -39,6 +49,10 @@ def stage(name, action):
         return action()
     except (KeyboardInterrupt, SystemExit, wg.lifecycle.Interrupted):
         raise
+    except Blocked as err:
+        if str(err) in ("Gateway negative blocked at " + reason + "." for reason in STAGES):
+            raise err from None
+        raise Blocked("Gateway negative blocked at " + name + ".") from None
     except BaseException:
         raise Blocked("Gateway negative blocked at " + name + ".") from None
 
@@ -60,18 +74,29 @@ def send(ip, ca, bearer, public_key=TEST_KEY):
     request = ("POST /v1/peers HTTP/1.1\r\nHost: " + ip + ":9443\r\nAuthorization: Bearer " + bearer +
                "\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n" +
                "Content-Length: " + str(len(body)) + "\r\n\r\n").encode() + body
-    with socket.create_connection((ip, 9443), timeout=5) as raw:
+    try:
+        raw = socket.create_connection((ip, 9443), timeout=5)
+    except OSError:
+        raise ConnectBlocked("Gateway negative connection unavailable.") from None
+    with raw:
         raw.settimeout(8)
-        with context.wrap_socket(raw, server_hostname=ip) as sock:
+        try:
+            sock = context.wrap_socket(raw, server_hostname=ip)
+        except (ssl.SSLError, OSError):
+            raise TLSBlocked("Gateway negative pinned TLS unavailable.") from None
+        with sock:
             sock.settimeout(8)
-            sock.sendall(request)
-            # Read ONLY the status line; no response body/headers are retained.
-            line = bytearray()
-            while len(line) < 128:
-                c = sock.recv(1)
-                if not c or c == b"\n":
-                    break
-                line.extend(c)
+            try:
+                sock.sendall(request)
+                # Read ONLY the status line; no response body/headers are retained.
+                line = bytearray()
+                while len(line) < 128:
+                    c = sock.recv(1)
+                    if not c or c == b"\n":
+                        break
+                    line.extend(c)
+            except OSError:
+                raise Blocked("Gateway negative HTTP response unavailable.") from None
             if not c or c != b"\n":
                 raise Blocked("Gateway negative response invalid.")
             status = bytes(line).rstrip(b"\r")
@@ -79,6 +104,60 @@ def send(ip, ca, bearer, public_key=TEST_KEY):
                 # Never print received status text (or read headers/body).
                 raise Blocked("Gateway negative authorization rejection absent.")
             return int(status.split(b" ", 2)[1])
+
+
+def send_from_node(source_api, selected_uid, gateway_name, expected_image, ip, ca, bearer,
+                   *, transport=None, root_transport=None):
+    """Bound node-host network request with selected UID/CRI ownership checks."""
+    try:
+        from . import plaintext_denial
+    except ImportError:
+        import plaintext_denial
+    if transport is None:
+        transport = wg.node_images._bounded
+    if root_transport is None:
+        root_transport = auth.adapter._bounded
+    namespace = source_api.owner.names[1]
+    def pinned():
+        selected = source_api.get("pod", wg.CLIENT, namespace)
+        auth.validate_pod(selected, namespace, selected_uid, "default",
+                          source_api.owner.token, gateway_name)
+        node = selected.get("spec", {}).get("nodeName")
+        wg.need(node in wg.node_images.NODES, "Selected Pod node unavailable.")
+        statuses = [item for item in selected.get("status", {}).get("containerStatuses", [])
+                    if item.get("name") == "client" and item.get("ready") is True and
+                    item.get("imageID") == expected_image]
+        wg.need(len(statuses) == 1, "Selected Pod runtime image unverified.")
+        pod_ip = wg.ipv4(selected.get("status", {}).get("podIP"))
+        sid = plaintext_denial.sandbox_id(plaintext_denial._node_cmd(node, ["pods", "-o", "json"], transport),
+                                          selected_uid, namespace, wg.CLIENT)
+        pid = plaintext_denial.sandbox_pid(
+            plaintext_denial._node_cmd(node, ["inspectp", "-o", "json", sid], transport),
+            sid, selected_uid, namespace, wg.CLIENT, pod_ip)
+        host = plaintext_denial._host_pid(node, transport)
+        return node, sid, pid, host
+    before = pinned()
+    # Node-host netns matches the host-network agent; the selected Pod sandbox
+    # is verified for ownership only, never used as the request source.
+    payload = json.dumps({"gatewayPodIP": ip, "registrationCACert": ca,
+                          "token": bearer}, separators=(",", ":")).encode()
+    wg.need(len(payload) <= 20500, "Gateway negative stdin payload too large.")
+    path = Path(__file__).with_name("gateway_request_root.py")
+    output = root_transport(["sudo", "-n", "/usr/bin/python3", str(path),
+                             str(before[3])], payload=payload,
+                            timeout=20, max_output=128)
+    result = json.loads(output)
+    wg.need(type(result) is dict and set(result) in ({"status"}, {"blocked"}),
+            "Gateway negative root response malformed.")
+    if "blocked" in result:
+        reason = result["blocked"]
+        if type(reason) is not str or reason not in {"input", "netns", "connect", "tls", "http"}:
+            raise Blocked("Gateway negative root response malformed.")
+        raise Blocked("Gateway negative blocked at gateway-request-" + reason + ".")
+    wg.need(type(result["status"]) is int and result["status"] in (401, 403),
+            "Gateway negative root rejection invalid.")
+    wg.need(pinned() == before, "Selected sandbox or host node changed after gateway request.")
+    return result["status"]
 
 
 def peer_digest(operator, gateway_pod, image_id, *, transport=None, root=None):
@@ -119,8 +198,11 @@ def peer_digest(operator, gateway_pod, image_id, *, transport=None, root=None):
 
 
 def run(owner, source_api, operator, gateway_uid, selected_uid, gateway_pod,
-        ids, marker, *, send_request=send, read_metrics=None, read_peer_digest=peer_digest):
+        ids, marker, *, send_request=None, read_metrics=None, read_peer_digest=peer_digest):
     """Require exact owned UID, 401/403, unchanged public peer-key digest and marker."""
+    if send_request is None:
+        send_request = lambda ip, ca, bearer: send_from_node(
+            source_api, selected_uid, operator.name, ids["selected"], ip, ca, bearer)
     if read_metrics is None:
         try:
             from . import wg_transport
