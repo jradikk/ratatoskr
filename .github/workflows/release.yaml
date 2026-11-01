@@ -18,7 +18,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate release tag
         id: version
         env:
@@ -49,7 +49,7 @@ jobs:
       matrix:
         component: [controller, webhook, agent, gateway, init, upstream-openvpn]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Load pinned versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v3
@@ -117,7 +117,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Load pinned versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
@@ -156,7 +156,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Load pinned versions
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
       - uses: azure/setup-helm@v4
