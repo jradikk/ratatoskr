@@ -209,6 +209,32 @@ Validation after integration included 85 advanced Python tests, 156 synthetic
 Python tests, Go advanced tests and diff checks; full component validation before
 the diagnostic-only follow-up passed Go race/vet/lint/build and privileged tests.
 
+## Continued release goal — externally coordinated agent restart and low MTU
+
+The separately opted-in lifecycle fixture at `a146d7e`, with the integrated
+low-MTU tests through `0793c61`, completed gateway replacement and subsequent
+externally coordinated agent Pod replacement. The parent revalidated the exact
+agent Pod UID, same-node placement, DaemonSet owner UID and runtime image before
+one UID-preconditioned DELETE. The fixture itself performed no release or
+DaemonSet mutation. A different Ready agent Pod on that node was observed, while
+the selected workload retained its UID and acknowledged gateway endpoint, and
+fresh healthy marker traffic succeeded. Namespace cleanup completed. The runner
+returned **4 / PARTIAL**, not full acceptance or established-flow continuity.
+
+A disposable three-namespace low-MTU regression uses a 900-byte carrier,
+750-byte upstream link and 700-byte inner MTU. It verifies byte-for-byte 16 KiB
+TCP request/response delivery, oversized selected IPv4-DF UDP rejection with
+EMSGSIZE and no matching plaintext client-eth0 packet, and refusal of client and
+gateway MTUs below 576 before GENEVE creation. This is component evidence, not
+full-CNI PMTU or ICMP blackhole acceptance.
+
+Integrated Go race tests, vet, lint, binary builds and privileged components
+passed, together with **297 offline Python tests** (92 advanced, 156 synthetic,
+29 M1 and 20 matrix). Targeted low-MTU tests also passed repeated and race runs.
+No runtime/seccomp/sudo settings or workload capabilities were changed. The
+mandatory release ledger remains incomplete; plaintext ingress, Linux 5.10,
+wider compatibility and artifact provenance are still open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
