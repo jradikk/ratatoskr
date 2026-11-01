@@ -149,10 +149,13 @@
     },
     {
       "id": "ebpf-revocation-failure",
-      "status": "OPEN",
+      "status": "PARTIAL",
       "requirement": "Inject policy-only replacement failure and verify no stale selector survives",
-      "evidence": [],
-      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+      "evidence": [
+        "pkg/datapath/ebpf/failure_packet_privileged_test.go",
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Actual clsact packet-path failed-update guard and stale-adoption refusal passed in disposable namespaces. Supported live CNI/runtime configurations and final-source acceptance remain unverified."
     },
     {
       "id": "ipv6-runtime-guard",
