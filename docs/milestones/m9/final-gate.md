@@ -154,6 +154,37 @@ clean full validation pass. Separate runtime and fixture test tasks completed.
 Full observability, plaintext ingress proof and remaining release gates are still
 open; this follow-up does not change their acceptance status.
 
+## Continued release goal — link telemetry and packet-level negative checks
+
+At `15a3bcc`, the existing flannel/no-mesh agent/iproute encrypted fixture
+completed with a source-verified, rebuilt gateway containing fixed-role link
+telemetry. The strict reader accepted geneve/upstream/wireguard sample status
+and RX/TX byte/packet gauges. Wrong-audience rejection, unchanged public peer
+fingerprint, authenticated marker delivery, revocation and owned cleanup
+completed; the runner returned **4 / INCOMPLETE**, not full M8 acceptance.
+The local image binary was compared byte-for-byte with the current source build
+before import; no registry publication or signing occurred.
+
+Link traffic values are resettable kernel gauges, not monotonic counters or
+flow estimates. Failed/timed-out samples omit traffic values and report
+sample_ok=0. One in-flight kernel reader prevents unbounded stalled readers;
+labels are restricted to three fixed device roles. Per-workload flow/drop
+telemetry and full observability remain incomplete.
+
+Component packet tests now use a reachable controlled metadata endpoint only
+in disposable sibling namespaces, proving TCP/UDP prohibition under full and
+selective policies, direct-path preservation, and explicit metadata bypass.
+Local UDP/TCP DNS servers exercise cluster/reverse forwarding, healthy external
+forwarding and external SERVFAIL without fallback. These do not establish live
+CNI/mesh metadata/DNS acceptance or gateway upstream-interface binding.
+
+Full Go race tests, vet, lint, binary builds, privileged tests and **281 offline
+Python tests** passed after integration. The image-build wrapper reported signal
+143 after its build output; a separate byte-for-byte binary comparison verified
+its actual image contents. Namespace cleanup was verified. The mandatory release
+ledger remains OPEN/PARTIAL; Linux 5.10, wider compatibility and other packet
+and provenance requirements remain outstanding.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
