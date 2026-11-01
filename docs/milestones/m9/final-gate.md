@@ -185,6 +185,30 @@ its actual image contents. Namespace cleanup was verified. The mandatory release
 ledger remains OPEN/PARTIAL; Linux 5.10, wider compatibility and other packet
 and provenance requirements remain outstanding.
 
+## Continued release goal — spoof packets and same-workload replacement
+
+The isolated GENEVE spoof regression at `a0b267b` first observed an authorized
+packet arriving on gateway eth0 and passing the flower verifier, then separately
+observed wrong outer-source, inner-source and VNI packets and required default
+rejection without an acceptance-counter increase. Targeted privileged, race,
+vet and lint checks passed. This is controlled component packet evidence, not
+full-CNI runtime spoof acceptance.
+
+At `9e005ae`, the separately gated singleton gateway replacement fixture returned
+4 / PARTIAL after preserving the existing selected workload Pod UID, deleting
+only the owned old gateway Pod UID, observing a new acknowledged gateway Pod
+UID/IP, and verifying fresh healthy marker traffic. Owner-chain, applied-byte
+hash and selected identity checks remained mandatory; namespace cleanup completed.
+The earlier generic failure is retained as a failed attempt, not overwritten as
+success. Fixed safe diagnostics and default-adapter regression coverage were
+added before the successful rerun.
+
+Agent restart and established-flow continuity were not tested by this fixture.
+The full agent lifecycle and compatibility release gates remain incomplete.
+Validation after integration included 85 advanced Python tests, 156 synthetic
+Python tests, Go advanced tests and diff checks; full component validation before
+the diagnostic-only follow-up passed Go race/vet/lint/build and privileged tests.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
