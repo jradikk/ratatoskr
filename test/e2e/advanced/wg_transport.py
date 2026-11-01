@@ -26,6 +26,9 @@ PROGRAMMING_BUCKET = re.compile(r'ratatoskr_gateway_programming_duration_seconds
 LINK_ROLES = frozenset(("geneve", "upstream", "wireguard"))
 LINK_FIELDS = frozenset(("sample_ok", "receive_bytes", "transmit_bytes", "receive_packets", "transmit_packets"))
 LINK_SAMPLE = re.compile(r'ratatoskr_gateway_link_(sample_ok|receive_bytes|transmit_bytes|receive_packets|transmit_packets)\{role="(geneve|upstream|wireguard)"\} ([0-9]+)\Z')
+GUARD_DIRECTIONS = frozenset(("input", "output"))
+GUARD_FIELDS = frozenset(("sample_ok", "drop_packets", "drop_bytes"))
+GUARD_SAMPLE = re.compile(r'ratatoskr_gateway_plaintext_guard_(sample_ok|drop_packets|drop_bytes)\{direction="(input|output)"\} ([0-9]+)\Z')
 NODES = fixture.node_images.NODES
 RUNTIME = fixture.node_images.RUNTIME
 
@@ -74,6 +77,7 @@ def parse_metrics(raw):
         programming = {}
         buckets = {}
         links = {}
+        guards = {}
         for line in text.splitlines():
             if line.startswith("#") or not line:
                 continue
@@ -84,6 +88,14 @@ def parse_metrics(raw):
                 values[match.group(1)] = int(match.group(2))
                 continue
             if OTHER.fullmatch(line):
+                continue
+            if line.startswith("ratatoskr_gateway_plaintext_guard_"):
+                guard = GUARD_SAMPLE.fullmatch(line)
+                fixture.need(guard is not None, "Plaintext guard field or direction invalid.")
+                field, direction, count = guard.groups()
+                direction_values = guards.setdefault(direction, {})
+                fixture.need(field not in direction_values, "Plaintext guard metric duplicated.")
+                direction_values[field] = int(count)
                 continue
             if line.startswith("ratatoskr_gateway_link_"):
                 link = LINK_SAMPLE.fullmatch(line)
@@ -142,6 +154,14 @@ def parse_metrics(raw):
                 fixture.need(sample in (0, 1) and (type(sample) is int) and
                              (set(role_values) == {"sample_ok"} if sample == 0 else set(role_values) == LINK_FIELDS),
                              "Gateway fixed-role link sample missing, stale, or invalid.")
+        if guards:
+            fixture.need(set(guards) == GUARD_DIRECTIONS, "Plaintext guard direction sample incomplete.")
+            for direction_values in guards.values():
+                sample = direction_values.get("sample_ok")
+                fixture.need(type(sample) is int and sample in (0, 1) and
+                             (set(direction_values) == {"sample_ok"} if sample == 0 else
+                              set(direction_values) == GUARD_FIELDS),
+                             "Plaintext guard sample missing, stale, or invalid.")
         return values
     except (UnicodeError, ValueError, TypeError, OverflowError):
         raise fixture.Blocked("WG/programming metrics malformed or unavailable.") from None

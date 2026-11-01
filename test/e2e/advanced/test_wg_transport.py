@@ -136,6 +136,48 @@ class MetricsTest(unittest.TestCase):
             with self.subTest(raw=raw[:50]), self.assertRaises(fixture.Blocked):
                 wt.parse_metrics(baseline + raw)
 
+    def test_plaintext_guard_exact_directions_and_unavailable_samples(self):
+        baseline = (b"ratatoskr_gateway_wireguard_sample_ok 1\n"
+                    b"ratatoskr_gateway_wireguard_installed_peers 0\n"
+                    b"ratatoskr_gateway_wireguard_handshaken_peers 0\n"
+                    b"ratatoskr_gateway_wireguard_receive_bytes 0\n"
+                    b"ratatoskr_gateway_wireguard_transmit_bytes 0\n")
+        def direction_lines(direction, sample):
+            fields = {"sample_ok": sample}
+            if sample:
+                fields.update(drop_packets=3, drop_bytes=144)
+            return b"".join((f'ratatoskr_gateway_plaintext_guard_{key}{{direction="{direction}"}} {value}\n').encode()
+                            for key, value in fields.items())
+        complete = direction_lines("input", 1) + direction_lines("output", 1)
+        unknown = direction_lines("input", 0) + direction_lines("output", 0)
+        expected = {"sample_ok": 1, "installed_peers": 0, "handshaken_peers": 0,
+                    "receive_bytes": 0, "transmit_bytes": 0}
+        self.assertEqual(wt.parse_metrics(baseline), expected)  # legacy release
+        self.assertEqual(wt.parse_metrics(baseline + complete), expected)
+        self.assertEqual(wt.parse_metrics(baseline + unknown), expected)
+        self.assertEqual(wt.parse_metrics(baseline + direction_lines("input", 1) +
+                                          direction_lines("output", 0)), expected)
+        bad = (complete.replace(b'direction="input"', b'direction="pod_uid"'),
+               complete.replace(b'direction="input"', b'direction="ingress"'),
+               complete.replace(b'direction="input"', b'direction="output"'),
+               complete.replace(b'drop_packets{direction="input"} 3',
+                                b'drop_packets{direction="input",pod_uid="x"} 3'),
+               complete.replace(b'sample_ok{direction="input"} 1',
+                                b'sample_ok{direction="input"} 2'),
+               complete.replace(b'drop_bytes{direction="input"} 144',
+                                b'drop_bytes{direction="input"} NaN'),
+               complete.replace(b'drop_packets{direction="input"} 3\n', b''),
+               unknown + direction_lines("input", 1),
+               complete.replace(b'sample_ok{direction="input"} 1',
+                                b'sample_ok{direction="input"} 0'),
+               complete + b'ratatoskr_gateway_plaintext_guard_peer{direction="input"} 1\n')
+        for raw in bad:
+            with self.subTest(raw=raw[:55]), self.assertRaises(fixture.Blocked):
+                wt.parse_metrics(baseline + raw)
+        # Gauges reset with the underlying nft table; never infer monotonicity.
+        self.assertEqual(wt.parse_metrics(baseline + complete.replace(b' 3\n', b' 0\n')),
+                         expected)
+
     def test_unknown_sample_and_peer_keys_rejected(self):
         for data in (b"ratatoskr_gateway_wireguard_sample_ok 0\n",
                      b"ratatoskr_gateway_wireguard_sample_ok 1\n",
