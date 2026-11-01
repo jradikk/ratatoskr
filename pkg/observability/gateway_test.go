@@ -21,7 +21,7 @@ func TestGatewayHealthAndMeasuredMTUMetricsWithoutLabels(t *testing.T) {
 			mtu   int
 		})
 		return s.ready, s.mtu
-	}, NewGatewayProgramming())
+	}, NewGatewayProgramming(), NewGatewayLinkTraffic(false, nil))
 	scrape := func() string {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)

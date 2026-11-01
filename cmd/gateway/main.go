@@ -336,9 +336,10 @@ func run(ctx context.Context, configPath string) error {
 		s := current.Load().(state)
 		return s.ready, s.effectiveMTU
 	}
-	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming)
+	traffic := observability.NewGatewayLinkTraffic(cfg.Encryption == "wireguard", netlink.LinkByName)
+	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic)
 	if cfg.Encryption == "wireguard" {
-		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, datapath.WireGuardDevice, wireguard.KernelDevice)
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, datapath.WireGuardDevice, wireguard.KernelDevice)
 	}
 	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
 	metricsListener, err := net.Listen("tcp4", metrics.Addr)

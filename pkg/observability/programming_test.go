@@ -33,9 +33,9 @@ func TestGatewayProgrammingCompletedAttemptsAndNoLabels(t *testing.T) {
 		t.Run(map[bool]string{true: "wireguard", false: "plain"}[encrypted], func(t *testing.T) {
 			programming := NewGatewayProgramming()
 			snapshot := func() (bool, int) { return true, 1320 }
-			handler := GatewayHandler(snapshot, programming)
+			handler := GatewayHandler(snapshot, programming, NewGatewayLinkTraffic(encrypted, nil))
 			if encrypted {
-				handler = WireGuardHandler(snapshot, programming, "rtkwg0", func(string) (*wgtypes.Device, error) { return &wgtypes.Device{}, nil })
+				handler = WireGuardHandler(snapshot, programming, NewGatewayLinkTraffic(true, nil), "rtkwg0", func(string) (*wgtypes.Device, error) { return &wgtypes.Device{}, nil })
 			}
 			initial := metricText(t, handler)
 			metricLine(t, initial, "ratatoskr_gateway_programming_attempts_total 0")
@@ -84,7 +84,7 @@ func TestGatewayProgrammingConcurrentAndPanicNotCompleted(t *testing.T) {
 		}()
 		_ = programming.Observe(func() error { panic("test-panic") })
 	}()
-	got := metricText(t, GatewayHandler(func() (bool, int) { return false, 0 }, programming))
+	got := metricText(t, GatewayHandler(func() (bool, int) { return false, 0 }, programming, NewGatewayLinkTraffic(false, nil)))
 	metricLine(t, got, "ratatoskr_gateway_programming_attempts_total 32")
 	metricLine(t, got, "ratatoskr_gateway_programming_errors_total 16")
 	metricLine(t, got, "ratatoskr_gateway_programming_duration_seconds_count 32")

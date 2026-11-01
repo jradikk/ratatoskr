@@ -11,13 +11,14 @@ import (
 // GatewayHandler exposes zero-label gauges derived on every scrape from the
 // gateway's published state (upstream probe AND datapath applied). A non-ready
 // or unknown effective MTU is reported as zero. It uses a private registry:
-// process/runtime and per-client/peer labels are omitted. Peers are intentionally
-// not counted: registered peers are not a trustworthy healthy-peer count without
-// consulting authenticated live kernel state.
-func GatewayHandler(snapshot func() (ready bool, effectiveMTU int), programming *GatewayProgramming) http.Handler {
+// process/runtime and per-client/peer labels are omitted. Link metrics use only
+// fixed device-role labels; they are current resettable kernel samples, not
+// per-client counters or a claim about healthy WireGuard peers.
+func GatewayHandler(snapshot func() (ready bool, effectiveMTU int), programming *GatewayProgramming, traffic *GatewayLinkTraffic) http.Handler {
 	registry := prometheus.NewRegistry()
 	registerGatewayMetrics(registry, snapshot)
 	programming.register(registry)
+	registry.MustRegister(traffic)
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }
 

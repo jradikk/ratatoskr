@@ -18,7 +18,7 @@ func TestGatewayProgrammingStartupRefreshFailureAndFailClosed(t *testing.T) {
 	var current atomic.Value
 	current.Store(state{podUID: testPodUID})
 	gaugeSnapshot := func() (bool, int) { s := current.Load().(state); return s.ready, s.effectiveMTU }
-	handler := observability.GatewayHandler(gaugeSnapshot, programming)
+	handler := observability.GatewayHandler(gaugeSnapshot, programming, observability.NewGatewayLinkTraffic(false, nil))
 	get := func() string {
 		t.Helper()
 		result := httptest.NewRecorder()

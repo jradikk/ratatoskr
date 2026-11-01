@@ -16,7 +16,7 @@ func TestWireGuardScrapesDoNotStackTimedOutKernelReads(t *testing.T) {
 	start := make(chan struct{})
 	finish := make(chan struct{})
 	var calls atomic.Int32
-	handler := WireGuardHandler(func() (bool, int) { return true, 1400 }, NewGatewayProgramming(), "rtkwg0", func(string) (*wgtypes.Device, error) {
+	handler := WireGuardHandler(func() (bool, int) { return true, 1400 }, NewGatewayProgramming(), NewGatewayLinkTraffic(true, nil), "rtkwg0", func(string) (*wgtypes.Device, error) {
 		calls.Add(1)
 		close(start)
 		<-finish
@@ -52,7 +52,7 @@ func TestWireGuardScrapesDoNotStackTimedOutKernelReads(t *testing.T) {
 func TestWireGuardMetricsKnownZeroMeasuredAndUnknown(t *testing.T) {
 	device := &wgtypes.Device{}
 	fail := false
-	handler := WireGuardHandler(func() (bool, int) { return true, 1400 }, NewGatewayProgramming(), "rtkwg0", func(string) (*wgtypes.Device, error) {
+	handler := WireGuardHandler(func() (bool, int) { return true, 1400 }, NewGatewayProgramming(), NewGatewayLinkTraffic(true, nil), "rtkwg0", func(string) (*wgtypes.Device, error) {
 		if fail {
 			return nil, errors.New("kernel unavailable")
 		}
