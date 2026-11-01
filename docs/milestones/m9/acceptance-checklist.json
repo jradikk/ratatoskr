@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "scope": "release-acceptance",
+  "gates": [
+    {
+      "id": "direct-cluster-baseline",
+      "status": "PARTIAL",
+      "requirement": "PodIP source, DNS/API/ClusterIP preservation; not controller admission",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "controller-admission-selection",
+      "status": "PARTIAL",
+      "requirement": "CRD deployment, authorized injection, forbidden opt-in and namespace admission",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "init-gateway-replacement",
+      "status": "OPEN",
+      "requirement": "ADR-0012 fixed endpoint fail-close then explicit client rollout",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "selective-cidr-port",
+      "status": "PARTIAL",
+      "requirement": "Include/exclude TCP port and CIDR selection on controlled fake endpoint",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "no-endpoint-revocation",
+      "status": "PARTIAL",
+      "requirement": "Remove healthy endpoint and prove selected requests fail while ordinary paths survive",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "metadata-prohibition",
+      "status": "OPEN",
+      "requirement": "Reachable controlled metadata fixture required; no real metadata service requests",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "gateway-dns",
+      "status": "OPEN",
+      "requirement": "Cluster/external UDP and TCP DNS, upstream-only external resolution and SERVFAIL",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "payload-integrity",
+      "status": "PARTIAL",
+      "requirement": "4.5 MiB deterministic payload size and SHA256 through tunnel",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "measured-mtu-mss",
+      "status": "PARTIAL",
+      "requirement": "Assert gateway measured carrier/GENEVE/upstream MTUs and MSS; not PMTU blackhole testing",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "pmtu-fragmentation",
+      "status": "OPEN",
+      "requirement": "DF/fragmentation and small carrier MTU traffic plus captures",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "spoof-geneve",
+      "status": "OPEN",
+      "requirement": "Forged inner/outer source, VNI and identity acceptance verifier packet tests",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "wireguard-registration",
+      "status": "PARTIAL",
+      "requirement": "Bound TokenReview registration, peer deletion, handshake and return path",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "wireguard-plaintext-denial",
+      "status": "OPEN",
+      "requirement": "Capture encrypted underlay and deny direct eth0 GENEVE",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "agent-restricted-workload",
+      "status": "PARTIAL",
+      "requirement": "PSA restricted admission and successful capability-free tunnel startup",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "agent-restart-endpoint-update",
+      "status": "OPEN",
+      "requirement": "Agent restart/adoption and endpoint replacement without workload recreation",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "ebpf-tunnel",
+      "status": "PARTIAL",
+      "requirement": "Unencrypted tc client tunnel in actual pod; 5.10 and CNI captures still missing",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "ebpf-revocation-failure",
+      "status": "OPEN",
+      "requirement": "Inject policy-only replacement failure and verify no stale selector survives",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "ipv6-runtime-guard",
+      "status": "OPEN",
+      "requirement": "IPv6 present at init and assigned later, fail-closed without bypass",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "ha-affinity-failover",
+      "status": "PARTIAL",
+      "requirement": "1\u20133 replicas, stable affinity, endpoint churn; established flows may break",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "private-health-metric",
+      "status": "PARTIAL",
+      "requirement": "Loopback health gauge 1/0/1 and no PodIP:9902 exposure; not full telemetry",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "full-observability",
+      "status": "OPEN",
+      "requirement": "Bytes/flows/drops/peer count/handshake age not implemented by component",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "upstream-fail-close-recovery",
+      "status": "PARTIAL",
+      "requirement": "Fake link down causes 503/NotReady and no steered traffic, ordinary paths continue",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "public-exit-country",
+      "status": "PARTIAL",
+      "requirement": "Secret-safe ipinfo exit match and optional expected country; 429 inconclusive",
+      "evidence": [
+        "docs/milestones/m9/final-gate.md"
+      ],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "live-provider-disruption",
+      "status": "OPEN",
+      "requirement": "Real upstream disruption/recovery under controlled provider conditions",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "cni-mesh-compatibility",
+      "status": "OPEN",
+      "requirement": "Real alternative CNI/mesh gateway/client fixture and cross-node traffic; enumerating is not implementing",
+      "evidence": [],
+      "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
+    },
+    {
+      "id": "linux-5-10-baseline",
+      "status": "OPEN",
+      "requirement": "Run supported datapaths on Linux 5.10 with unchanged security restrictions.",
+      "evidence": [],
+      "remaining": "No final-source release acceptance recorded."
+    },
+    {
+      "id": "final-source-validation",
+      "status": "OPEN",
+      "requirement": "Pass all component, static, chart and final runtime checks against the release source and immutable image identities.",
+      "evidence": [],
+      "remaining": "No final-source release acceptance recorded."
+    },
+    {
+      "id": "release-artifact-provenance",
+      "status": "OPEN",
+      "requirement": "Prepare matching versioned local binaries, multiarch images and chart with SBOM, checksums and verified provenance.",
+      "evidence": [],
+      "remaining": "No final-source release acceptance recorded."
+    },
+    {
+      "id": "release-security-review",
+      "status": "OPEN",
+      "requirement": "Review RBAC, secrets isolation, privilege boundaries, supported modes and artifact contents before release.",
+      "evidence": [],
+      "remaining": "No final-source release acceptance recorded."
+    }
+  ]
+}
