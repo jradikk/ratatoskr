@@ -588,6 +588,24 @@ restored; Linux 5.10, broader mesh/CNI and plaintext ingress remain unverified.
 Production preparation may proceed from this RC, but production publication and
 readiness still require the outstanding gates. No tags or registry pushes occurred.
 
+## User-directed production preparation target 0.1.0
+
+The user requested production preparation and subsequent publication as 0.1.0,
+not publication of the experimental RC. At `7a18ec2`, a local production-artifact
+builder prepares all five components plus the OpenVPN image, version/revision
+labels, multiarch OCI exports, requested SBOM/provenance, matching Helm chart
+and registry override values. The namespace is explicitly supplied; preparation
+for this repository uses ghcr.io/jradikk rather than silently publishing to the
+historical chart default. No publication, login, tag push or signing occurs.
+
+All 37 offline release tests passed. An actual builder preflight found only
+linux/arm64 available and refused before creating output. A capable approved
+multiarchitecture builder is required; no emulator/binfmt/runtime settings were
+installed or changed. Requested Buildx attestations would not alone establish
+trusted provenance, and the mandatory runtime/release gates remain incomplete.
+This is production preparation tooling, not a production artifact or readiness
+claim. The local unsigned 0.1.0-rc.1 binary/chart bundle remains separate.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
