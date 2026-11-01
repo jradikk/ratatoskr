@@ -235,6 +235,30 @@ No runtime/seccomp/sudo settings or workload capabilities were changed. The
 mandatory release ledger remains incomplete; plaintext ingress, Linux 5.10,
 wider compatibility and artifact provenance are still open.
 
+## Continued release goal — private node-agent programming metrics
+
+At `4049848`, the agent records completed usable/closed/cleanup datapath calls
+with fixed-operation attempt/error counters and duration histograms. API/CRI
+checks, registration and Pod patches are outside that programming boundary.
+Metrics bind only to node loopback `127.0.0.1:9903`; no chart port, Service, RBAC
+or capability was added. The current-source binary was compared byte-for-byte
+with the locally built agent image before import and an existing DaemonSet
+rollout. All three nodes exposed the expected loopback programming series with
+no Pod/IP/token labels.
+
+Full Go race/vet/lint/build and privileged components passed, together with
+302 offline Python tests (92 advanced, 156 synthetic, 29 M1, 20 matrix and five
+platform tests). The same-workload restart fixture emitted its PARTIAL success
+message, but its encompassing image-verification/runtime shell ended with signal
+143. That wrapper is therefore not recorded as a clean aggregate runtime pass.
+Separate subsequent reads verified owned namespace cleanup and three updated
+Ready agents. Earlier independently completed lifecycle evidence remains valid;
+this follow-up records metrics presence rather than manufacturing a new full
+restart acceptance pass.
+
+Full workload traffic/flow/drop observability, Linux 5.10, broader compatibility
+and plaintext ingress acceptance remain open. No release artifact was published.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
