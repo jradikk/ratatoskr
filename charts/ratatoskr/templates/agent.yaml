@@ -1,5 +1,5 @@
 {{- if eq .Values.driver "agent" }}
-# M5: a node-local agent requires CRI and the node's network namespace files.
+# The node-local agent requires CRI and verified node network namespaces.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

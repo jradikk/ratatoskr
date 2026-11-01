@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ratatoskr
-description: Label-driven egress gateways for Kubernetes (GENEVE in-cluster, pluggable VPN upstreams).
+description: Label-driven Kubernetes egress gateways with an OpenVPN upstream and GENEVE datapath.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

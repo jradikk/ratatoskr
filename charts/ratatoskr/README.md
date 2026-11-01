@@ -5,6 +5,10 @@ the controller, validating and mutating admission webhooks, node agent (when
 enabled), ServiceAccounts and scoped RBAC. It **does not** render gateway Pods:
 the controller manages gateway Deployments, Services, ConfigMaps and ingress
 policies in the namespaces of their EgressGateway objects.
+The deployable upstream type is currently **OpenVPN only**. API fields for
+custom and other upstream types do not imply a runnable controller/plugin;
+unsupported configurations fail closed rather than falling back to direct
+egress.
 
 ## Install
 
