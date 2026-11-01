@@ -9,7 +9,7 @@ driver: agent
 datapath: iproute
 
 agent:
-  # Host-network kubelet probes; choose a port unused on your nodes.
+  # Health/readiness listener in the agent Pod network namespace.
   healthPort: 19903
   # Node-local CRI socket exposed to the DaemonSet, not to workloads/gateways.
   criSocket: /run/containerd/containerd.sock

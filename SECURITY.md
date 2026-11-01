@@ -17,7 +17,7 @@ and consult its release notes for security fixes.
 
 ## Trust boundaries
 
-- The node agent has host PID/network access and a CRI socket mount. Treat it as
+- The node agent has host PID access and a CRI socket mount. Treat it as
   **node-root-equivalent**, even though its container is not privileged. Only
   trusted administrators should install or modify the operator and its RBAC.
 - Gateway and upstream containers have network-administration capabilities.

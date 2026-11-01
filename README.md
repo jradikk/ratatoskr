@@ -95,7 +95,7 @@ default, not forwarded through the VPN.
   `/run/containerd/containerd.sock`; configure the actual path for your runtime.
 - A VPN profile and any credentials required by your provider.
 
-The default agent has host PID/network access and mounts the CRI socket; treat it
+The default agent has host PID access and mounts the CRI socket; treat it
 as **node-root-equivalent** and run it only on trusted nodes. Gateway VPN
 containers also require network capabilities and access to `/dev/net/tun`.
 Cluster security policy must allow these operator components; application Pods
