@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M8 inventory by default; missing/unimplemented coverage must never be green.
+# Compatibility inventory by default; missing/unimplemented coverage is never green.
 # Traffic execution requires --execute AND final-gate environment authorization.
 set +x
 set -euo pipefail

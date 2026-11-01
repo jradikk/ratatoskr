@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""M8 inventory and serial final-gate orchestration. Defaults to STATIC ONLY."""
+"""Compatibility inventory and serial final-gate orchestration. Defaults to STATIC ONLY."""
 import argparse
 import importlib.util
 import sys
@@ -30,8 +30,8 @@ def inventory(mode):
         cell["runnerImplemented"] = runnable and not unsupported
         cell["status"] = "DEFERRED" if cell["runnerImplemented"] else "SKIPPED"
         cell["reason"] = ("unsupported ebpf+wireguard; refusal needs its own negative test" if unsupported else
-                          "direct-config subset implemented but not executed" if runnable else
-                          "CNI/mesh/agent/WireGuard fixture not implemented; not covered")
+                          "direct-config runner available; not executed" if runnable else
+                          "no matrix runner for this cell; not covered")
         cell["scenarios"] = []
         for scenario in spec["scenarios"]:
             if scenario["mode"] not in (mode, "both"):
@@ -43,8 +43,8 @@ def inventory(mode):
             cell["scenarios"].append({**scenario, "applicable": applicable,
                 "status": "DEFERRED" if implemented else "SKIPPED",
                 "covered": False,
-                "reason": "implemented scaffold; execution deferred" if implemented else
-                          "not applicable to iproute" if not applicable else "not implemented/not covered"})
+                "reason": "scenario runner available; not executed" if implemented else
+                          "not applicable to iproute" if not applicable else "no matrix runner checkpoint; not covered"})
         cells.append(cell)
     return spec, cells
 
@@ -67,7 +67,7 @@ def static_preflight(mode):
 def write_report(directory, report):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    lines = ["# M8 coverage inventory", "", f"Status: **{report['status']}**", "",
+    lines = ["# Compatibility coverage inventory", "", f"Status: **{report['status']}**", "",
              "This is not a passed compatibility matrix. SKIPPED means not covered, not success.", "",
              "| Cell | Status | Reason |", "|---|---|---|"]
     for cell in report["cells"]:
@@ -78,7 +78,7 @@ def write_report(directory, report):
     lines += [f"- {item}" for item in report["limitations"]]
     lines += ["", "## Scenario coverage (first implemented cell; JSON lists every cell)", ""]
     sample = next((cell for cell in report["cells"] if cell["runnerImplemented"]), report["cells"][0])
-    lines += [f"- {s['milestone']} / {s['id']}: **{s['status']}** — {s['reason']}" for s in sample["scenarios"]]
+    lines += [f"- {s['component']} / {s['id']}: **{s['status']}** — {s['reason']}" for s in sample["scenarios"]]
     (directory / "report.md").write_text("\n".join(lines) + "\n")
 
 
@@ -118,7 +118,7 @@ def apply_result(cell, inner):
         else:
             scenario.update(status="SKIPPED", reason="required checkpoint missing or not executed; not covered")
     cell["status"] = "FAILED" if inner.get("status") == "failed" else "INCOMPLETE"
-    cell["reason"] = "selected scaffold executed; remaining requirements skipped/not covered"
+    cell["reason"] = "selected direct-config runner executed; remaining requirements not covered"
 
 
 def apply_api_result(inventory_entry, inner):
@@ -143,12 +143,12 @@ def main():
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--no-build", action="store_true", help="all images are operator-built; accepted for compatibility")
     parser.add_argument("--no-import", action="store_true")
-    parser.add_argument("--api-admission-only", action="store_true", help="final-gate API assertions only; never run traffic scaffolds")
-    parser.add_argument("--with-api-admission", action="store_true", help="run bounded API assertions before selected traffic scaffolds")
+    parser.add_argument("--api-admission-only", action="store_true", help="final-gate API assertions only; never run traffic runners")
+    parser.add_argument("--with-api-admission", action="store_true", help="run bounded API assertions before selected traffic runners")
     parser.add_argument("--skip", action="store_true", help="explicitly skipped execution, still non-green matrix")
     args = parser.parse_args()
     os.umask(0o077)
-    directory = (args.report_dir or Path(tempfile.mkdtemp(prefix=f"ratatoskr-m8-{args.mode}-", dir="/tmp"))).resolve()
+    directory = (args.report_dir or Path(tempfile.mkdtemp(prefix=f"ratatoskr-matrix-{args.mode}-", dir="/tmp"))).resolve()
     if directory == ROOT or ROOT in directory.parents:
         parser.error("report directory must be outside repository")
     if (directory / "report.json").exists() or any(directory.glob("cell-*")):
@@ -157,20 +157,18 @@ def main():
     unknown = set(args.cell) - {cell["id"] for cell in cells}
     if unknown:
         parser.error("unknown cell ID; consult static inventory")
-    report = {"schemaVersion": 1, "scope": "M8-incomplete-M2-M8-matrix", "mode": args.mode,
+    report = {"schemaVersion": 1, "scope": "incomplete-compatibility-matrix", "mode": args.mode,
               "status": "INCOMPLETE", "execution": "NOT_RUN", "preflight": static_preflight(args.mode),
               "cells": cells, "apiAdmission": {"status":"DEFERRED", "execution":"NOT_RUN",
-                  "scenarios":[{**s,"status":"DEFERRED","covered":False,"reason":"implemented API scaffold; not executed"} for s in spec.get("apiScenarios",[])]}, "limitations": [
-                  "All e2e execution was deferred during authoring; static reports are not traffic evidence.",
-                  "Alternative CNI/mesh, healthy CRD gateway selection, agent traffic, WireGuard, HA and full observability fixtures unimplemented.",
-                  "M6 policy-only failure revocation and late IPv6 runtime safety remain final-gate blockers.",
-                  "Kernel 5.10 actual runtime and full packet capture/PMTU scenarios are unverified.",
-                  "Live exact steps 1–13 unavailable locally; no replacement checklist is invented.",
+                  "scenarios":[{**s,"status":"DEFERRED","covered":False,"reason":"API scenario runner available; not executed"} for s in spec.get("apiScenarios",[])]}, "limitations": [
+                  "Static inventory is not runtime evidence; separately gated advanced checks do not automatically cover matrix cells.",
+                  "Alternative CNI/mesh combinations, complete provider traffic and full packet/PMTU scenarios require their own evidence.",
+                  "Linux 5.10 component tests alone do not establish its CNI/mesh or selected-traffic compatibility.",
                   "Final-gate matrix returns nonzero when required coverage is missing, skipped or inconclusive."]}
     write_report(directory, report)
     if args.execute and not args.skip:
         if os.environ.get("RATATOSKR_E2E_FINAL_GATE") != "1":
-            parser.error("execution deferred; final gate requires RATATOSKR_E2E_FINAL_GATE=1")
+            parser.error("execution unauthorized; final gate requires RATATOSKR_E2E_FINAL_GATE=1")
         preflight = report["preflight"]
         # Missing credentials is a skip before requiring cluster tools or contacting the API.
         if args.mode == "live" and not args.api_admission_only and not preflight["liveProfilePresent"]:
@@ -188,7 +186,7 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 parser.error("another matrix runner is active; one cluster at a time")
-            report["execution"] = "SELECTED_SCAFFOLDS_ONLY"
+            report["execution"] = "SELECTED_RUNNERS_ONLY"
             if args.api_admission_only or args.with_api_admission:
                 # Load lazily: default static inventory must never invoke cluster API.
                 module_spec = importlib.util.spec_from_file_location("admission_final_gate", HERE / "admission.py")
@@ -259,7 +257,7 @@ def main():
     if any(cell["status"] == "FAILED" for cell in cells):
         report["status"] = "FAILED"
     write_report(directory, report)
-    print(f"M8 {report['status']}; JSON/Markdown inventory: {directory}")
+    print(f"Compatibility {report['status']}; JSON/Markdown inventory: {directory}")
     # Static/incomplete matrix must not silently return green, even if two subset runs pass.
     return 1 if report["status"] == "FAILED" else 4
 

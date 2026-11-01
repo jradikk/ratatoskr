@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual M1-only entrypoint. EXECUTION DEFERRED until final project gate.
+# Direct-config subset entrypoint; explicit final-gate authorization is required.
 set +x
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
