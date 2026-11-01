@@ -46,7 +46,7 @@ CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
     "fixture-manifests", "source-create", "operator-secret-create",
     "operator-gateway-create", "source-ready", "gateway-owned",
     "peer-baseline", "peer-registration", "independent-tokenreview", "peer-revocation",
-    "peer-lifecycle", "cleanup-unverified"})
+    "peer-lifecycle", "plaintext-denial", "cleanup-unverified"})
 
 
 CLEANUP_STAGES = frozenset({"selected", "gateway", "secret", "gateway-ambiguous",
@@ -558,6 +558,29 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         except (tokenreview.Blocked, adapter.AdapterError, KeyError, ValueError,
                 TypeError, AttributeError):
             raise StageBlocked("independent-tokenreview") from None
+    if os.environ.get("RATATOSKR_E2E_WG_PLAINTEXT") == "1":
+        step = "plaintext-denial"
+        try:
+            try:
+                from . import plaintext_denial
+            except ImportError:
+                import plaintext_denial
+            proof = plaintext_denial.run(owner, source_api, operator, gateway_uid, client_uid,
+                                          pod["status"]["podIP"], gateway_pod,
+                                          gw["status"]["gatewayID"], ids)
+            need(proof is True, "Plaintext GENEVE denial proof incomplete.")
+            # A fresh encrypted marker after the deliberately plaintext datagrams
+            # proves the authenticated path remains healthy and unchanged.
+            current = source_api.get("pod", CLIENT, owner.names[1])
+            latest = operator.get_object("egressgateway", operator.name, SYSTEM)
+            need(current["metadata"].get("uid") == client_uid and
+                 verify_encrypted_ready(latest, current, gateway_uid, client_uid, operator.name) == endpoint_ip and
+                 source_api.probe_running(CLIENT, client_uid, ids["selected"], "healthy",
+                    workload["spec"]["containers"][0]["env"][1]["value"]) is True,
+                 "Encrypted selected marker unavailable after plaintext denial.")
+        except (plaintext_denial.Blocked, Blocked, adapter.AdapterError, KeyError, ValueError,
+                TypeError, AttributeError):
+            raise StageBlocked(step) from None
     step = "peer-revocation"
     try:
         operator.delete_selected(source_api)
@@ -577,7 +600,7 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
     else:
         raise StageBlocked(step)
     return {"encryptedStartup": True, "peerRegistered": True,
-            "peerRemoved": True, "plainGeneve": "not-tested",
+            "peerRemoved": True, "plainGeneve": "denied" if os.environ.get("RATATOSKR_E2E_WG_PLAINTEXT") == "1" else "not-tested",
             "tokenReview": "not-independently-observed"}
 
 
@@ -627,7 +650,8 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
             result = observed(owner, source_api, operator, gateway_uid,
                               selected_pod(owner, operator.name, api_ip), ids)
             need(result == {"encryptedStartup": True, "peerRegistered": True,
-                            "peerRemoved": True, "plainGeneve": "not-tested",
+                            "peerRemoved": True,
+                            "plainGeneve": "denied" if os.environ.get("RATATOSKR_E2E_WG_PLAINTEXT") == "1" else "not-tested",
                             "tokenReview": "not-independently-observed"},
                  "Encrypted peer lifecycle observation incomplete.")
         except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
@@ -689,7 +713,7 @@ def main(argv=None):
             node_images.Blocked, KeyError, ValueError, TypeError, AttributeError):
         print("FAILED: WireGuard synthetic preflight or cleanup blocked; no M8 PASS.")
         return 1
-    print("INCOMPLETE: encrypted startup and peer lifecycle observed; plaintext rejection and independent TokenReview unverified; no M8 PASS.")
+    print("INCOMPLETE: encrypted startup and peer lifecycle observed; optional plaintext denial is scoped only when explicitly enabled; remaining M8 coverage unverified. No M8 PASS.")
     return 4
 
 

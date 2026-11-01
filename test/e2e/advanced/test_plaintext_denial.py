@@ -1,0 +1,85 @@
+"""Pure fake denial evidence; no host/cluster commands or private data."""
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import plaintext_denial as d
+import plaintext_root as r
+
+UID = "a" * 32
+SID = "b" * 64
+CID = "c" * 64
+SOURCE = "10.42.1.8"
+GATEWAY = "10.42.0.7"
+IDS = {"selected": "containerd://sha256:" + "d" * 64,
+       "gateway": "containerd://sha256:" + "e" * 64}
+
+
+def sandbox(uid=UID, name="synthetic-client", namespace="apps", ip=SOURCE, pid=123):
+    return {"status": {"id": SID, "state": "SANDBOX_READY",
+            "metadata": {"uid": uid, "namespace": namespace, "name": name},
+            "labels": {"io.kubernetes.pod.uid": uid}, "network": {"ip": ip}},
+            "info": {"pid": pid, "runtimeSpec": {"linux": {"namespaces": [
+                {"type": "network", "path": "/var/run/netns/owned"}]}}}}
+
+
+class DenialTests(unittest.TestCase):
+    def test_nft_exact_input_guard_and_counter(self):
+        chain = {"chain": {"family": "inet", "table": "ratatoskr_wg", "name": "input",
+                           "type": "filter", "hook": "input", "prio": 0, "policy": "accept"}}
+        expr = [{"match": {"op": "!=", "left": {"meta": {"key": "iifname"}}, "right": "rtkwg0"}},
+                {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}},
+                           "right": 6081}}, {"counter": {"packets": 9, "bytes": 900}}, {"drop": None}]
+        rule = {"rule": {"family": "inet", "table": "ratatoskr_wg", "chain": "input", "expr": expr}}
+        self.assertEqual(r.guard(json.dumps({"nftables": [{"metainfo": {}}, chain, rule]}).encode()), 9)
+        import copy
+        for field, replacement in (("interface", "eth0"), ("port", 51820),
+                                   ("counter", -1), ("verdict", "accept")):
+            with self.subTest(field=field):
+                bad = copy.deepcopy({"nftables": [chain, rule]})
+                altered = bad["nftables"][1]["rule"]["expr"]
+                if field == "interface": altered[0]["match"]["right"] = replacement
+                elif field == "port": altered[1]["match"]["right"] = replacement
+                elif field == "counter": altered[2]["counter"]["packets"] = replacement
+                else: altered[3] = {replacement: None}
+                with self.assertRaises(ValueError): r.guard(json.dumps(bad).encode())
+
+    def test_exact_plaintext_arrival_drop_and_no_gnv_delivery(self):
+        good = {"source": SOURCE, "gateway": GATEWAY, "vni": 7, "sent": 3,
+                "ethIn": 2, "gnvIn": 0, "dropBefore": 10, "dropAfter": 12}
+        self.assertTrue(d.proof(json.dumps(good).encode(), source=SOURCE, gateway=GATEWAY, vni=7))
+        for change in ({"ethIn": 0}, {"gnvIn": 1}, {"dropAfter": 11}, {"sent": 0},
+                       {"gateway": "10.42.0.8"}, {"vni": 8}, {"dropBefore": 15},
+                       {"dropAfter": True}):
+            with self.subTest(change=change), self.assertRaises(d.Blocked):
+                d.proof(json.dumps(dict(good, **change)).encode(), source=SOURCE, gateway=GATEWAY, vni=7)
+
+    def test_ownership_cri_wrong_uid_pid_ip_and_missing_capture_fail(self):
+        listing = {"items": [{"id": SID, "state": "SANDBOX_READY",
+                              "metadata": {"uid": UID, "namespace": "apps", "name": "synthetic-client"},
+                              "labels": {"io.kubernetes.pod.uid": UID}}]}
+        self.assertEqual(d.sandbox_id(json.dumps(listing).encode(), UID, "apps", "synthetic-client"), SID)
+        self.assertEqual(d.sandbox_pid(json.dumps(sandbox()).encode(), SID, UID, "apps", "synthetic-client", SOURCE), 123)
+        for value in (sandbox(uid="f" * 32), sandbox(pid=0), sandbox(ip="10.42.2.8")):
+            with self.assertRaises(d.Blocked):
+                d.sandbox_pid(json.dumps(value).encode(), SID, UID, "apps", "synthetic-client", SOURCE)
+        with self.assertRaises(d.Blocked):
+            d.sandbox_id(json.dumps(listing).encode(), "f" * 32, "apps", "synthetic-client")
+
+    def test_root_fixed_args_frame_and_no_dynamic_command(self):
+        self.assertEqual(r.validated(["321", "123", "322", "124", SOURCE, GATEWAY, "7"]),
+                         (321, 123, 322, 124, SOURCE, GATEWAY, 7))
+        self.assertEqual(len(r.frame(7, SOURCE, GATEWAY)), 50)
+        for bad in (["321", "0", "322", "124", SOURCE, GATEWAY, "7"],
+                    ["321", "123", "322", "124", SOURCE, GATEWAY, "7;sh"],
+                    ["321", "123", "322", "124", SOURCE, GATEWAY, "16777216"]):
+            with self.assertRaises(ValueError): r.validated(bad)
+        raw = json.dumps([{"ifname": "gnv0", "stats64": {"rx": {"packets": 11}}}]).encode()
+        self.assertEqual(r.rx_packets(raw), 11)
+        with self.assertRaises(ValueError): r.rx_packets(raw.replace(b"gnv0", b"eth0"))
+
+
+if __name__ == "__main__": unittest.main()
