@@ -12,11 +12,12 @@ import subprocess
 import sys
 import time
 try:
-    from . import node_images
+    from . import node_images, environment as synthetic_environment
 except ImportError:
     import node_images
+    import environment as synthetic_environment
 
-CONTEXT = "k3d-ratatoskr-flannel"
+CONTEXT = synthetic_environment.FLANNEL.context
 PROBE = "http://10.88.0.1:8080/exit"
 COMPONENTS = ("controller", "webhook", "agent", "gateway", "plugin", "server", "tools", "witness", "selected")
 ID_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]+://)?sha256:[a-fA-F0-9]{64}\Z")
@@ -37,7 +38,10 @@ def expected_ids(environ, *, init=False):
 
 
 class ReadOnlyAPI:
-    def __init__(self, budget=120, clock=time.monotonic):
+    def __init__(self, budget=120, clock=time.monotonic, *, environment=synthetic_environment.FLANNEL):
+        if type(environment) is not synthetic_environment.Environment:
+            raise Blocked("Unsupported read-only synthetic environment.")
+        self.environment = environment
         self.clock = clock
         self.deadline = clock() + budget
 
@@ -47,7 +51,7 @@ class ReadOnlyAPI:
         remaining = min(15, self.deadline - self.clock())
         if remaining <= 0:
             raise Blocked("Final-gate preflight total deadline exceeded.")
-        args = ["kubectl", "--context", CONTEXT, "--request-timeout=10s", "get", resource]
+        args = ["kubectl", "--context", self.environment.context, "--request-timeout=10s", "get", resource]
         if name:
             args.append(name)
         if namespace:
@@ -124,17 +128,27 @@ def verify_workload(api, namespace, kind, name, component, expected, count):
     return workload
 
 
-def preflight(api, ids):
+def _read_only_environment(api, environment):
+    """Reject cross-context preflight; legacy fake APIs may only use flannel."""
+    if (type(environment) is not synthetic_environment.Environment or
+            getattr(api, "environment", synthetic_environment.FLANNEL) != environment or
+            (environment.variant != "flannel" and not isinstance(api, ReadOnlyAPI))):
+        raise Blocked("Read-only preflight context identity mismatch.")
+    return environment
+
+
+def preflight(api, ids, *, environment=synthetic_environment.FLANNEL):
+    environment = _read_only_environment(api, environment)
     nodes = api.get("nodes")["items"]
     if (len(nodes) != 3 or
-        {n["metadata"].get("name") for n in nodes} != set(node_images.NODES) or
+        {n["metadata"].get("name") for n in nodes} != set(environment.nodes) or
         {n["metadata"].get("name") for n in nodes if
-         "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {node_images.NODES[0]} or
+         "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {environment.nodes[0]} or
         not all(ready(n) for n in nodes)):
         raise Blocked("Existing three-node cluster is not Ready.")
     env = api.get("configmap", "ratatoskr-testenv", "kube-system").get("data", {})
-    if env.get("variant") != "flannel" or env.get("mesh") != "none":
-        raise Blocked("Existing cluster is not preflighted flannel/no-mesh.")
+    if env.get("variant") != environment.variant or env.get("mesh") != "none":
+        raise Blocked("Existing cluster variant or mesh differs from read-only environment.")
     mutation = api.get("mutatingwebhookconfiguration", "ratatoskr-pods")
     validation = api.get("validatingwebhookconfiguration", "ratatoskr-validation")
     hooks = mutation.get("webhooks", []) + validation.get("webhooks", [])
@@ -214,17 +228,18 @@ def init_release_preflight(api, ids):
     return namespace
 
 
-def preflight_basics(api):
-    """Fail closed unless existing Ready three-node flannel/no-mesh context."""
+def preflight_basics(api, *, environment=synthetic_environment.FLANNEL):
+    """Fail closed unless exact Ready nodes and variant/no-mesh are verified."""
+    environment = _read_only_environment(api, environment)
     nodes = api.get("nodes")["items"]
-    if (len(nodes) != 3 or {n["metadata"].get("name") for n in nodes} != set(node_images.NODES) or
+    if (len(nodes) != 3 or {n["metadata"].get("name") for n in nodes} != set(environment.nodes) or
             {n["metadata"].get("name") for n in nodes if
-             "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {node_images.NODES[0]} or
+             "node-role.kubernetes.io/control-plane" in n["metadata"].get("labels", {})} != {environment.nodes[0]} or
             not all(ready(n) for n in nodes)):
         raise Blocked("Existing three-node cluster is not Ready.")
     env = api.get("configmap", "ratatoskr-testenv", "kube-system").get("data", {})
-    if env.get("variant") != "flannel" or env.get("mesh") != "none":
-        raise Blocked("Existing cluster is not preflighted flannel/no-mesh.")
+    if env.get("variant") != environment.variant or env.get("mesh") != "none":
+        raise Blocked("Existing cluster variant or mesh differs from read-only environment.")
     mutation = api.get("mutatingwebhookconfiguration", "ratatoskr-pods")
     validation = api.get("validatingwebhookconfiguration", "ratatoskr-validation")
     hooks = mutation.get("webhooks", []) + validation.get("webhooks", [])

@@ -666,3 +666,19 @@ This root-helper protocol was unit-tested with fake processes only, **not**
 executed against a cluster at authoring time. The selected helper image must
 be rebuilt/imported with the `outage-capture` mode and immutable image ID
 reapproved before any serial final-gate attempt.
+
+## Read-only CNI environment identity seam (not a Calico runner)
+
+`environment.py` defines frozen, exact `flannel` and `calico` context/node
+identities. `run.ReadOnlyAPI(environment=...)` and read-only
+`run.preflight(..., environment=...)` / `preflight_basics(...)` reject mismatched
+Ready node names/control-plane role and `ratatoskr-testenv` `variant`/`mesh`
+**before** release checks. The default remains the existing flannel context.
+
+**No Calico traffic or resource mutation is enabled.** The CLI, namespace
+Lifecycle, fixture adapter/cleanup, node CRI verification and advanced runners
+remain flannel-only; this read-only seam does not authorize rewriting their
+contexts or claiming a matrix cell. A later review must pass one approved
+identity through all of those paths and verify the actual CNI before any
+Calico fixture execution. This change does not install a CNI, create/destroy a
+cluster, alter release configuration, or mark coverage.
