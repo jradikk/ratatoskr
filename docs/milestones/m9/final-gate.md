@@ -336,6 +336,22 @@ The existing flannel cluster remains preserved pending explicit approval for a
 serial Calico replacement/run/restoration procedure. Baseline Linux 5.10 and
 all outstanding release acceptance requirements remain open.
 
+## Continued release goal — valid plaintext probe packet correction
+
+At `67d5a6a`, the fixed plaintext GENEVE diagnostic now has a valid inner IPv4
+header checksum, nonzero UDP ports and correct UDP/IP lengths. Tests validate
+both inner and outer checksums/lengths and the fixed 92-byte frame. The payload
+is a UDP diagnostic addressed to the owned gateway, not an HTTP marker request;
+no marker-delivery conclusion follows from this packet alone.
+
+With unchanged production guards and NetworkPolicy, the serial encrypted fixture
+again measured sent=3, gateway eth0 ingress=0, gnv0 ingress delta=0 and INPUT guard
+counter delta=0. The runtime failed at plaintext-denial and performed owned
+cleanup. It remains an unverified gateway-ingress/drop gate, not a successful
+rejection proof. No policy, capability, runtime or cluster topology was changed.
+All 93 advanced and 169 synthetic Python tests and diff checks passed. The prior
+malformed test payload is corrected, but no mandatory gate is promoted to PASS.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
