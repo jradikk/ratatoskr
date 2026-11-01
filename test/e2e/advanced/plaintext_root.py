@@ -113,9 +113,13 @@ def frame(vni, source, gateway):
     """Synthetic valid GENEVE/TEB + Ethernet + IPv4/UDP, no credentials."""
     outer = bytes([0, 0, 0x65, 0x58]) + (vni << 8).to_bytes(4, "big")
     ethernet = bytes.fromhex("0200000000020200000000030800")
+    # This is a valid, fixed UDP diagnostic addressed to the owned gateway,
+    # not an HTTP marker request. No marker-delivery conclusion follows from it.
     src, dst = socket.inet_aton(source), socket.inet_aton(gateway)
-    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 28, 0, 0, 64, 17, 0, src, dst)
-    return outer + ethernet + ip + b"\x00" * 8
+    udp = struct.pack("!HHHH", 40000, 8080, 8, 0)  # IPv4 permits zero UDP checksum.
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0, src, dst)
+    ip = ip[:10] + struct.pack("!H", ip_checksum(ip)) + ip[12:]
+    return outer + ethernet + ip + udp
 
 
 def route_next_hop(raw, source, gateway):

@@ -100,6 +100,27 @@ class DenialTests(unittest.TestCase):
             with self.subTest(device=device), self.assertRaises(ValueError):
                 r.neighbor_mac(json.dumps([dict(entry, dev=device)]).encode(), "10.42.1.1")
 
+    def test_inner_and_outer_ipv4_lengths_and_checksums_are_valid(self):
+        import socket
+        import struct
+        inner = r.frame(7, SOURCE, GATEWAY)
+        self.assertEqual(len(inner), 50)
+        self.assertEqual(inner[:4], b"\x00\x00\x65\x58")
+        self.assertEqual(int.from_bytes(inner[4:7], "big"), 7)
+        ip = inner[22:42]
+        self.assertEqual(struct.unpack("!H", ip[2:4])[0], 28)
+        self.assertEqual(r.ip_checksum(ip), 0)
+        self.assertEqual(ip[12:16], socket.inet_aton(SOURCE))
+        self.assertEqual(ip[16:20], socket.inet_aton(GATEWAY))
+        self.assertEqual(struct.unpack("!HHHH", inner[42:]), (40000, 8080, 8, 0))
+        packet = r.packet(SOURCE, GATEWAY, 7, bytes.fromhex("020000000001"),
+                          bytes.fromhex("020000000002"))
+        self.assertEqual(len(packet), 92)
+        self.assertEqual(r.ip_checksum(packet[14:34]), 0)
+        self.assertEqual(struct.unpack("!H", packet[16:18])[0], len(packet) - 14)
+        self.assertEqual(struct.unpack("!HHHH", packet[34:42]), (40000, 6081, 58, 0))
+        self.assertEqual(packet[42:], inner)
+
     def test_raw_l2_sender_only_three_approved_datagrams(self):
         import socket
         observed = []
