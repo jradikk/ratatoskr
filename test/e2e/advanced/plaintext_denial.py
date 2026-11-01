@@ -137,6 +137,15 @@ def _bounded_root(argv):
                     if len(result) > 512:
                         raise Blocked("Plaintext root helper output exceeded cap.")
         if proc.wait(timeout=max(.001, deadline-time.monotonic())) != 0:
+            try:
+                obj = json.loads(result)
+                if (isinstance(obj, dict) and set(obj) == {"blocked"} and
+                        obj["blocked"] in {"validate", "pin-source", "pin-gateway", "guard-before",
+                                           "gnv-before", "capture-start", "send", "capture-finish",
+                                           "guard-after", "gnv-after", "header-parse", "unknown"}):
+                    raise Blocked("Plaintext root helper blocked at " + obj["blocked"] + ".")
+            except (ValueError, UnicodeError, TypeError):
+                pass
             raise Blocked("Plaintext root helper or CNI ingress blocked.")
         return bytes(result)
     except (OSError, subprocess.TimeoutExpired):

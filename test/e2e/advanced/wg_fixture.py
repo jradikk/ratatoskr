@@ -46,7 +46,11 @@ CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
     "fixture-manifests", "source-create", "operator-secret-create",
     "operator-gateway-create", "source-ready", "gateway-owned",
     "peer-baseline", "peer-registration", "independent-tokenreview", "peer-revocation",
-    "peer-lifecycle", "plaintext-denial", "cleanup-unverified"})
+    "peer-lifecycle", "plaintext-denial", "cleanup-unverified",
+    "plaintext-denial-validate", "plaintext-denial-pin-source", "plaintext-denial-pin-gateway",
+    "plaintext-denial-guard-before", "plaintext-denial-gnv-before", "plaintext-denial-capture-start",
+    "plaintext-denial-send", "plaintext-denial-capture-finish", "plaintext-denial-guard-after",
+    "plaintext-denial-gnv-after", "plaintext-denial-header-parse", "plaintext-denial-unknown"})
 
 
 CLEANUP_STAGES = frozenset({"selected", "gateway", "secret", "gateway-ambiguous",
@@ -578,8 +582,15 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
                  source_api.probe_running(CLIENT, client_uid, ids["selected"], "healthy",
                     workload["spec"]["containers"][0]["env"][1]["value"]) is True,
                  "Encrypted selected marker unavailable after plaintext denial.")
-        except (plaintext_denial.Blocked, Blocked, adapter.AdapterError, KeyError, ValueError,
-                TypeError, AttributeError):
+        except plaintext_denial.Blocked as err:
+            # Only fixed root helper stage names may be exposed after cleanup.
+            stage = str(err)
+            safe = frozenset({"validate", "pin-source", "pin-gateway", "guard-before", "gnv-before",
+                              "capture-start", "send", "capture-finish", "guard-after", "gnv-after",
+                              "header-parse", "unknown"})
+            reason = next((s for s in safe if stage == "Plaintext root helper blocked at " + s + "."), None)
+            raise StageBlocked("plaintext-denial-" + reason if reason else step) from None
+        except (Blocked, adapter.AdapterError, KeyError, ValueError, TypeError, AttributeError):
             raise StageBlocked(step) from None
     step = "peer-revocation"
     try:

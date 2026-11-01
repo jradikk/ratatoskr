@@ -18,6 +18,19 @@ CLONE_NEWNET = 0x40000000
 MARK = 0x00400000
 HEX_NFT = 65536
 
+# Fixed stage-only diagnostics; never output raw nft JSON, packets or errors.
+STAGES = frozenset({"validate", "pin-source", "pin-gateway", "guard-before",
+                    "gnv-before", "capture-start", "send", "capture-finish",
+                    "guard-after", "gnv-after", "header-parse", "unknown"})
+_stage = "validate"
+
+
+def checkpoint(stage):
+    global _stage
+    if stage not in STAGES:
+        raise ValueError()
+    _stage = stage
+
 
 def validated(argv):
     if (len(argv) != 7 or not all(re.fullmatch(r"[1-9][0-9]{0,9}", a) for a in
@@ -138,16 +151,21 @@ def send(argv):
 
 def collect(args):
     host_src, pid_src, host_gw, pid_gw, source, gateway, vni = args
+    checkpoint("pin-source")
     src_fd, gw_fd = pin(host_src, pid_src), None
     proc = None
     try:
+        checkpoint("pin-gateway")
         gw_fd = pin(host_gw, pid_gw)
         base = ["/usr/bin/nsenter", "--net=/proc/self/fd/" + str(gw_fd), "--"]
         nft = base + ["/usr/sbin/nft", "-j", "list", "chain", "inet", "ratatoskr_wg", "input"]
+        checkpoint("guard-before")
         before = guard(run(nft, gw_fd))
         link = base + ["/usr/sbin/ip", "-j", "-s", "link", "show", "dev", "gnv0"]
+        checkpoint("gnv-before")
         rx_before = rx_packets(run(link, gw_fd))
         bpf = "udp and src host " + source + " and dst host " + gateway + " and dst port 6081"
+        checkpoint("capture-start")
         proc = subprocess.Popen(base + ["/usr/bin/tcpdump", "-i", "eth0", "-nn", "-l", "-tt", "-s", "96", "-Q", "in", bpf],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 pass_fds=(gw_fd,), start_new_session=True,
@@ -181,7 +199,9 @@ def collect(args):
                 if ready and stop_at is None:
                     if proc.poll() is not None:
                         raise ValueError()
+                    checkpoint("send")
                     send_in_source(src_fd, source, gateway, frame(vni, source, gateway))
+                    checkpoint("capture-finish")
                     stop_at = time.monotonic() + .5
                 if stop_at is not None and not stopped and time.monotonic() >= stop_at:
                     os.killpg(proc.pid, signal.SIGINT)
@@ -190,10 +210,13 @@ def collect(args):
                 raise ValueError()
         finally:
             selector.close()
+        checkpoint("guard-after")
         after = guard(run(nft, gw_fd))
+        checkpoint("gnv-after")
         rx_after = rx_packets(run(link, gw_fd))
         if rx_after < rx_before:
             raise ValueError()
+        checkpoint("header-parse")
         lines = [line for line in output.decode("ascii").splitlines() if line.strip()]
         # Only fixed tuple/header shape may be returned, never payload/pcap.
         match = re.compile(r"^[0-9]+\.[0-9]+ IP " + re.escape(source) +
@@ -218,6 +241,7 @@ def collect(args):
 
 
 def main():
+    checkpoint("validate")
     try:
         if sys.argv[1:2] == ["--send"]:
             send(sys.argv[2:]); return 0
@@ -226,6 +250,8 @@ def main():
         return 0
     except (OSError, ValueError, UnicodeError, KeyError, TypeError, AttributeError,
             subprocess.TimeoutExpired):
+        # A bounded, authored category is the *only* root failure output.
+        print(json.dumps({"blocked": _stage}, separators=(",", ":")))
         return 1
 
 

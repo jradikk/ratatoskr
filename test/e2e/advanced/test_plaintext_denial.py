@@ -47,6 +47,24 @@ class DenialTests(unittest.TestCase):
                 else: altered[3] = {replacement: None}
                 with self.assertRaises(ValueError): r.guard(json.dumps(bad).encode())
 
+    def test_root_helper_only_fixed_failure_category_crosses_stdout(self):
+        import contextlib
+        import io
+        for label in ("guard-before", "capture-start", "send", "header-parse"):
+            with self.subTest(label=label), patch.object(r, "collect", side_effect=ValueError("PRIVATE_ERROR")), \
+                 patch.object(r, "checkpoint", wraps=r.checkpoint):
+                r._stage = label
+                output = io.StringIO()
+                with patch.object(r, "validated", return_value=tuple()), contextlib.redirect_stdout(output):
+                    # main resets stage first; patched collect selects a fixed stage.
+                    def fail(_args):
+                        r.checkpoint(label)
+                        raise ValueError("PRIVATE_ERROR")
+                    with patch.object(r, "collect", side_effect=fail):
+                        self.assertEqual(r.main(), 1)
+                self.assertEqual(json.loads(output.getvalue()), {"blocked": label})
+                self.assertNotIn("PRIVATE_ERROR", output.getvalue())
+
     def test_exact_plaintext_arrival_drop_and_no_gnv_delivery(self):
         good = {"source": SOURCE, "gateway": GATEWAY, "vni": 7, "sent": 3,
                 "ethIn": 2, "gnvIn": 0, "dropBefore": 10, "dropAfter": 12}
