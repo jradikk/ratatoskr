@@ -29,14 +29,16 @@ PRIORITY = 10998
 DEST = "10.88.0.1"
 
 
-def identity(pod, namespace, uid, image_id):
+def identity(pod, namespace, uid, image_id, *, environment=lifecycle.synthetic_environment.FLANNEL):
+    if type(environment) is not lifecycle.synthetic_environment.Environment:
+        raise Blocked("Capture environment identity invalid.")
     try:
         meta, spec, status = pod["metadata"], pod["spec"], pod["status"]
         containers = [v for v in status["containerStatuses"] if v.get("name") == "client"]
         ip = ipaddress.ip_address(status["podIP"])
         if (meta["namespace"] != namespace or meta["name"] != "synthetic-client" or
                 meta["uid"] != uid or meta.get("deletionTimestamp") or not lifecycle.UID.fullmatch(uid) or
-                spec["nodeName"] not in node_images.NODES or status.get("phase") != "Running" or
+                spec["nodeName"] not in environment.nodes or status.get("phase") != "Running" or
                 len(containers) != 1 or containers[0].get("imageID") != image_id or
                 containers[0].get("ready") is not True or not CID.fullmatch(containers[0].get("containerID", "")) or
                 ip.version != 4 or ip.is_unspecified or ip.is_multicast):
@@ -328,7 +330,8 @@ def root_collect(node_host_pid, sandbox_pid, table, source, api_ip, trigger, *,
 
 
 def prove(api, namespace, uid, image_id, gateway_id, api_ip, *, transport=node_images._bounded,
-          trigger=None, local=local_exec, collect_fn=root_collect):
+          trigger=None, local=local_exec, collect_fn=root_collect,
+          environment=lifecycle.synthetic_environment.FLANNEL):
     """Require exact UID-bound closed routes and live positive-control capture.
 
     `trigger` is the existing fixed helper `outage-capture` probe; its exit0
@@ -338,12 +341,23 @@ def prove(api, namespace, uid, image_id, gateway_id, api_ip, *, transport=node_i
     if (not isinstance(uid, str) or not lifecycle.UID.fullmatch(uid) or type(gateway_id) is not int or
             not 1 <= gateway_id <= 0xffffff or trigger is None):
         raise Blocked("Selected capture identity or approved probe missing.")
+    if type(environment) is not lifecycle.synthetic_environment.Environment:
+        raise Blocked("Capture environment identity invalid.")
+    owner = getattr(api, "owner", None)
+    if (environment != lifecycle.synthetic_environment.FLANNEL and
+            (not isinstance(owner, lifecycle.Lifecycle) or
+             getattr(owner, "environment", None) != environment or
+             getattr(getattr(owner, "api", None), "environment", None) != environment or
+             owner.closed or owner.deadline is None or namespace != owner.names[1])):
+        raise Blocked("Capture API/owner environment mismatch before node inspection.")
+    if owner is not None and getattr(owner, "environment", environment) != environment:
+        raise Blocked("Capture API/owner environment mismatch before node inspection.")
     try:
         api_ip = str(ipaddress.IPv4Address(api_ip))
     except (ValueError, TypeError):
         raise Blocked("Direct API IPv4 invalid for capture.") from None
     pod = api.get("pod", "synthetic-client", namespace)
-    node, source, container_id = identity(pod, namespace, uid, image_id)
+    node, source, container_id = identity(pod, namespace, uid, image_id, environment=environment)
     prefix = ["docker", "exec", node, "/bin/crictl", "--runtime-endpoint", node_images.RUNTIME]
     def inspect(what, sid=None):
         argv = prefix + (["pods", "-o", "json"] if what == "pods" else
@@ -356,7 +370,7 @@ def prove(api, namespace, uid, image_id, gateway_id, api_ip, *, transport=node_i
     pid = sandbox_status(inspect("status", sid), sid, uid, namespace, source)
     def recheck():
         current = api.get("pod", "synthetic-client", namespace)
-        if (identity(current, namespace, uid, image_id) != (node, source, container_id) or
+        if (identity(current, namespace, uid, image_id, environment=environment) != (node, source, container_id) or
                 sandbox_list(inspect("pods"), uid, namespace) != sid or
                 sandbox_status(inspect("status", sid), sid, uid, namespace, source) != pid):
             raise Blocked("Selected Pod/CRI sandbox identity changed during capture.")

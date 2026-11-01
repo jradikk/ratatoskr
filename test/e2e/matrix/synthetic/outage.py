@@ -221,7 +221,10 @@ def witness_ready(api, namespace, uid, image_id, server_uid, server_image_id):
 
 def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             adapter_factory=adapter.FixtureAPI, observer=partial_gateway.observe,
-            healthy=partial_gateway.healthy_selected, clock=time.monotonic, sleep=time.sleep):
+            healthy=partial_gateway.healthy_selected, clock=time.monotonic, sleep=time.sleep,
+            environment=lifecycle.synthetic_environment.FLANNEL):
+    if type(environment) is not lifecycle.synthetic_environment.Environment:
+        raise Blocked("Outage environment identity invalid before mutation.")
     if (not isinstance(ids, dict) or set(ids) != set(run.COMPONENTS) or
             not all(isinstance(value, str) and run.ID_PATTERN.fullmatch(value) for value in ids.values())):
         raise Blocked("Nine immutable expected runtime image IDs required.")
@@ -231,9 +234,15 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
             raise ValueError()
     except (ValueError, TypeError):
         raise Blocked("Preflight API IPv4 invalid.") from None
-    with lifecycle_factory(duration=900) as owner:
+    factory_args = {} if environment == lifecycle.synthetic_environment.FLANNEL else {"environment": environment}
+    with lifecycle_factory(duration=900, **factory_args) as owner:
         stage = "namespace-create"
         try:
+            owner_api = getattr(owner, "api", None)
+            if (getattr(owner, "environment", lifecycle.synthetic_environment.FLANNEL) != environment or
+                    getattr(owner_api, "environment", lifecycle.synthetic_environment.FLANNEL) != environment or
+                    (environment != lifecycle.synthetic_environment.FLANNEL and owner_api is None)):
+                raise Blocked("Outage owner/API context mismatch before mutation.")
             owner.create_namespaces()
             stage = "private-pki"
             owner.generate_pki()
@@ -341,8 +350,9 @@ def execute(ids, *, api_ip, lifecycle_factory=lifecycle.Lifecycle,
                             if api.probe_running("synthetic-client", uid, ids["selected"],
                                                  "outage-capture", str(address)) is not True:
                                 raise failclose_capture.Blocked("Selected bounded timeout probe did not complete.")
+                        capture_env = {} if environment == lifecycle.synthetic_environment.FLANNEL else {"environment": environment}
                         if failclose_capture.prove(api, apps, uid, ids["selected"], baseline["gatewayID"],
-                                                    str(address), trigger=fixed_probe):
+                                                    str(address), trigger=fixed_probe, **capture_env):
                             return pod
                     return None
                 poll(owner, "withdrawn-selected-fail-close", fail_close, seconds=85,

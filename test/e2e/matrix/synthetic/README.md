@@ -690,6 +690,18 @@ preflight before writes, and separately authorize the disposable fixture. No
 CNI/cluster creation or destruction, release change, or coverage update occurs
 in this incremental plumbing change.
 
+## Outage/capture environment plumbing (no Calico outage runner)
+
+`outage.execute(environment=...)` and `failclose_capture.identity/prove` now
+carry one immutable environment through the UID-owned lifecycle and bounded
+source-capture node allowlist. A non-default capture requires an active
+Calico-owned `Lifecycle` and matching owner API context before Docker or root
+helper calls; a Pod on the flannel node list is rejected. Existing flannel
+calls and the only public outage CLI remain unchanged. This is **offline-tested
+plumbing**, not an authorized Calico outage execution, CNI setup, or new matrix
+coverage. A separately reviewed preflight/opt-in public runner and non-destructive
+existing-cluster approval would be required before Calico outage runtime.
+
 ## Separately gated existing-Calico healthy-only synthetic subset
 
 `calico_healthy.py` is a **standalone** partial acceptance path, not dispatched
