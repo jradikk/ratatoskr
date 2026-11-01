@@ -99,9 +99,14 @@ remain unimplemented.
 `coverage.json` is the auditable source: 96 cells per fake/live mode and 25 named
 scenario definitions. It is derived from docs/design.md and M2–M7 reports, not an
 invented live steps 1–13 checklist. Only flannel/none/init/{iproute,ebpf}/none has
-a direct-config runner. Cilium, Cilium-WireGuard, Calico, all meshes, agent and
-WireGuard fixtures remain unimplemented. eBPF+WireGuard is unsupported and not
-downgraded. Planned Cartesian combinations are not a compatibility guarantee.
+a **matrix direct-config runner**. Separate, explicitly gated advanced fixtures
+have yielded scoped flannel/none/agent/iproute synthetic WireGuard peer lifecycle,
+fresh-connection HA and witnessed outage/recovery evidence, plus independent
+owned-Pod Kubernetes TokenReview semantics (not the gateway's call). They are
+not wired into `coverage.json` or a full-matrix pass. Cilium,
+Cilium-WireGuard, Calico and mesh traffic fixtures remain unimplemented;
+eBPF+WireGuard is unsupported and not downgraded. Planned Cartesian combinations
+are not a compatibility guarantee.
 
 ## Static output and allowed validation
 

@@ -6,17 +6,16 @@ workload with `ratatoskr.skaldhall.io/gateway: <name>`, and its outbound traffic
 all of it or a policy-selected subset — leaves through that VPN. If the gateway
 or VPN is down, steered traffic fails closed.
 
-> **Status: pre-alpha; NOT READY FOR PRODUCTION.** M4–M7 components have local
-> checks, but the final traffic gate is blocked: iproute port-selective TCP
-> replies fail reverse-path validation in the NET_ADMIN-only programming init
-> container, and the eBPF fake echo times out **after** packet-correlated
-> gateway flower acceptance and GENEVE return reception. The precise eBPF
-> socket failure is now packet-correlated to reverse-path filtering in a
-> healthy three-netns fixture; intrinsic tc-egress metadata loss was not
-> reproduced with the unchanged production program. No safe correction is
-> validated on the Linux 5.10 baseline.
-> The basic iproute full-tunnel fake proof passes after a return-TTL fix, but
-> it does not establish selective, eBPF, CNI/mesh, HA, or live VPN acceptance.
+> **Status: pre-alpha; NOT READY FOR PRODUCTION.** Final-gate checks passed
+> two flannel/no-mesh/init fake traffic subsets (iproute and eBPF), plus scoped
+> flannel/no-mesh agent/iproute synthetic WireGuard peer startup/revocation,
+> fresh-connection two-replica HA, and witnessed selected-destination outage/
+> recovery with packet-correlated fail-close. An independently reviewed owned
+> Pod-bound token confirms Kubernetes UID/ServiceAccount/audience semantics,
+> **not** that the gateway made its own TokenReview call. These are partial
+> fixtures, not a full M8 matrix or release pass. Plaintext GENEVE denial,
+> actual gateway-call evidence, Linux 5.10 runtime, broader CNI/mesh cases,
+> full observability and release provenance remain unverified.
 > No release has been published. See [final-gate evidence](docs/milestones/m9/final-gate.md),
 > [compatibility inventory](docs/milestones/m8/report.md), and [design](docs/design.md).
 
@@ -31,10 +30,11 @@ make dev-down
 ```
 
 **Do not treat `make e2e` or `make e2e-live` as a release pass:** the M8
-matrix deliberately returns INCOMPLETE for missing CNI/mesh/agent/WireGuard/HA
-coverage, even if a direct-config subset passes. Run traffic only at the final
-project gate; resolve both documented datapath blockers first. An unset live
-OpenVPN profile is reported as **skipped**, never passed.
+matrix deliberately returns INCOMPLETE for missing CNI/mesh coverage and
+unverified agent/WireGuard/HA scenario requirements, even after scoped synthetic
+fixtures and direct-config subsets pass. Run traffic only at the authorized final
+project gate; passing subsets are not full compatibility acceptance. An unset
+live OpenVPN profile is reported as **skipped**, never passed.
 
 The live end-to-end suite needs an OpenVPN client config, never committed:
 

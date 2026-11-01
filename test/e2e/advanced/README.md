@@ -42,11 +42,17 @@ isolated fixture; passive observation alone cannot prove rejection. Match the
 outer PodIPs, VNI/inner source, protocol, interface, and marker correlation in
 the collector—the predicate is not a capture parser. Capture must be header-only.
 
-Blockers for live integration: there is no approved live collector or owned
-packet injector here, no stable disposable gateway/Pod fixture, no approved
-network capture context, no credential/TokenReview observation adapter and no
-parent authorization to mutate the cluster. Until implemented and run, this
-scenario is **NOT COVERED**. `test/e2e/matrix/coverage.json` remains unchanged.
+Later, separately gated flannel/no-mesh agent/iproute fixtures observed a
+UID-owned synthetic WireGuard peer lifecycle, fresh-connection two-replica HA,
+and witnessed outage/recovery with header-only selected-destination capture.
+An independent memory-only TokenRequest/TokenReview diagnostic verified the
+owned Pod's UID, ServiceAccount and audience; it does **not** observe the
+production gateway making its own TokenReview call. The full `wireguard.validate`
+contract still lacks plaintext GENEVE packet-denial and actual gateway-call
+proof, and broader CNI/mesh/Linux 5.10 traffic acceptance is outstanding.
+These partial fixtures do not mark the scenario **COVERED**;
+`test/e2e/matrix/coverage.json` remains unchanged. See the dated runtime
+observations in `docs/milestones/m9/final-gate.md`.
 
 ## Explicit-gated read-only HA observer (live, NOT run during authoring)
 
