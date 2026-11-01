@@ -352,6 +352,29 @@ rejection proof. No policy, capability, runtime or cluster topology was changed.
 All 93 advanced and 169 synthetic Python tests and diff checks passed. The prior
 malformed test payload is corrected, but no mandatory gate is promoted to PASS.
 
+## Continued release goal — production DNS socket proof and staging refusal
+
+At `2f64ee7`, privileged disposable-namespace tests call the production DNS
+exchange path over UDP and TCP. External queries use the marked upstream0
+socket path; cluster queries use a separate path. Removing upstream0 does not
+cause external fallback to a foreign route or cluster resolver. No production
+code or host/cluster settings changed. This is component socket evidence, not
+full live-CNI gateway DNS acceptance.
+
+At `ea67063`, hack/prepare-release.py is a deliberately non-writing preparation
+guard. It checks the mandatory ledger before artifact/output operations and
+currently returns BLOCKED because release acceptance is incomplete. Even an
+all-PASSED synthetic ledger cannot stage artifacts: reviewed artifact verification
+is not implemented. This tool is not a completed staging implementation and
+must not be counted as release-artifact provenance acceptance. No chart version,
+release status, artifact, signature, tag, publication or PR was created.
+
+Full Go race/vet/lint/build and privileged components passed, alongside 325
+offline Python tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform,
+six release-guard tests). Diff checks passed and the source tree is clean.
+Outstanding runtime compatibility, Linux 5.10, plaintext ingress and artifact
+verification requirements remain open; cluster replacement approval is pending.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
