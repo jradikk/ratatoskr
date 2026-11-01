@@ -96,6 +96,46 @@ class MetricsTest(unittest.TestCase):
             with self.subTest(value=wrong[:35]), self.assertRaises(fixture.Blocked):
                 wt.parse_metrics(baseline + wrong)
 
+    def test_fixed_link_role_gauges_and_unknown_samples(self):
+        baseline = (b"ratatoskr_gateway_wireguard_sample_ok 1\n"
+                    b"ratatoskr_gateway_wireguard_installed_peers 0\n"
+                    b"ratatoskr_gateway_wireguard_handshaken_peers 0\n"
+                    b"ratatoskr_gateway_wireguard_receive_bytes 0\n"
+                    b"ratatoskr_gateway_wireguard_transmit_bytes 0\n")
+        def role_lines(role, sample):
+            fields = {"sample_ok": sample}
+            if sample:
+                fields.update(receive_bytes=0, transmit_bytes=1,
+                              receive_packets=0, transmit_packets=1)
+            return b"".join((f'ratatoskr_gateway_link_{name}{{role="{role}"}} {value}\n').encode()
+                            for name, value in fields.items())
+        roles = ("geneve", "upstream", "wireguard")
+        healthy = b"".join(role_lines(role, 1) for role in roles)
+        unknown = b"".join(role_lines(role, 0) for role in roles)
+        expected = {"sample_ok": 1, "installed_peers": 0, "handshaken_peers": 0,
+                    "receive_bytes": 0, "transmit_bytes": 0}
+        self.assertEqual(wt.parse_metrics(baseline), expected)  # old release
+        self.assertEqual(wt.parse_metrics(baseline + healthy), expected)
+        self.assertEqual(wt.parse_metrics(baseline + unknown), expected)
+        self.assertEqual(wt.parse_metrics(baseline + role_lines("geneve", 0) +
+                                         role_lines("upstream", 1) + role_lines("wireguard", 0)), expected)
+        broken = (healthy.replace(b'role="geneve"', b'role="pod_uid"'),
+                  healthy.replace(b'role="geneve"', b'role="eth0"'),
+                  healthy.replace(b'role="geneve"', b'role="upstream"'),
+                  healthy.replace(b'link_receive_bytes{role="geneve"}',
+                                  b'link_receive_bytes{role="geneve",pod_uid="secret"}'),
+                  healthy.replace(b'link_sample_ok{role="geneve"} 1',
+                                  b'link_sample_ok{role="geneve"} 2'),
+                  healthy.replace(b'link_receive_packets{role="geneve"} 0',
+                                  b'link_receive_packets{role="geneve"} NaN'),
+                  healthy.replace(b'link_receive_bytes{role="geneve"} 0\n', b''),
+                  unknown + role_lines("geneve", 1),
+                  healthy.replace(b'link_sample_ok{role="geneve"} 1',
+                                  b'link_sample_ok{role="geneve"} 0'))
+        for raw in broken:
+            with self.subTest(raw=raw[:50]), self.assertRaises(fixture.Blocked):
+                wt.parse_metrics(baseline + raw)
+
     def test_unknown_sample_and_peer_keys_rejected(self):
         for data in (b"ratatoskr_gateway_wireguard_sample_ok 0\n",
                      b"ratatoskr_gateway_wireguard_sample_ok 1\n",

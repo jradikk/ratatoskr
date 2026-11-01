@@ -23,6 +23,9 @@ PROGRAMMING_COUNTER = re.compile(r"ratatoskr_gateway_programming_(attempts|error
 PROGRAMMING_COUNT = re.compile(r"ratatoskr_gateway_programming_duration_seconds_count ([0-9]+)\Z")
 PROGRAMMING_SUM = re.compile(r"ratatoskr_gateway_programming_duration_seconds_sum ([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\Z")
 PROGRAMMING_BUCKET = re.compile(r'ratatoskr_gateway_programming_duration_seconds_bucket\{le="([+A-Za-z0-9.]+)"\} ([0-9]+)\Z')
+LINK_ROLES = frozenset(("geneve", "upstream", "wireguard"))
+LINK_FIELDS = frozenset(("sample_ok", "receive_bytes", "transmit_bytes", "receive_packets", "transmit_packets"))
+LINK_SAMPLE = re.compile(r'ratatoskr_gateway_link_(sample_ok|receive_bytes|transmit_bytes|receive_packets|transmit_packets)\{role="(geneve|upstream|wireguard)"\} ([0-9]+)\Z')
 NODES = fixture.node_images.NODES
 RUNTIME = fixture.node_images.RUNTIME
 
@@ -70,6 +73,7 @@ def parse_metrics(raw):
         values = {}
         programming = {}
         buckets = {}
+        links = {}
         for line in text.splitlines():
             if line.startswith("#") or not line:
                 continue
@@ -80,6 +84,14 @@ def parse_metrics(raw):
                 values[match.group(1)] = int(match.group(2))
                 continue
             if OTHER.fullmatch(line):
+                continue
+            if line.startswith("ratatoskr_gateway_link_"):
+                link = LINK_SAMPLE.fullmatch(line)
+                fixture.need(link is not None, "Gateway link metric field or label invalid.")
+                field, role, count = link.groups()
+                role_values = links.setdefault(role, {})
+                fixture.need(field not in role_values, "Gateway link metric duplicated.")
+                role_values[field] = int(count)
                 continue
             if line.startswith("ratatoskr_gateway_programming_"):
                 counter = PROGRAMMING_COUNTER.fullmatch(line)
@@ -123,6 +135,13 @@ def parse_metrics(raw):
             ordered = ("0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10", "+Inf")
             fixture.need(all(buckets[left] <= buckets[right] for left, right in zip(ordered, ordered[1:])),
                          "Programming cumulative histogram invalid.")
+        if links:
+            fixture.need(set(links) == LINK_ROLES, "Gateway fixed-role link sample incomplete.")
+            for role_values in links.values():
+                sample = role_values.get("sample_ok")
+                fixture.need(sample in (0, 1) and (type(sample) is int) and
+                             (set(role_values) == {"sample_ok"} if sample == 0 else set(role_values) == LINK_FIELDS),
+                             "Gateway fixed-role link sample missing, stale, or invalid.")
         return values
     except (UnicodeError, ValueError, TypeError, OverflowError):
         raise fixture.Blocked("WG/programming metrics malformed or unavailable.") from None
