@@ -184,7 +184,7 @@ def _layer(source, offset, length, media, *, remaining, member_budget):
             if (checksum != sum(header[:148]) + sum(b"        ") + sum(header[156:]) or
                     not canonical or len(name) > 100 or canonical.startswith("/") or
                     "\\" in canonical or any(part in ("", ".", "..") for part in canonical.split("/")) or
-                    canonical in seen or directory and size != 0):
+                    canonical in seen or size < 0 or directory and size != 0):
                 raise Rejected("OCI layer path or header unsafe")
             seen.add(canonical)
             count += 1

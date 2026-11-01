@@ -208,6 +208,19 @@ class ArchiveTests(unittest.TestCase):
         with path.open("rb") as f, self.assertRaises(oci.Rejected):
             oci.verify(f)
 
+    def test_negative_layer_member_size_rejected(self):
+        header = bytearray(tarfile.TarInfo("negative-size").tobuf(format=tarfile.USTAR_FORMAT))
+        header[124:136] = b"-0000000001\x00"
+        header[148:156] = b"        "
+        header[148:156] = ("%06o\0 " % sum(header)).encode("ascii")
+        raw = bytes(header) + bytes(1024)
+        with tempfile.TemporaryFile() as source:
+            source.write(raw)
+            source.seek(0)
+            with self.assertRaises(oci.Rejected):
+                oci._layer(source, 0, len(raw), "application/vnd.oci.image.layer.v1.tar",
+                           remaining=oci.MAX_TOTAL, member_budget=oci.MAX_LAYER_MEMBERS)
+
     def test_layer_diffid_and_rootfs_cardinality(self):
         base = blobs_and_entries()
         for mut in (lambda c: c["rootfs"]["diff_ids"].__setitem__(0, "sha256:" + "0" * 64),
