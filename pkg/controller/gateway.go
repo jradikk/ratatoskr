@@ -250,14 +250,36 @@ func condition(b bool) metav1.ConditionStatus {
 	}
 	return metav1.ConditionFalse
 }
-func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, err error) (ctrl.Result, error) {
-	log.FromContext(ctx).Error(err, "gateway reconcile failed", "gateway", gw.Namespace+"/"+gw.Name, "reason", reason)
-	if r.Recorder != nil {
-		r.Recorder.Eventf(gw, nil, corev1.EventTypeWarning, reason, "Reconcile", "%s", err.Error())
+
+// gatewayFailureReason is a fixed public vocabulary. API/provider errors may
+// include credentials or profile bytes: never place their text in Events,
+// Gateway status or structured logs. Unknown reasons use one generic category.
+func gatewayFailureReason(reason string) string {
+	switch reason {
+	case "AllocationFailed", "InvalidConfiguration", "Unsupported", "SecretUnavailable",
+		"SecretInvalid", "ExclusionDiscoveryFailed", "DNSUnavailable", "SelectionFailed",
+		"RenderFailed", "ApplyFailed", "DNSCleanupFailed", "GatewayPodListFailed",
+		"GatewayPodIdentityFailed":
+		return reason
+	default:
+		return "ReconcileFailed"
 	}
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: reason, Status: metav1.ConditionTrue, Reason: reason, Message: err.Error(), ObservedGeneration: gw.Generation})
-	if e := r.status(ctx, gw, false, reason, err.Error()); e != nil {
+}
+
+func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, _ error) (ctrl.Result, error) {
+	reason = gatewayFailureReason(reason)
+	message := "Gateway reconciliation blocked at " + reason + "; inspect controller and owned resources."
+	// Log only the fixed category: provider/API errors can contain private data.
+	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason)
+	previous := meta.FindStatusCondition(gw.Status.Conditions, "Ready")
+	transition := previous == nil || previous.Status != metav1.ConditionFalse ||
+		previous.Reason != reason || previous.ObservedGeneration != gw.Generation
+	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: reason, Status: metav1.ConditionTrue, Reason: reason, Message: message, ObservedGeneration: gw.Generation})
+	if e := r.status(ctx, gw, false, reason, message); e != nil {
 		return ctrl.Result{}, e
+	}
+	if transition && r.Recorder != nil {
+		r.Recorder.Eventf(gw, nil, corev1.EventTypeWarning, reason, "Reconcile", "%s", message)
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
