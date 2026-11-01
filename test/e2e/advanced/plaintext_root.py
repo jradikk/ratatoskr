@@ -11,6 +11,7 @@ import socket
 import struct
 import subprocess
 import sys
+sys.dont_write_bytecode = True  # root helper must not create repo-owned cache artifacts
 import time
 
 NS_GET_NSTYPE = 0xB703

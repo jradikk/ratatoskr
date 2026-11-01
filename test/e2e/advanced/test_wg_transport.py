@@ -68,6 +68,34 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(set(result), {"sample_ok", "installed_peers", "handshaken_peers",
                                        "receive_bytes", "transmit_bytes"})
 
+    def test_programming_metrics_exact_histogram_no_identity_labels(self):
+        baseline = (b"ratatoskr_gateway_wireguard_sample_ok 1\n"
+                    b"ratatoskr_gateway_wireguard_installed_peers 1\n"
+                    b"ratatoskr_gateway_wireguard_handshaken_peers 1\n"
+                    b"ratatoskr_gateway_wireguard_receive_bytes 17\n"
+                    b"ratatoskr_gateway_wireguard_transmit_bytes 19\n")
+        histogram = b"".join((f'ratatoskr_gateway_programming_duration_seconds_bucket{{le="{bound}"}} 2\n').encode()
+                             for bound in ("0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10", "+Inf"))
+        programming = (b"ratatoskr_gateway_programming_attempts_total 2\n"
+                       b"ratatoskr_gateway_programming_errors_total 1\n" + histogram +
+                       b"ratatoskr_gateway_programming_duration_seconds_sum 0.002\n"
+                       b"ratatoskr_gateway_programming_duration_seconds_count 2\n")
+        expected = {"sample_ok": 1, "installed_peers": 1, "handshaken_peers": 1,
+                    "receive_bytes": 17, "transmit_bytes": 19}
+        self.assertEqual(wt.parse_metrics(baseline), expected)  # older build
+        self.assertEqual(wt.parse_metrics(baseline + programming), expected)
+        for wrong in (programming.replace(b'attempts_total 2', b'attempts_total 0'),
+                      programming.replace(b'le="0.005"', b'le="pod_uid"'),
+                      programming.replace(b'le="0.005"', b'le="0.01"'),
+                      programming.replace(b'errors_total 1', b'errors_total 3'),
+                      programming.replace(b'_sum 0.002', b'_sum NaN'),
+                      programming.replace(b'_count 2', b'_count 1'),
+                      programming + b'ratatoskr_gateway_programming_errors_total{pod_uid="secret"} 1\n',
+                      programming + b'ratatoskr_gateway_programming_peer 1\n',
+                      programming[:35]):
+            with self.subTest(value=wrong[:35]), self.assertRaises(fixture.Blocked):
+                wt.parse_metrics(baseline + wrong)
+
     def test_unknown_sample_and_peer_keys_rejected(self):
         for data in (b"ratatoskr_gateway_wireguard_sample_ok 0\n",
                      b"ratatoskr_gateway_wireguard_sample_ok 1\n",

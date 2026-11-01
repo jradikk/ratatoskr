@@ -4,6 +4,7 @@ No Pod exec, shell, wg dumps, raw CRI/metrics output or credentials are printed.
 Every command is fixed except owner-verified UID/container ID/PID and allowed node.
 """
 import json
+import math
 import re
 
 try:
@@ -15,6 +16,13 @@ CONTAINER = re.compile(r"containerd://([a-f0-9]{64})\Z")
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 SAMPLE = re.compile(r"ratatoskr_gateway_wireguard_(sample_ok|installed_peers|handshaken_peers|receive_bytes|transmit_bytes) ([0-9]+)\Z")
 OTHER = re.compile(r"ratatoskr_gateway_(?:upstream_healthy|effective_mtu_bytes) [0-9]+\Z|ratatoskr_gateway_wireguard_latest_handshake_age_seconds -?[0-9]+(?:\.[0-9]+)?\Z")
+# GatewayProgramming is a separate zero-label metric family. Histograms use
+# exactly the explicit Go buckets plus +Inf; no identity or dynamic labels.
+PROGRAMMING_BUCKETS = frozenset(("0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10", "+Inf"))
+PROGRAMMING_COUNTER = re.compile(r"ratatoskr_gateway_programming_(attempts|errors)_total ([0-9]+)\Z")
+PROGRAMMING_COUNT = re.compile(r"ratatoskr_gateway_programming_duration_seconds_count ([0-9]+)\Z")
+PROGRAMMING_SUM = re.compile(r"ratatoskr_gateway_programming_duration_seconds_sum ([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\Z")
+PROGRAMMING_BUCKET = re.compile(r'ratatoskr_gateway_programming_duration_seconds_bucket\{le="([+A-Za-z0-9.]+)"\} ([0-9]+)\Z')
 NODES = fixture.node_images.NODES
 RUNTIME = fixture.node_images.RUNTIME
 
@@ -55,30 +63,69 @@ def _pid(raw, container_id, pod_uid):
 
 
 def parse_metrics(raw):
-    """Only fixed zero-label numeric fields; known zero != unavailable."""
+    """Keep WG sample schema; accept only bounded zero-label programming rows."""
     try:
         text = raw.decode("ascii")
         fixture.need(len(raw) <= 8192, "WG metrics size cap exceeded.")
         values = {}
+        programming = {}
+        buckets = {}
         for line in text.splitlines():
             if line.startswith("#") or not line:
                 continue
             match = SAMPLE.fullmatch(line)
-            if match is None:
-                fixture.need(OTHER.fullmatch(line) is not None,
-                             "WG metrics field or label invalid.")
+            if match is not None:
+                fixture.need(match.group(1) not in values,
+                             "WG metrics duplicate field invalid.")
+                values[match.group(1)] = int(match.group(2))
                 continue
-            fixture.need(match.group(1) not in values,
-                         "WG metrics duplicate field invalid.")
-            values[match.group(1)] = int(match.group(2))
+            if OTHER.fullmatch(line):
+                continue
+            if line.startswith("ratatoskr_gateway_programming_"):
+                counter = PROGRAMMING_COUNTER.fullmatch(line)
+                count = PROGRAMMING_COUNT.fullmatch(line)
+                total = PROGRAMMING_SUM.fullmatch(line)
+                bucket = PROGRAMMING_BUCKET.fullmatch(line)
+                if counter:
+                    key, number = counter.groups()
+                    fixture.need(key not in programming, "Programming counter duplicated.")
+                    programming[key] = int(number)
+                elif count:
+                    fixture.need("count" not in programming, "Programming count duplicated.")
+                    programming["count"] = int(count.group(1))
+                elif total:
+                    fixture.need("sum" not in programming, "Programming sum duplicated.")
+                    duration = float(total.group(1))
+                    fixture.need(math.isfinite(duration) and duration >= 0,
+                                 "Programming duration invalid.")
+                    programming["sum"] = duration
+                elif bucket:
+                    bound, number = bucket.groups()
+                    fixture.need(bound in PROGRAMMING_BUCKETS and bound not in buckets,
+                                 "Programming bucket label unexpected or duplicated.")
+                    buckets[bound] = int(number)
+                else:
+                    raise fixture.Blocked("WG/programming metric field or label invalid.")
+                continue
+            raise fixture.Blocked("WG/programming metric field or label invalid.")
         fixture.need(values.get("sample_ok") == 1 and
                      set(values) == {"sample_ok", "installed_peers", "handshaken_peers",
                                      "receive_bytes", "transmit_bytes"} and
                      values["handshaken_peers"] <= values["installed_peers"],
                      "Kernel WG peer sample unavailable or incomplete.")
+        if programming or buckets:
+            fixture.need(set(programming) == {"attempts", "errors", "count", "sum"} and
+                         set(buckets) == PROGRAMMING_BUCKETS and
+                         programming["errors"] <= programming["attempts"] and
+                         buckets["+Inf"] == programming["count"] and
+                         all(buckets[bound] <= buckets["+Inf"] for bound in buckets),
+                         "Programming metric family incomplete or inconsistent.")
+            ordered = ("0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1", "5", "10", "+Inf")
+            fixture.need(all(buckets[left] <= buckets[right] for left, right in zip(ordered, ordered[1:])),
+                         "Programming cumulative histogram invalid.")
         return values
-    except (UnicodeError, ValueError, TypeError):
-        raise fixture.Blocked("WG metrics malformed or unavailable.") from None
+    except (UnicodeError, ValueError, TypeError, OverflowError):
+        raise fixture.Blocked("WG/programming metrics malformed or unavailable.") from None
 
 
 def read_metrics(operator, pod, expected_image, *, transport=None):

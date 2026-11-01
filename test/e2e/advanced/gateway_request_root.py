@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+sys.dont_write_bytecode = True  # root helper must not create repo-owned cache artifacts
 
 # Import while still in the parent mount namespace; no cluster access on import.
 try:

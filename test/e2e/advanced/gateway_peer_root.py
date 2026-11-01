@@ -16,6 +16,7 @@ import signal
 import subprocess
 import time
 import sys
+sys.dont_write_bytecode = True  # root helper must not create repo-owned cache artifacts
 
 NS_GET_NSTYPE = 0xB703
 CLONE_NEWNET = 0x40000000
