@@ -9,7 +9,7 @@ Replicas exit through different VPN IPs. Balancing flows across them would chang
 
 ## Decision
 
-Each client pod uses one endpoint, chosen by HRW (rendezvous) hashing of (podUID, endpoint IP) over healthy endpoints. Failover re-hashes only the pods of the failed endpoint.
+Each selected client Pod uses one endpoint, chosen by HRW (rendezvous) hashing of `(PodUID, gateway PodIP)` over healthy endpoints before either datapath is programmed. Removing a failed endpoint keeps unaffected clients on their chosen endpoint; the agent reprograms affected existing Pod namespaces after a fresh applied-config acknowledgement. Init clients retain their fixed endpoint until recreated.
 
 ## Alternatives considered
 
@@ -18,4 +18,4 @@ Each client pod uses one endpoint, chosen by HRW (rendezvous) hashing of (podUID
 
 ## Consequences
 
-Failover is connection-breaking (a new exit IP), and this is documented. The function is shared by both datapaths and unit-tested.
+An affected client's existing connections can break when the new gateway has a different exit IP; neither selection nor reprogramming promises flow continuity. The selection function is shared by both client datapaths and unit-tested. See [ADR-0012](0012-init-mvp-stable-endpoint.md) for the init-mode fixed remote.

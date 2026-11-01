@@ -5,17 +5,27 @@
 
 ## Context
 
-Istio sidecars redirect traffic to Envoy with iptables, and ambient's ztunnel opens sockets inside the pod netns. Rewriting destinations on the client would break original-destination semantics for both.
+Mesh sidecars and ambient agents may open sockets in a workload network
+namespace. Rewriting destinations for a local proxy would obscure the
+original destination and conflict with other capture rules.
 
 ## Decision
 
-Clients select traffic with routing: `ip rule` + a per-gateway table, nft only to set fwmarks for port rules (iproute), or a tc egress program that redirects after routing (ebpf). Destinations are never rewritten.
+The iproute client uses `ip rule`/a per-gateway routing table plus an IPv4
+nftables route/output chain to mark selected CIDR and TCP/UDP-port rules. The
+eBPF client uses a clsact/tc egress selector and external GENEVE. Neither
+path REDIRECTs or DNATs the application's destination. Unselected cluster
+traffic retains the main CNI route; selected traffic has an unreachable or
+terminal-drop fallback.
 
 ## Alternatives considered
 
-- iptables REDIRECT to a local proxy: conflicts with Istio's capture and needs a userspace proxy.
-- Transparent proxy (TPROXY): same conflicts, plus extra privileges.
+- REDIRECT/TPROXY to a local proxy: adds interception ordering and a process
+  with its own permissions and failure modes.
 
 ## Consequences
 
-Envoy and ztunnel upstream sockets follow the same routing decisions as the app, so all three mesh modes work. Port-based rules need nft marks (a small, mesh-compatible nft table). Replies to inbound connections need a connmark bypass (spec issue S8).
+Traffic from sidecar or ambient sockets inside the Pod namespace follows the
+same selected routing rules, subject to the CNI/mesh's real packet path.
+This architectural choice does **not** itself certify every Istio mode or CNI;
+those require separate packet and live compatibility evidence.

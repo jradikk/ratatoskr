@@ -9,7 +9,7 @@ Some clusters already encrypt pod traffic (Cilium WG/IPsec); others do not. GENE
 
 ## Decision
 
-Per gateway `encryption: none | wireguard`. With `wireguard`, the GENEVE packets between client pod IP and gateway pod IP are routed through a per-pod WireGuard tunnel. Outer GENEVE addresses stay pod IPs (spec issue S2), so gateway logic is identical in both modes.
+Per gateway `encryption: none | wireguard`. With `wireguard`, GENEVE packets between the client PodIP and gateway PodIP traverse per-Pod WireGuard `/32` routes. GENEVE outer addresses remain PodIPs, so selected-client identity checks still apply; encrypted mode also rejects plaintext GENEVE ingress and requires authenticated peer registration. The currently supported encrypted datapath is iproute, not eBPF.
 
 ## Alternatives considered
 
@@ -19,4 +19,4 @@ Per gateway `encryption: none | wireguard`. With `wireguard`, the GENEVE packets
 
 ## Consequences
 
-Needs a registration API with TokenReview auth and peer lifecycle (M4). Adds 60 B of overhead (IPv4), which the MTU math accounts for. WireGuard UDP is fwmarked to bypass the /32 routes it serves.
+Registration requires Pod-bound audience tokens, pinned TLS, TokenReview and peer lifecycle ([ADR-0013](0013-wireguard-registration-identity.md)). WireGuard adds IPv4 transport overhead accounted for in MTU calculations. Its UDP transport is fwmarked to bypass the `/32` overlay routes.

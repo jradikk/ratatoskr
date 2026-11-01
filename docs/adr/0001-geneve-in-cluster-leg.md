@@ -5,18 +5,29 @@
 
 ## Context
 
-Client pods must reach a gateway replica over any CNI, carrying the original packet unmodified plus optional workload identity.
+A selected workload must reach a gateway replica through a Pod-network path
+while preserving the inner packet's destination for gateway policy routing.
 
 ## Decision
 
-Client → gateway traffic is always GENEVE-encapsulated (UDP 6081). The gateway terminates it with a single `external` (collect_md) device. Both client datapaths produce GENEVE.
+The client-to-gateway leg uses L2 GENEVE over UDP 6081 with client and gateway
+**PodIPs** as outer addresses. Clients use a fixed-remote GENEVE link in
+iproute mode or an external/collect-md link selected by tc in eBPF mode;
+the gateway terminates on a collect-md GENEVE device. Fixed local MACs and
+permanent neighbors support the inner Ethernet frame. An optional WireGuard
+underlay encrypts this leg without changing the outer GENEVE PodIP identity.
 
 ## Alternatives considered
 
-- VXLAN: no extensible options, so identity could not travel with the packet.
-- IP-in-IP/GRE: needs non-UDP protocols, which some CNIs and cloud firewalls drop. Also has no metadata.
-- Plain WireGuard only: makes encryption mandatory and gives two datapaths to maintain.
+- VXLAN: does not provide extensible GENEVE options if packet identity is
+  later transported as metadata.
+- IP-in-IP/GRE: depends on non-UDP transport through CNIs and firewalls.
+- Mandatory WireGuard: duplicates cluster encryption cost when not needed.
 
 ## Consequences
 
-One datapath, written once. Identity travels in TLVs (informational unless the packet arrived via WireGuard). UDP 6081 must be allowed pod-to-pod; the chart ships NetworkPolicies that restrict it to gateway pods. The Linux GENEVE device is L2, so fixed MACs and permanent neighbours are needed (design §4.1). It coexists with Cilium's own GENEVE tunnel because ours lives in pod netns.
+Gateway ingress validates packet source/selected-client identity and must
+fail closed on unauthenticated or unexpected packets. NetworkPolicy limits
+allowed Pod-network ingress, but is not itself authentication. The existence
+of GENEVE extension options does not imply they are an authenticated
+workload-identity credential.
