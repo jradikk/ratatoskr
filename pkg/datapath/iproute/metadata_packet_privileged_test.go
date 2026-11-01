@@ -117,6 +117,23 @@ func TestPrivilegedMetadataPacketProhibition(t *testing.T) {
 	if err := b.h.LinkSetUp(eth); err != nil {
 		t.Fatal(err)
 	}
+	// Pin both veth neighbors: the positive control must not race initial ARP
+	// resolution against its bounded receive deadline under test-suite load.
+	peerHandle, err := netlink.NewHandleAt(peerNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerHandle.Close()
+	peerLink, err := peerHandle.LinkByName("peer0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.h.NeighSet(&netlink.Neigh{LinkIndex: eth.Attrs().Index, IP: net.ParseIP("10.42.1.1"), HardwareAddr: peerLink.Attrs().HardwareAddr, State: netlink.NUD_PERMANENT}); err != nil {
+		t.Fatal(err)
+	}
+	if err := peerHandle.NeighSet(&netlink.Neigh{LinkIndex: peerLink.Attrs().Index, IP: net.ParseIP("10.42.1.8"), HardwareAddr: eth.Attrs().HardwareAddr, State: netlink.NUD_PERMANENT}); err != nil {
+		t.Fatal(err)
+	}
 	for _, destination := range []string{"169.254.169.254/32", "10.96.0.0/16"} {
 		dst, parseErr := netlink.ParseIPNet(destination)
 		if parseErr != nil {
