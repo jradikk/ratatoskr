@@ -92,6 +92,14 @@ class DenialTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             r.mac("ff:ff:ff:ff:ff:ff")
 
+    def test_interface_bound_neighbor_query_may_omit_dev(self):
+        entry = {"dst": "10.42.1.1", "lladdr": "02:00:00:00:00:03", "state": ["REACHABLE"]}
+        self.assertEqual(r.neighbor_mac(json.dumps([entry]).encode(), "10.42.1.1"),
+                         bytes.fromhex("020000000003"))
+        for device in ("eth1", None):
+            with self.subTest(device=device), self.assertRaises(ValueError):
+                r.neighbor_mac(json.dumps([dict(entry, dev=device)]).encode(), "10.42.1.1")
+
     def test_raw_l2_sender_only_three_approved_datagrams(self):
         import socket
         observed = []

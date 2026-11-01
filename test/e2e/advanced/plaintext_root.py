@@ -149,7 +149,10 @@ def neighbor_mac(raw, next_hop):
     values = json.loads(raw)
     if not isinstance(values, list) or len(values) > 16:
         raise ValueError()
-    neighbors = [entry for entry in values if entry.get("dst") == next_hop and entry.get("dev") == "eth0"]
+    # `ip neigh show ... dev eth0` omits the redundant dev field. The
+    # fixed query supplies the interface; an explicitly different dev is denied.
+    neighbors = [entry for entry in values if entry.get("dst") == next_hop and
+                 entry.get("dev", "eth0") == "eth0"]
     # Measured iproute2 `ip -j neigh` emits `state:["REACHABLE"]` (also
     # `["PERMANENT"]`) rather than a scalar. Accept one exact live state only;
     # never treat FAILED/INCOMPLETE or an ambiguous multi-state list as a MAC.
