@@ -62,5 +62,32 @@ contents/paths. A returned `BYTES_MATCH_MANIFEST_NOT_ATTESTED` remains
 `releaseReady: false`; a future reviewed trust/signature, archive safety,
 provenance and policy gate is required before actual staging or publication.
 
+## Strict OCI archive content check (separate, not release-ready)
+
+`archive_contents.py:verify` accepts only a seekable, regular, single-link
+already-open **uncompressed ustar** archive FD supplied by a future reviewed
+caller (the caller must use O_NOFOLLOW and independently bind it to a manifest
+SHA-256). It does not open artifact paths, extract or execute archive members,
+copy data, call a cluster/registry, or produce an artifact. An explicit
+pre-parser refuses GNU/PAX/extended/sparse headers, non-regular members,
+symlinks/hardlinks/devices, unsafe names, duplicate entries, nonzero tails,
+malformed header checksums, extra root files or unreferenced blobs. It bounds
+at most 4,096 entries, 1 GiB per blob, 4 GiB total member bytes, and 2 MiB
+for parsed OCI JSON. The archive itself must be at most 4 GiB.
+
+Only `oci-layout` version `1.0.0`, `index.json` schema 2 OCI index mediaType,
+exactly **two OCI image manifest descriptors** (`linux/amd64`, `linux/arm64`),
+OCI image manifest schema 2, config descriptor, recognized layer mediaTypes,
+and content-addressed `blobs/sha256/<digest>` are accepted. Every descriptor's
+size/digest must match bytes, config `os`/`architecture` must match the declared
+platform, and every blob must be referenced. Extra attestation manifests with
+`unknown/unknown` platforms are explicitly **refused**, not silently ignored;
+those need a separate reviewed policy. If your builder emits Docker mediaTypes,
+compressed outer archives, root directories, embedded attestations or other
+extensions, the strict validator blocks pending review rather than declaring
+them verified. It does not inspect config environment or layer contents and
+must not log those bytes. Its result reports `contentVerified: true` for this
+bounded layout only, `signatureVerified: false`, `releaseReady: false`.
+
 Local, cluster-free tests: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest
 discover -s test/e2e/release -p 'test_*.py'`.
