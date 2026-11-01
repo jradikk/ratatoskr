@@ -568,6 +568,26 @@ sign or push tags. The production release guard remains blocked. An unsigned
 binary/chart bundle does not include deployable image artifacts or trusted
 provenance; those limitations remain explicit until a later image-artifact pass.
 
+## Local unsigned experimental RC 0.1.0-rc.1
+
+Following explicit user approval, a local binary/chart RC was staged outside the
+checkout at `/tmp/ratatoskr-0.1.0-rc.1-a75b385`, source
+`a75b385a9ddecdef763f34367d968f4216078987`. Ten Linux amd64/arm64 component binaries
+and the version-overridden Helm chart passed SHA256SUMS verification; the native
+controller reported the expected RC version and source SHA. Integrated Go
+race/vet/lint/build, privileged, chart and offline Python validation passed before
+staging. The generated coverage file was moved outside the source checkout to
+satisfy the builder's clean-source guard.
+
+This is LOCAL, UNSIGNED and EXPERIMENTAL, not publishable or production-ready.
+It excludes all six container image artifacts, the OpenVPN plugin image,
+verified SBOM/provenance/signatures and full matrix acceptance. The checked-in
+chart remains dev. The full archive is retained locally; it exceeds the chat
+attachment size limit. Calico healthy/outage subsets passed and flannel was
+restored; Linux 5.10, broader mesh/CNI and plaintext ingress remain unverified.
+Production preparation may proceed from this RC, but production publication and
+readiness still require the outstanding gates. No tags or registry pushes occurred.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
