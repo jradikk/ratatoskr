@@ -28,7 +28,7 @@ LINK_FIELDS = frozenset(("sample_ok", "receive_bytes", "transmit_bytes", "receiv
 LINK_SAMPLE = re.compile(r'ratatoskr_gateway_link_(sample_ok|receive_bytes|transmit_bytes|receive_packets|transmit_packets)\{role="(geneve|upstream|wireguard)"\} ([0-9]+)\Z')
 GUARD_DIRECTIONS = frozenset(("input", "output"))
 GUARD_FIELDS = frozenset(("sample_ok", "drop_packets", "drop_bytes"))
-GUARD_SAMPLE = re.compile(r'ratatoskr_gateway_plaintext_guard_(sample_ok|drop_packets|drop_bytes)\{direction="(input|output)"\} ([0-9]+)\Z')
+GUARD_SAMPLE = re.compile(r'ratatoskr_gateway_plaintext_geneve_(sample_ok|drop_packets|drop_bytes)\{direction="(input|output)"\} ([0-9]+)\Z')
 NODES = fixture.node_images.NODES
 RUNTIME = fixture.node_images.RUNTIME
 
@@ -89,7 +89,7 @@ def parse_metrics(raw):
                 continue
             if OTHER.fullmatch(line):
                 continue
-            if line.startswith("ratatoskr_gateway_plaintext_guard_"):
+            if line.startswith("ratatoskr_gateway_plaintext_geneve_"):
                 guard = GUARD_SAMPLE.fullmatch(line)
                 fixture.need(guard is not None, "Plaintext guard field or direction invalid.")
                 field, direction, count = guard.groups()

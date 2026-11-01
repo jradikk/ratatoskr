@@ -146,7 +146,7 @@ class MetricsTest(unittest.TestCase):
             fields = {"sample_ok": sample}
             if sample:
                 fields.update(drop_packets=3, drop_bytes=144)
-            return b"".join((f'ratatoskr_gateway_plaintext_guard_{key}{{direction="{direction}"}} {value}\n').encode()
+            return b"".join((f'ratatoskr_gateway_plaintext_geneve_{key}{{direction="{direction}"}} {value}\n').encode()
                             for key, value in fields.items())
         complete = direction_lines("input", 1) + direction_lines("output", 1)
         unknown = direction_lines("input", 0) + direction_lines("output", 0)
@@ -154,6 +154,8 @@ class MetricsTest(unittest.TestCase):
                     "receive_bytes": 0, "transmit_bytes": 0}
         self.assertEqual(wt.parse_metrics(baseline), expected)  # legacy release
         self.assertEqual(wt.parse_metrics(baseline + complete), expected)
+        with self.assertRaises(fixture.Blocked):
+            wt.parse_metrics(baseline + complete.replace(b"plaintext_geneve_", b"plaintext_guard_"))
         self.assertEqual(wt.parse_metrics(baseline + unknown), expected)
         self.assertEqual(wt.parse_metrics(baseline + direction_lines("input", 1) +
                                           direction_lines("output", 0)), expected)
@@ -170,7 +172,7 @@ class MetricsTest(unittest.TestCase):
                unknown + direction_lines("input", 1),
                complete.replace(b'sample_ok{direction="input"} 1',
                                 b'sample_ok{direction="input"} 0'),
-               complete + b'ratatoskr_gateway_plaintext_guard_peer{direction="input"} 1\n')
+               complete + b'ratatoskr_gateway_plaintext_geneve_peer{direction="input"} 1\n')
         for raw in bad:
             with self.subTest(raw=raw[:55]), self.assertRaises(fixture.Blocked):
                 wt.parse_metrics(baseline + raw)
