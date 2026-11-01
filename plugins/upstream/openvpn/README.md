@@ -1,8 +1,9 @@
-# OpenVPN upstream (M1)
+# OpenVPN upstream
 
 Linux-only, standard-library Go supervisor plus OpenVPN 2.6+ runtime image.
-This directory is standalone: it does not use or modify the shared component
-commands, Go dependencies, Makefile or gateway datapath.
+This is the shipped provider-upstream plugin. Other upstream types mentioned in
+API/design material do not imply additional plugin images are implemented. It
+builds independently of the shared component commands and gateway datapath.
 
 ## Pod contract
 
@@ -37,22 +38,23 @@ host networking or host root paths.
   Kubernetes probes from outside the pod cannot directly address this listener;
   the gateway consumes it in the shared netns.
 
-ADR-0007 requires creation of `/dev/net/tun` (character device 10:200) if absent.
-The implementation verifies the device number and attempts an O_RDWR open
-before starting. It leaves existing hostPath permissions unchanged. This needs
-CAP_MKNOD for creation plus runtime device-cgroup permission; creating the node
-alone does not prove it is usable. If the runtime denies access, the process
-fails rather than changing the privilege model. Use the chart's
-`gateway.tunDevice: hostPath` fallback as appropriate. Runtime/container
-capability verification is separate from these unit tests and is coordinated
-by the parent; full e2e is deferred to the final project gate.
+The entrypoint creates `/dev/net/tun` (character device 10:200) if absent,
+verifies its type/device number and attempts an O_RDWR open before starting.
+This needs CAP_MKNOD for creation plus runtime device-cgroup permission; creating
+the node alone does not prove it is usable. An existing device is left unchanged.
+The current chart mounts a pod-local `/dev/net` emptyDir and **does not provide
+a host-device fallback**. Runtime denial is a deployment incompatibility:
+report it rather than enabling privileged mode or assuming a nonexistent value
+will grant access. Validate the intended runtime's device/seccomp policy outside
+unit tests before deployment.
 
 ## Start and probe endpoint
 
-Build from the repository root:
+Contributor checks and builds from the repository root:
 
 ```sh
 go test ./plugins/upstream/openvpn/...
+go vet ./plugins/upstream/openvpn/...
 go build -o /tmp/openvpn-upstream ./plugins/upstream/openvpn/cmd/openvpn
 docker build -f plugins/upstream/openvpn/Dockerfile -t ratatoskr-openvpn:local .
 ```
@@ -70,9 +72,10 @@ plain-text exit IPv4 address (at most 64 bytes) with HTTP 200. No custom operato
 endpoint is required. Override it for a fake upstream test endpoint or another
 IP-reporting service. The default service is an external availability dependency;
 its errors/rate limits make health fail closed like any other probe failure.
-Periodic plugin probes intentionally avoid ipinfo.io: reserve its calls for
-final live assertions, where HTTP 429 is inconclusive rather than evidence of
-a VPN failure. Explicit probe overrides remain available.
+The plugin health probe requires a successful IP response; service errors are
+not proof of a broken tunnel, but cannot establish healthy egress. Choose an
+operator-controlled override when dependence on a public reporting service is
+unacceptable.
 
 DNS hostnames and literal IPv4 addresses are accepted. **Hostname lookup alone**
 uses the normal pod/cluster resolver, consistent with cluster DNS mode; the
@@ -110,7 +113,7 @@ supervisor tests.
 
 The sanitizer uses a positive transport/TLS option allowlist and canonical
 quoted output, rather than passing unrecognized options to OpenVPN. It strips
-redirect/DNS/route directives, all script hooks covered by the design,
+redirect/DNS/route directives, configured script hooks,
 script-security, interface/daemon/log/status/management/plugin controls, and
 provider pull filters. Unknown directives are rejected, including script hooks
 not on the strip list, config includes, `cd`, `chroot`, environment setters,
@@ -137,13 +140,13 @@ symlink/file replacement TOCTOU race. Replace/roll the pod to rotate configs.
 
 `auth-user-pass` is rewritten to `auth.txt`; if that optional file exists it is
 added even without a provider directive. A directive requiring auth without
-that file is rejected; the supervisor never prompts. Inline credentials and
-provider-specified credential paths are not accepted. Inputs are limited to
+that file is rejected; the supervisor never prompts. Inline credentials are rejected, and
+provider-specified credential paths are never followed. Inputs are limited to
 1 MiB and parser errors are fixed strings without input or filenames.
 
 Provider profiles using `<connection>` blocks, compression, PKCS#12, interactive
-key passwords, proxy credentials, static `ifconfig`/`ifconfig-ipv6`, scripts or unknown options are deliberately
-unsupported. Adapt only non-secret directives outside this repository; do not
+key passwords, proxy credentials, static `ifconfig`/`ifconfig-ipv6`, scripts or
+unknown options are deliberately unsupported. Adapt only non-secret directives outside this repository; do not
 copy provider profiles or credentials into issues, test fixtures or commits.
 
 The sanitized config is a private **0600 runtime-only temporary file** because
@@ -165,9 +168,10 @@ inline blocks, traversal/symlinks, forced argv, health freshness, failure and
 exit invalidation, timeout/cancellation, capped/resetting backoff, and refusal to
 overlap an unreaped process. They do **not** verify a real VPN, actual TUN device
 policy, gateway policy routing or default-route/DNS preservation in a cluster.
-No e2e or real-secret tests belong to M1's local unit gate.
+Use synthetic fixtures for unit tests. Real-provider integration requires
+separate authorization and secure out-of-repository Secret handling.
 
-Primary behavior references consulted:
+Implementation references:
 
 - OpenVPN's official 2.6 manual (`build.openvpn.net/man/openvpn-2.6/openvpn.8.html`):
   configuration quoting/inline files, route-nopull, route-noexec, pull-filter,
@@ -175,4 +179,5 @@ Primary behavior references consulted:
 - Linux man-pages `socket(7)` (`man7.org/linux/man-pages/man7/socket.7.html`):
   SO_BINDTODEVICE and SO_MARK; marking requires NET_ADMIN (or NET_RAW on newer
   kernels), which is already part of this upstream's pod contract.
-- Repository `docs/design.md` §6 and `docs/adr/0007-tun-device-access.md`.
+- [Sanitizer](sanitize.go), [runtime/socket controls](runtime_linux.go),
+  [supervisor](supervisor.go) and [entrypoint](cmd/openvpn/main.go).
