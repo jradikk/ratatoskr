@@ -159,7 +159,7 @@ func rawRuleHasDrop(data []byte, direction string, handle uint64) bool {
 	if len(verdict) != 1 || verdict[0].Type&0x3fff != unix.NFTA_VERDICT_CODE || len(verdict[0].Data) != 4 {
 		return false
 	}
-	return int32(binary.BigEndian.Uint32(verdict[0].Data)) == int32(expr.VerdictDrop)
+	return binary.BigEndian.Uint32(verdict[0].Data) == uint32(expr.VerdictDrop) // #nosec G115 -- nftables verdict codes use signed 32-bit two's-complement on the wire.
 }
 
 type guardCounts struct{ packets, bytes uint64 }
@@ -260,7 +260,7 @@ func (c *GatewayPlaintextGuard) readBoth() guardResult {
 		if chain.Name == "output" {
 			hook = nftables.ChainHookOutput
 		}
-		if chain.Type != nftables.ChainTypeFilter || chain.Hooknum == nil || *chain.Hooknum != *hook || chain.Priority == nil || *chain.Priority != *nftables.ChainPriorityFilter || chain.Policy != nil || chain.Device != "" {
+		if chain.Type != nftables.ChainTypeFilter || chain.Hooknum == nil || *chain.Hooknum != *hook || chain.Priority == nil || *chain.Priority != *nftables.ChainPriorityFilter || chain.Policy == nil || *chain.Policy != nftables.ChainPolicyAccept || chain.Device != "" {
 			continue
 		}
 		selected, ok := rules[chain.Name]

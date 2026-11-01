@@ -29,7 +29,8 @@ func guardFixture() ([]*nftables.Chain, map[string][]*nftables.Rule) {
 			hook = nftables.ChainHookOutput
 			iface = expr.MetaKeyOIFNAME
 		}
-		chain := &nftables.Chain{Table: table, Name: name, Hooknum: hook, Priority: nftables.ChainPriorityFilter, Type: nftables.ChainTypeFilter}
+		accept := nftables.ChainPolicyAccept
+		chain := &nftables.Chain{Table: table, Name: name, Hooknum: hook, Priority: nftables.ChainPriorityFilter, Type: nftables.ChainTypeFilter, Policy: &accept}
 		chains = append(chains, chain)
 		rules[name] = []*nftables.Rule{{Table: table, Chain: chain, Handle: uint64(10 + len(chains)), Exprs: []expr.Any{
 			&expr.Meta{Key: iface, Register: 1},
