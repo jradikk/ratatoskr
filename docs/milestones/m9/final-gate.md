@@ -491,6 +491,20 @@ Python tests (93 advanced, 174 synthetic, 29 M1, 23 matrix, five platform,
 plaintext ingress proof and artifact trust requirements remain open. No cluster
 was replaced and no release artifact was staged or published.
 
+## Continued release goal — existing-Calico witnessed-outage entrypoint
+
+At `18ebcea`, a separate explicit opt-in entrypoint reuses the reviewed
+existing-Calico preflight and invokes the environment-bound UID-owned witnessed
+outage/recovery fixture. It never provisions or replaces a cluster, installs a
+CNI, changes a release or awards full matrix acceptance. The healthy Calico CLI
+and default flannel behavior remain unchanged. Its success exit is 4 / INCOMPLETE.
+
+All 178 synthetic and 93 advanced offline tests, static synthetic contracts and
+diff checks passed. No Calico runtime was executed; current flannel resources
+were preserved. Actual compatibility acceptance still requires explicit approval
+for the serial cluster replacement/restoration plan and a successful runtime.
+Linux 5.10, plaintext ingress and trusted artifact requirements remain open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
