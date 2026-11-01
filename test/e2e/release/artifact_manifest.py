@@ -30,6 +30,25 @@ class Rejected(ValueError):
     """Sanitized refusal; never reveal artifact contents or private paths."""
 
 
+def _json(raw):
+    """Reject ambiguous duplicate claims and non-standard JSON constants."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Rejected("duplicate JSON claim")
+            result[key] = value
+        return result
+
+    def constant(_value):
+        raise Rejected("non-standard JSON constant")
+
+    try:
+        return json.loads(raw, object_pairs_hook=unique, parse_constant=constant)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise Rejected("JSON claims malformed or ambiguous") from None
+
+
 def _roles(version):
     result = {}
     for component in BINARIES:
@@ -63,7 +82,7 @@ def validate_manifest(raw, *, reviewed_version, source_sha, expected_manifest_sh
        not _HASH.fullmatch(expected_manifest_sha256) or expected_manifest_sha256 != digest):
         raise Rejected("manifest differs from independently reviewed digest")
     try:
-        obj = json.loads(raw)
+        obj = _json(raw)
     except (UnicodeDecodeError, ValueError):
         raise Rejected("manifest JSON malformed") from None
     if (type(obj) is not dict or set(obj) != {"schemaVersion", "reviewedVersion", "sourceSHA", "artifacts"} or
@@ -151,7 +170,7 @@ def verify_files(raw, *, input_dir, checkout, reviewed_version, source_sha,
     result = validate_manifest(raw, reviewed_version=reviewed_version, source_sha=source_sha,
                                expected_manifest_sha256=expected_manifest_sha256)
     root = _directory(input_dir, checkout)
-    obj = json.loads(raw)
+    obj = _json(raw)
     items = {item["role"]: item for item in obj["artifacts"]}
     roles = _roles(reviewed_version)
     try:
@@ -168,7 +187,7 @@ def verify_files(raw, *, input_dir, checkout, reviewed_version, source_sha,
             image_role = roles[role][1]
             if image_role:
                 try:
-                    doc = json.loads(body)
+                    doc = _json(body)
                 except (UnicodeDecodeError, ValueError):
                     raise Rejected("evidence document JSON malformed") from None
                 if (type(doc) is not dict or set(doc) != {"schemaVersion", "kind", "subject", "sourceSHA", "reviewedVersion"} or

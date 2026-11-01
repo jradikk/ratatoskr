@@ -85,6 +85,26 @@ class ManifestTests(unittest.TestCase):
         self.assertFalse(verified["releaseReady"])
         self.assertEqual(set(verified["artifactRoles"]), set(mod._roles(VERSION)))
 
+    def test_duplicate_and_nonstandard_json_claims_are_rejected(self):
+        raw = self.f.raw()
+        duplicate = raw.replace(b'"schemaVersion":1', b'"schemaVersion":2,"schemaVersion":1', 1)
+        with self.assertRaises(mod.Rejected):
+            self.f.validate(duplicate)
+        for raw_claim in (b'{"nested":{"sourceSHA":"wrong","sourceSHA":"right"}}',
+                          b'{"value":NaN}', b'{"value":Infinity}', b'{"value":-Infinity}'):
+            with self.subTest(raw_claim=raw_claim), self.assertRaises(mod.Rejected):
+                mod._json(raw_claim)
+
+    def test_duplicate_provenance_claim_cannot_be_overwritten(self):
+        item = next(i for i in self.f.manifest["artifacts"] if i["role"] == "provenance:gateway")
+        path = self.f.input / item["name"]
+        data = path.read_bytes().replace(b'"sourceSHA":', b'"sourceSHA":"wrong","sourceSHA":', 1)
+        path.write_bytes(data)
+        item["size"] = len(data)
+        item["sha256"] = hashlib.sha256(data).hexdigest()
+        with self.assertRaises(mod.Rejected):
+            self.f.verify()
+
     def test_manifest_scope_identity_and_missing_role(self):
         for mut in (lambda m: m.update(schemaVersion=2),
                     lambda m: m.update(sourceSHA="b" * 40),
