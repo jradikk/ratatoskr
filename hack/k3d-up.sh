@@ -99,6 +99,8 @@ install_calico() {
   kubectl --context "$CTX" wait --for=condition=Established crd/installations.operator.tigera.io --timeout=2m
   kubectl --context "$CTX" apply -f "${ROOT}/hack/k3d/calico-installation.yaml"
   log "waiting for Calico to become available"
+  # The operator creates this status asynchronously after Installation.
+  kubectl --context "$CTX" wait --for=create tigerastatus/calico --timeout=2m
   kubectl --context "$CTX" wait --for=condition=Available tigerastatus/calico --timeout=10m
 }
 

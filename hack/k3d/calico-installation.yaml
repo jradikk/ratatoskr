@@ -7,9 +7,10 @@ metadata:
 spec:
   cni:
     type: Calico
-    # k3s points containerd at these instead of /opt/cni/bin and /etc/cni/net.d.
-    binDir: /var/lib/rancher/k3s/data/cni
-    confDir: /var/lib/rancher/k3s/agent/etc/cni/net.d
+    # The pinned custom-CNI k3s runtime uses standard CNI directories.
+    # Match its reported paths; do not patch containerd to accommodate Calico.
+    binDir: /opt/cni/bin
+    confDir: /etc/cni/net.d
   calicoNetwork:
     # Required on k3s: its containerd does not enable forwarding in pod netns.
     containerIPForwarding: Enabled
