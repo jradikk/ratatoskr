@@ -420,6 +420,23 @@ Python tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform,
 replacement approval, external Linux 5.10 resources and plaintext ingress
 acceptance remain pending.
 
+## Continued release goal — bounded layer streams and rootfs binding
+
+At `6cf75fb` and `55bf650`, OCI verification additionally hashes exact
+uncompressed tar layer streams and checks positional config rootfs diffIDs.
+Expanded bytes and member counts are bounded; malformed gzip, negative sizes,
+unsafe paths, duplicate members, links, devices and extended tar headers are
+rejected. Empty regular files and directories are permitted. This conservative
+policy supports uncompressed/gzip layers only; zstd and link-containing images
+remain refused pending reviewed support. Some legitimate image layouts may
+therefore be rejected, not falsely certified.
+
+Full Go race/vet/lint/build and privileged checks passed alongside 346 Python
+tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform, 27 release).
+Chart packaging/security checks also passed. No archive was extracted or staged;
+no signature or trusted build-provenance verification is claimed. Runtime
+compatibility approvals, Linux 5.10 resources and plaintext ingress remain open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
