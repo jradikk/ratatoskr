@@ -25,6 +25,11 @@ import (
 // A disposable three-netns component: client GENEVE -> gateway -> upstream
 // response -> gateway return GENEVE. No cluster or production network changes.
 func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
+	gatewayBidirectionalReturn(t, 1500, 1400, 0)
+}
+
+// carrierMTU is the CNI veth MTU; upstreamMTU is 0 for the normal baseline.
+func gatewayBidirectionalReturn(t *testing.T, carrierMTU, innerMTU, upstreamMTU int) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	orig, err := netns.Get()
@@ -47,7 +52,7 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer gw.Close()
-	clientPair := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "eth0", MTU: 1500}, PeerName: "client-peer"}
+	clientPair := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "eth0", MTU: carrierMTU}, PeerName: "client-peer"}
 	if err := gw.h.LinkAdd(clientPair); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +79,17 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 	}
 	add(gw.h, "eth0", "10.42.2.4/24")
 	add(gw.h, datapath.UpstreamDevice, "198.19.0.2/24")
+	if upstreamMTU != 0 {
+		up, err := gw.h.LinkByName(datapath.UpstreamDevice)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := gw.h.LinkSetMTU(up, upstreamMTU); err != nil {
+			t.Fatal(err)
+		}
+	}
 	clientIP := netip.MustParseAddr("10.42.3.8")
-	cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, Clients: []netip.Addr{clientIP}, MTU: 1400, UpstreamHealthy: true}
+	cfg := datapath.GatewayConfig{PodIP: netip.MustParseAddr("10.42.2.4"), GatewayID: 7, Clients: []netip.Addr{clientIP}, MTU: innerMTU, UpstreamHealthy: true}
 	if err := gw.ApplyGateway(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +141,15 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	add(cl.h, "eth0", "10.42.3.8/24")
+	if carrierMTU != 1500 {
+		eth, err := cl.h.LinkByName("eth0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.h.LinkSetMTU(eth, carrierMTU); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Simulate flannel's cross-node pod subnets: each pod reaches the other
 	// through a normal main-table CNI route; do not rely on a shared /24.
 	clEth, err := cl.h.LinkByName("eth0")
@@ -149,7 +172,7 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 	if err := netns.Set(clientNS); err != nil {
 		t.Fatal(err)
 	}
-	cc := datapath.ClientConfig{PodIP: clientIP, Endpoint: cfg.PodIP, GatewayID: cfg.GatewayID, MTU: 1400}
+	cc := datapath.ClientConfig{PodIP: clientIP, Endpoint: cfg.PodIP, GatewayID: cfg.GatewayID, MTU: innerMTU}
 	if err := cl.ApplyClient(context.Background(), cc); err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +347,11 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected := cc
-	selected.Policy = datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("198.19.0.1/32")}, Ports: []datapath.Port{{Protocol: "TCP", Port: 8080}, {Protocol: "UDP", Port: 8080}}}}}
+	selectedPorts := []datapath.Port{{Protocol: "TCP", Port: 8080}, {Protocol: "UDP", Port: 8080}}
+	if carrierMTU != 1500 {
+		selectedPorts = append(selectedPorts, datapath.Port{Protocol: "TCP", Port: 8082}, datapath.Port{Protocol: "UDP", Port: 8083})
+	}
+	selected.Policy = datapath.Policy{Mode: "include", Rules: []datapath.Rule{{CIDRs: []netip.Prefix{netip.MustParsePrefix("198.19.0.1/32")}, Ports: selectedPorts}}}
 	selected.Exclusions = []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16"), netip.MustParsePrefix("10.43.0.0/16")}
 	if err := cl.ApplyClient(context.Background(), selected); err != nil {
 		t.Fatal(err)
@@ -433,6 +460,9 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("selected UDP response reached PodIP via numbered GENEVE with rp_filter 2")
+	if carrierMTU != 1500 {
+		verifyLowMTUPayloads(t, gw, cl, gwNS, clientNS, upstreamNS, innerMTU, carrierMTU, upstreamMTU)
+	}
 }
 func showGatewayCounters(t *testing.T, gw *Backend, ns netns.NsHandle) {
 	t.Helper()
