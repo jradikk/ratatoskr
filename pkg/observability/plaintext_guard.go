@@ -226,7 +226,10 @@ func exactGuardRule(rule *nftables.Rule, direction string, rawVerdict uint64) *g
 		return nil
 	}
 	verdict, ok := rule.Exprs[7].(*expr.Verdict)
-	if !ok || rawVerdict == 0 || rule.Handle != rawVerdict || verdict.Chain != "" {
+	// The pinned nftables decoder reports DROP and ACCEPT as Kind=0 from
+	// kernel GETRULE. A separately decoded raw signed verdict for this exact
+	// handle is authoritative; synthetic tests also reject a typed ACCEPT.
+	if !ok || rawVerdict == 0 || rule.Handle != rawVerdict || verdict.Chain != "" || verdict.Kind != 0 && verdict.Kind != expr.VerdictDrop {
 		return nil
 	}
 	return &guardCounts{packets: counter.Packets, bytes: counter.Bytes}
