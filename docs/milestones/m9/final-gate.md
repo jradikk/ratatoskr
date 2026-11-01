@@ -453,6 +453,23 @@ runtime-deployed in this slice. It does not complete all failure Events or the
 full observability gate. Remaining compatibility approvals, Linux 5.10 resources,
 plaintext ingress and trusted release artifact verification are still open.
 
+## Continued release goal — deployed sanitized controller verification
+
+The authored controller failure callsites were audited against the fixed safe
+reason vocabulary; all existing block/failure categories remain represented.
+A current-source controller binary containing `65a33ac` was compared with the
+local image before import and an existing Deployment rollout. The unchanged
+flannel same-workload gateway replacement fixture then completed with exit
+4 / PARTIAL, fresh healthy traffic and verified owned namespace cleanup.
+Controller race/vet/lint and 93 advanced tests passed after deployment.
+
+The image-build wrapper emitted its successful binary comparison but ended with
+signal 143; it is not recorded as a clean aggregate build-task exit. The separate
+Deployment rollout and runtime fixture completed normally. This confirms the
+privacy-safe controller preserved this scoped runtime path, not every failure
+Event or full compatibility. No topology/security changes or release artifacts
+were made; mandatory gates and pending approvals remain unchanged.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
