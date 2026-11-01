@@ -520,6 +520,33 @@ or topology changes occurred. This does not accept Calico runtime or any broader
 compatibility cell. Pending cluster replacement approval, Linux 5.10 resources,
 plaintext ingress and trusted artifact requirements remain open.
 
+## Continued release goal — verified plaintext guard telemetry integration
+
+At `a4cb90f`, `76d4467` and `3f53463`, encrypted gateways expose resettable
+plaintext GENEVE INPUT/OUTPUT drop-packet and byte gauges with fixed direction
+labels. Missing, malformed or timed-out samples are unavailable and omit counts.
+The pinned nftables typed decoder reports DROP ambiguously as zero, so the
+collector separately verifies the raw DROP verdict for the same rule handle;
+ACCEPT and foreign rule shapes are rejected. A disposable kernel test verifies
+an actual plaintext OUTPUT drop advances the counter. This is component evidence,
+not cross-node plaintext ingress acceptance.
+
+The strict fixture reader initially used the wrong metric prefix; the failed
+peer-baseline attempt is retained. At `e55bd1d`, its prefix was corrected to the
+authoritative Go descriptors. The existing encrypted fixture with optional
+wrong-audience rejection then completed with exit 4 / INCOMPLETE, traffic,
+revocation and owned cleanup. Unavailable metric samples remain unavailable;
+no accepted DROP count is inferred from sample_ok=0. The source-verified gateway
+image build wrapper ended with signal 143 after its successful byte comparison,
+so that wrapper exit is not a clean aggregate build pass.
+
+Integrated Go race/vet/lint/build and privileged checks passed before the
+reader-only prefix correction; after correction 94 advanced and 178 synthetic
+Python tests and diff checks passed. Full observability, actual plaintext
+cross-node ingress/drop proof, Linux 5.10, compatibility approvals and trusted
+artifact requirements remain incomplete. No production policy was weakened or
+release artifact published.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
