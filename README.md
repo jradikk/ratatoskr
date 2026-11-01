@@ -45,6 +45,16 @@ export RATATOSKR_E2E_EXPECT_COUNTRY=DE             # optional
 make e2e-live
 ```
 
+## Releases
+
+Builds and publication run exclusively in GitHub Actions when a reviewed
+`vX.Y.Z` tag is pushed. The release workflow validates CI, publishes all six
+multiarch images to Docker Hub, packages the matching chart in GHCR, and attaches
+binaries, checksums and immutable image references to the GitHub release.
+See [.github/RELEASING.md](.github/RELEASING.md) for required secrets, provenance
+verification and the `v0.1.0` trigger. Configuring this workflow does not establish
+full production compatibility; the acceptance limitations above still apply.
+
 ## License
 
 Apache-2.0

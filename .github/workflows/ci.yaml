@@ -3,9 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
-    # Release tags are intentionally NOT a publish trigger while the M9
-    # traffic and compatibility gates remain incomplete.
+    # Version tags are handled by release.yaml, which calls this validation.
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -50,12 +50,23 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Unit tests
         run: make test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline fixture and release workflow tests
+        run: |
+          python3 -m pip install PyYAML
+          for suite in test/e2e/advanced test/e2e/matrix/synthetic test/e2e/m1 test/e2e/matrix test/e2e/platform test/e2e/release; do
+            PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "$suite" -p 'test_*.py'
+          done
       - name: Privileged tests (netns, netlink, nftables, BPF_PROG_TEST_RUN)
         run: |
           sudo modprobe -a geneve wireguard tun
           make test-privileged
 
   images:
+    # release.yaml builds and publishes all six images after these tests.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-24.04
     needs: [lint, test]
     permissions:
