@@ -298,6 +298,29 @@ privileged checks passed, alongside 310 offline Python tests (92 advanced,
 capabilities or runtime settings were changed. Actual alternative-CNI acceptance
 still requires complete fixture plumbing and an approved serial environment run.
 
+## Continued release goal — existing-Calico healthy-only entrypoint
+
+At `3584e77`, a standalone, separately opted-in Calico/no-mesh agent/iproute
+healthy-only synthetic runner is available for an already approved existing
+Calico cluster. It requires exact context/Ready-node/CNI-marker/release/image
+preflight before UID-owned fixture writes, passes one immutable environment
+through API/CRI/lifecycle operations, and returns 4 / INCOMPLETE even after its
+scoped healthy traffic and cleanup succeed. It does not create clusters, install
+Calico, change a release, run outage/WireGuard/init variants, or award matrix PASS.
+
+No Calico runtime was executed on this host. The existing flannel cluster was
+preserved. Its same-workload gateway replacement and externally coordinated
+agent restart runtime passed after the change, with cleanup. Integrated Go
+race/vet/lint/build and privileged tests passed; 315 Python tests passed (92
+advanced, 169 synthetic, 29 M1, 20 matrix, five platform), alongside static matrix
+and synthetic contracts.
+
+Actual Calico execution requires a deliberate operator-approved serial removal
+of the current flannel cluster, verified fixture cleanup, pinned install inputs,
+resource/module preflight and a restoration plan. Linux 5.10 and the remaining
+mandatory release gates are still outstanding; no compatibility pass is inferred
+from this new runner or its fake tests.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
