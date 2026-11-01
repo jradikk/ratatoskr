@@ -397,6 +397,29 @@ tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform, 15 release).
 The working tree is clean. Actual Calico execution approval, an external Linux
 5.10 runner, plaintext ingress and remaining release acceptance are still open.
 
+## Continued release goal — strict read-only OCI archive verification
+
+At `fe17d81` and `04c83d5`, the offline OCI archive verifier checks bounded
+uncompressed ustar structure, canonical member paths, regular files only,
+header checksums, exact two-platform Linux amd64/arm64 descriptors, blob SHA256
+and sizes, config/platform consistency and complete referenced-blob membership.
+Duplicate or nonstandard JSON claims are rejected. Links, extended/sparse/device
+entries, unknown platforms and unreferenced blobs are refused under this
+conservative policy. No archive is extracted or executed.
+
+This is structural/content-addressed verification, not signature trust or build
+provenance. The accepted layer descriptors remain opaque blob contents; validating
+layer filesystem contents and OCI rootfs diffIDs requires additional reviewed
+policy. The verifier is not wired into staging, and no real candidate artifact
+was created, copied, signed, tagged or published. Mandatory acceptance remains
+OPEN/PARTIAL and the release guard still blocks.
+
+Full Go race/vet/lint/build and privileged components passed, alongside 342
+Python tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform,
+23 release). Diff checks passed and the working tree is clean. Calico runtime
+replacement approval, external Linux 5.10 resources and plaintext ingress
+acceptance remain pending.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
