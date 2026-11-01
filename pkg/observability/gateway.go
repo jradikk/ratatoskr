@@ -14,9 +14,10 @@ import (
 // process/runtime and per-client/peer labels are omitted. Peers are intentionally
 // not counted: registered peers are not a trustworthy healthy-peer count without
 // consulting authenticated live kernel state.
-func GatewayHandler(snapshot func() (ready bool, effectiveMTU int)) http.Handler {
+func GatewayHandler(snapshot func() (ready bool, effectiveMTU int), programming *GatewayProgramming) http.Handler {
 	registry := prometheus.NewRegistry()
 	registerGatewayMetrics(registry, snapshot)
+	programming.register(registry)
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }
 

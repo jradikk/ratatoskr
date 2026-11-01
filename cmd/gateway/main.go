@@ -280,6 +280,12 @@ func gatewayBackend(mode string) (datapath.Backend, error) {
 	}
 }
 
+func observedGatewayApply(programming *observability.GatewayProgramming, apply func(context.Context, datapath.GatewayConfig) error) func(context.Context, datapath.GatewayConfig) error {
+	return func(ctx context.Context, cfg datapath.GatewayConfig) error {
+		return programming.Observe(func() error { return apply(ctx, cfg) })
+	}
+}
+
 func run(ctx context.Context, configPath string) error {
 	podUID := os.Getenv("POD_UID")
 	if err := validatePodUID(podUID); err != nil {
@@ -303,8 +309,10 @@ func run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer backend.Close()
+	programming := observability.NewGatewayProgramming()
+	applyGateway := observedGatewayApply(programming, backend.ApplyGateway)
 	cfg.UpstreamHealthy = false
-	if err := backend.ApplyGateway(ctx, cfg); err != nil {
+	if err := applyGateway(ctx, cfg); err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -328,9 +336,9 @@ func run(ctx context.Context, configPath string) error {
 		s := current.Load().(state)
 		return s.ready, s.effectiveMTU
 	}
-	metricsHandler := observability.GatewayHandler(gatewaySnapshot)
+	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming)
 	if cfg.Encryption == "wireguard" {
-		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, datapath.WireGuardDevice, wireguard.KernelDevice)
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, datapath.WireGuardDevice, wireguard.KernelDevice)
 	}
 	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
 	metricsListener, err := net.Listen("tcp4", metrics.Addr)
@@ -393,7 +401,7 @@ func run(ctx context.Context, configPath string) error {
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
-	reconciler := &gatewayReconciler{current: &current, podUID: podUID, cfg: cfg, apply: backend.ApplyGateway}
+	reconciler := &gatewayReconciler{current: &current, podUID: podUID, cfg: cfg, apply: applyGateway}
 	defer reconciler.invalidate()
 	for {
 		err := reconciler.refresh(ctx,
