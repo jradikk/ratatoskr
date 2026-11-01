@@ -375,6 +375,28 @@ six release-guard tests). Diff checks passed and the source tree is clean.
 Outstanding runtime compatibility, Linux 5.10, plaintext ingress and artifact
 verification requirements remain open; cluster replacement approval is pending.
 
+## Continued release goal — read-only candidate artifact integrity
+
+At `0f9283a` and `502486e`, the offline artifact validator checks an exact
+29-role candidate manifest: ten architecture-specific component binaries, one
+chart, six multiarch OCI archive names, and paired SBOM/provenance claim files.
+It binds source/version and optional independently reviewed manifest digest,
+checks bounded file sizes and streaming SHA256 through no-follow regular-file
+FDs, rejects unsafe paths/symlinks/hardlinks and in-place mutations, and validates
+structural claim subjects. Duplicate JSON keys and nonstandard numeric constants
+are refused, including nested provenance claims.
+
+This verifies metadata and file-byte agreement only, not OCI contents, signature
+trust, build provenance or release readiness. The validator does not copy,
+extract, build, stage, publish, sign or push anything. The preparation guard
+remains blocked on incomplete acceptance and unimplemented reviewed attestation
+policy; no real candidate artifacts were generated during this slice.
+
+Full Go race/vet/lint/build and privileged checks passed with 334 offline Python
+tests (93 advanced, 169 synthetic, 29 M1, 23 matrix, five platform, 15 release).
+The working tree is clean. Actual Calico execution approval, an external Linux
+5.10 runner, plaintext ingress and remaining release acceptance are still open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
