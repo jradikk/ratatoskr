@@ -111,6 +111,28 @@ component tests and **261 offline Python tests** passed. The plaintext runtime
 acceptance gap remains open; the prior encrypted, HA and witnessed-recovery
 scoped evidence remains separate. No release artifacts were published.
 
+## Continued release goal — direct gateway rejection and programming metrics
+
+At `9c6937b`, the separately opted-in, UID-owned encrypted fixture completed
+wrong-audience gateway rejection, unchanged public peer-key fingerprint and
+kernel peer counts, fresh authenticated marker delivery, and peer revocation.
+The request used the verified node-host network namespace, matching the agent,
+with TLS 1.3, the published CA and exact numeric gateway IP. The helper dropped
+UID/GID before HTTPS; bearer material remained bounded stdin/memory only. This
+is gateway boundary evidence, not an independent audit of its TokenReview call.
+The runner returned 4 / INCOMPLETE and does not award full matrix acceptance.
+
+Gateway programming metrics were added at `88e926a`: process-lifetime totals
+for completed ApplyGateway attempts and returned errors, plus a fixed-bucket
+latency histogram. Startup, refresh and fail-closed applications share the
+wrapper. Metrics remain zero-label and loopback-only; a panic propagates and is
+not miscounted as a completed success. This is partial observability, not full
+traffic/flow/drop telemetry. The new metrics have component validation but have
+not yet been runtime-accepted in a newly deployed gateway image.
+
+The mandatory 29-gate acceptance ledger remains OPEN/PARTIAL. No versioned
+release candidate or publication is authorized by these scoped results alone.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
