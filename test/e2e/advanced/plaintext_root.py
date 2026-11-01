@@ -117,33 +117,92 @@ def frame(vni, source, gateway):
     return outer + ethernet + ip + b"\x00" * 8
 
 
-def send_in_source(fd, source, gateway, payload):
-    """One fixed subprocess enters only the pinned source network namespace."""
-    # The helper is re-invoked in send mode with the pinned FD passed through.
+def route_next_hop(raw, source, gateway):
+    """Use only kernel-selected eth0 next hop for this owned PodIP/destination."""
+    values = json.loads(raw)
+    if not isinstance(values, list) or len(values) != 1:
+        raise ValueError()
+    route = values[0]
+    if (route.get("dst") != gateway or route.get("dev") != "eth0" or
+            route.get("prefsrc") != source or route.get("type") in ("unreachable", "prohibit", "blackhole")):
+        raise ValueError()
+    return str(ipaddress.IPv4Address(route.get("gateway", gateway)))
+
+
+def mac(raw):
+    if not isinstance(raw, str) or not re.fullmatch(r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}", raw):
+        raise ValueError()
+    value = bytes.fromhex(raw.replace(":", ""))
+    if value == bytes(6) or value[0] & 1:
+        raise ValueError()
+    return value
+
+
+def link_mac(raw):
+    values = json.loads(raw)
+    if not isinstance(values, list) or len(values) != 1 or values[0].get("ifname") != "eth0":
+        raise ValueError()
+    return mac(values[0].get("address"))
+
+
+def neighbor_mac(raw, next_hop):
+    values = json.loads(raw)
+    if not isinstance(values, list) or len(values) > 16:
+        raise ValueError()
+    neighbors = [entry for entry in values if entry.get("dst") == next_hop and entry.get("dev") == "eth0"]
+    if (len(neighbors) != 1 or
+            neighbors[0].get("state") not in ("REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT")):
+        raise ValueError()
+    return mac(neighbors[0].get("lladdr"))
+
+
+def ip_checksum(data):
+    words = sum(int.from_bytes(data[i:i+2], "big") for i in range(0, len(data), 2))
+    while words >> 16:
+        words = (words & 0xffff) + (words >> 16)
+    return (~words) & 0xffff
+
+
+def packet(source, gateway, vni, src_mac, dst_mac):
+    """Fixed synthetic L2 IPv4/UDP6081 frame, never a supplied payload."""
+    payload = frame(vni, source, gateway)
+    src_ip, dst_ip = socket.inet_aton(source), socket.inet_aton(gateway)
+    udp = struct.pack("!HHHH", 40000, 6081, 8+len(payload), 0) + payload
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20+len(udp), 0, 0, 64, 17, 0, src_ip, dst_ip)
+    ip = ip[:10] + struct.pack("!H", ip_checksum(ip)) + ip[12:]
+    return dst_mac + src_mac + b"\x08\x00" + ip + udp
+
+
+def send_in_source(fd, source, gateway, vni):
+    """Pin selected netns; bypass only its OUTPUT hook via fixed AF_PACKET L2."""
     argv = ["/usr/bin/nsenter", "--net=/proc/self/fd/" + str(fd), "--", "/usr/bin/python3",
-            os.path.abspath(__file__), "--send", source, gateway, payload.hex()]
+            os.path.abspath(__file__), "--send", source, gateway, str(vni)]
     run(argv, fd, limit=0, timeout=4)
 
 
 def send(argv):
-    if (len(argv) != 3 or not re.fullmatch(r"[0-9a-f]{100}", argv[2]) or
+    if (len(argv) != 3 or not re.fullmatch(r"[1-9][0-9]{0,7}", argv[2]) or
             argv[0] != str(ipaddress.IPv4Address(argv[0])) or
             argv[1] != str(ipaddress.IPv4Address(argv[1]))):
         raise ValueError()
-    payload = bytes.fromhex(argv[2])
-    if len(payload) != 50 or payload[:4] != b"\x00\x00\x65\x58":
+    source, gateway, vni = argv[0], argv[1], int(argv[2])
+    if not 1 <= vni <= 0xffffff or source == gateway:
         raise ValueError()
-    expected = frame(int.from_bytes(payload[4:7], "big"), argv[0], argv[1])
-    if payload != expected or int.from_bytes(payload[4:7], "big") == 0:
-        raise ValueError()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # SO_MARK on a datagram still enters the production OUTPUT guard; AF_PACKET
+    # is deliberately used ONLY by this separately opted-in negative proof.
+    route = run(["/usr/sbin/ip", "-j", "-4", "route", "get", gateway,
+                 "mark", "0x400000"], -1, limit=4096, timeout=2)
+    next_hop = route_next_hop(route, source, gateway)
+    own = link_mac(run(["/usr/sbin/ip", "-j", "link", "show", "dev", "eth0"],
+                       -1, limit=4096, timeout=2))
+    neighbor = neighbor_mac(run(["/usr/sbin/ip", "-j", "neigh", "show", "to", next_hop,
+                                  "dev", "eth0"], -1, limit=4096, timeout=2), next_hop)
+    raw = packet(source, gateway, vni, own, neighbor)
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"eth0\x00")
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, MARK)
-        sock.bind((argv[0], 0))
-        sock.settimeout(2)
+        sock.bind(("eth0", 0))
         for _ in range(3):
-            if sock.sendto(payload, (argv[1], 6081)) != len(payload):
+            if sock.send(raw) != len(raw):
                 raise ValueError()
     finally:
         sock.close()
@@ -200,7 +259,7 @@ def collect(args):
                     if proc.poll() is not None:
                         raise ValueError()
                     checkpoint("send")
-                    send_in_source(src_fd, source, gateway, frame(vni, source, gateway))
+                    send_in_source(src_fd, source, gateway, vni)
                     checkpoint("capture-finish")
                     stop_at = time.monotonic() + .5
                 if stop_at is not None and not stopped and time.monotonic() >= stop_at:

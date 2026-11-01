@@ -165,8 +165,8 @@ and `RATATOSKR_E2E_WG_SYNTHETIC=1`). It occurs after healthy encrypted marker,
 registered peer and independent optional TokenReview, before exact selected-Pod
 UID deletion. The checked-in fixed root helper pins the selected and gateway
 READY CRI sandboxes to exact Pod namespace/name/UID/IP/PID and nsfs netns FDs,
-then transmits exactly three synthetic, marked, eth0-bound UDP6081 GENEVE/TEB
-frames (no user-supplied packet payload) from selected netns to the owned
+then transmits exactly three synthetic AF_PACKET Ethernet/IPv4/UDP6081
+GENEVE/TEB frames (no user-supplied packet payload) from the selected eth0 to the owned
 gateway PodIP. It requires positive gateway `eth0` ingress headers, a strict
 `ratatoskr_wg` INPUT UDP6081 DROP counter increase and no `gnv0` RX packet
 increase, then the parent rechecks both Pods/CRI identities and makes a fresh
@@ -176,8 +176,11 @@ intentionally does not permit UDP6081. If CNI denies packets before gateway
 **never** broaden production NetworkPolicy just to manufacture ingress.
 
 No alternate shell, Pod capability, VM/sudo policy, pcap, full packet bytes,
-Secret or token logs are introduced. Missing root helper privileges, source
-SO_MARK bypass, traffic, strict nft shape or stable gnv0 counter fail closed.
+Secret or token logs are introduced. The root-only sender uses a kernel-selected marked-route next hop and verified
+unicast eth0 neighbor MAC. AF_PACKET intentionally bypasses the client OUTPUT
+guard for this negative test; ordinary workloads gain no new capabilities.
+Missing root helper privileges, source route/neighbor, traffic, strict nft
+shape or stable gnv0 counter fail closed.
 The result remains **4/INCOMPLETE** even if the scoped plaintext check runs;
 it does not certify all M8 encrypted-mode requirements. During authoring only
 fake/unit tests were run, **not** the root helper, Kubernetes or VM operations.
