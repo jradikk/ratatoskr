@@ -150,8 +150,12 @@ def neighbor_mac(raw, next_hop):
     if not isinstance(values, list) or len(values) > 16:
         raise ValueError()
     neighbors = [entry for entry in values if entry.get("dst") == next_hop and entry.get("dev") == "eth0"]
+    # Measured iproute2 `ip -j neigh` emits `state:["REACHABLE"]` (also
+    # `["PERMANENT"]`) rather than a scalar. Accept one exact live state only;
+    # never treat FAILED/INCOMPLETE or an ambiguous multi-state list as a MAC.
+    state = neighbors[0].get("state") if len(neighbors) == 1 else None
     if (len(neighbors) != 1 or
-            neighbors[0].get("state") not in ("REACHABLE", "STALE", "DELAY", "PROBE", "PERMANENT")):
+            state not in (["REACHABLE"], ["STALE"], ["DELAY"], ["PROBE"], ["PERMANENT"])):
         raise ValueError()
     return mac(neighbors[0].get("lladdr"))
 

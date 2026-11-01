@@ -75,7 +75,7 @@ class DenialTests(unittest.TestCase):
                 r.route_next_hop(json.dumps(bad).encode(), SOURCE, GATEWAY)
         link = json.dumps([{"ifname": "eth0", "address": "02:00:00:00:00:02"}]).encode()
         neigh = json.dumps([{"dst": "10.42.1.1", "dev": "eth0", "lladdr": "02:00:00:00:00:03",
-                             "state": "REACHABLE"}]).encode()
+                             "state": ["REACHABLE"]}]).encode()
         source_mac = r.link_mac(link)
         dest_mac = r.neighbor_mac(neigh, "10.42.1.1")
         raw = r.packet(SOURCE, GATEWAY, 7, source_mac, dest_mac)
@@ -84,8 +84,11 @@ class DenialTests(unittest.TestCase):
         self.assertEqual(raw[36:38], (6081).to_bytes(2, "big"))
         self.assertEqual(raw[42:46], b"\0\0\x65\x58")
         self.assertEqual(len(raw), 92)
-        with self.assertRaises(ValueError):
-            r.neighbor_mac(neigh.replace(b"REACHABLE", b"FAILED"), "10.42.1.1")
+        for malformed in (neigh.replace(b"REACHABLE", b"FAILED"),
+                          neigh.replace(b'["REACHABLE"]', b'"REACHABLE"'),
+                          neigh.replace(b'["REACHABLE"]', b'["REACHABLE","STALE"]')):
+            with self.assertRaises(ValueError):
+                r.neighbor_mac(malformed, "10.42.1.1")
         with self.assertRaises(ValueError):
             r.mac("ff:ff:ff:ff:ff:ff")
 
@@ -102,7 +105,7 @@ class DenialTests(unittest.TestCase):
             if "route" in argv: return json.dumps([{"dst": GATEWAY, "dev": "eth0",
                 "prefsrc": SOURCE, "gateway": "10.42.1.1"}]).encode()
             if "neigh" in argv: return json.dumps([{"dst": "10.42.1.1", "dev": "eth0",
-                "lladdr": "02:00:00:00:00:03", "state": "REACHABLE"}]).encode()
+                "lladdr": "02:00:00:00:00:03", "state": ["REACHABLE"]}]).encode()
             return json.dumps([{"ifname": "eth0", "address": "02:00:00:00:00:02"}]).encode()
         with patch.object(r, "run", side_effect=fake_run), patch.object(r.socket, "socket", return_value=Sock()) as sock:
             r.send([SOURCE, GATEWAY, "7"])
