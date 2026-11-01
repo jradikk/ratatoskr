@@ -675,10 +675,14 @@ identities. `run.ReadOnlyAPI(environment=...)` and read-only
 Ready node names/control-plane role and `ratatoskr-testenv` `variant`/`mesh`
 **before** release checks. The default remains the existing flannel context.
 
-**No Calico traffic or resource mutation is enabled.** The CLI, namespace
-Lifecycle, fixture adapter/cleanup, node CRI verification and advanced runners
-remain flannel-only; this read-only seam does not authorize rewriting their
-contexts or claiming a matrix cell. A later review must pass one approved
-identity through all of those paths and verify the actual CNI before any
-Calico fixture execution. This change does not install a CNI, create/destroy a
-cluster, alter release configuration, or mark coverage.
+**No Calico traffic or resource mutation is enabled through a public runner.**
+`Lifecycle(environment=...)`, its `KubectlAPI`, and `FixtureAPI` now share one
+immutable context for offline-tested UID-conditional namespace create/cleanup,
+fixture GET/CREATE and bounded Pod probe/exec; mixed API/owner contexts fail
+before CREATE. The CLI and advanced runners still select flannel, and node CRI
+verification and other nested callers remain flannel-only. This seam alone
+does not authorize Calico execution or coverage. A later review must pass the
+same approved identity through **all** paths, verify actual CNI and release
+preflight before writes, and separately authorize the disposable fixture. No
+CNI/cluster creation or destruction, release change, or coverage update occurs
+in this incremental plumbing change.

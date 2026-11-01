@@ -16,7 +16,12 @@ import tempfile
 import time
 import uuid
 
-CONTEXT = "k3d-ratatoskr-flannel"
+try:
+    from . import environment as synthetic_environment
+except ImportError:
+    import environment as synthetic_environment
+
+CONTEXT = synthetic_environment.FLANNEL.context
 LABEL = "ratatoskr.skaldhall.io/synthetic-lifecycle"
 NAME = re.compile(r"rtk-syn-[0-9a-f]{16}(?:-apps)?\Z")
 UID = re.compile(r"[0-9a-fA-F-]{16,64}\Z")
@@ -46,9 +51,12 @@ class KubectlAPI:
     Requires a kubectl version with `delete --raw=<path> -f -` support. If
     unsupported, the call fails closed; never fall back to name-only delete.
     """
-    def __init__(self, context=CONTEXT, run=subprocess.run, *, deadline=None, clock=time.monotonic):
-        if context != CONTEXT:
-            raise LifecycleError("Only the preflighted flannel context is allowed.")
+    def __init__(self, context=None, run=subprocess.run, *, deadline=None, clock=time.monotonic,
+                 environment=synthetic_environment.FLANNEL):
+        if (type(environment) is not synthetic_environment.Environment or
+                context is not None and context != environment.context):
+            raise LifecycleError("Kubernetes API context differs from owned environment.")
+        self.environment = environment
         self.run = run
         self.deadline, self.clock = deadline, clock
 
@@ -59,7 +67,7 @@ class KubectlAPI:
             timeout = min(timeout, self.deadline - self.clock())
             if timeout <= 0:
                 raise LifecycleError("Final-gate total deadline exceeded.")
-        argv = ["kubectl", "--context", CONTEXT, "--request-timeout=10s", action, *args]
+        argv = ["kubectl", "--context", self.environment.context, "--request-timeout=10s", action, *args]
         # No inherited provider secrets, KUBECTL_EXTERNAL_DIFF, tracing flags,
         # locale diagnostics or process environment overrides. Kubeconfig stays
         # parent/operator-owned; never inspect it or print stdout/stderr.
@@ -125,13 +133,20 @@ class Lifecycle:
     """
     def __init__(self, api=None, *, duration=240, cleanup_budget=100,
                  clock=time.monotonic, sleep=time.sleep, make_temp=tempfile.mkdtemp,
-                 token_factory=None, pki_generator=None, apps_psa="restricted"):
+                 token_factory=None, pki_generator=None, apps_psa="restricted",
+                 environment=synthetic_environment.FLANNEL):
         if not 0 < duration <= 900 or not 0 < cleanup_budget <= 180:
             raise LifecycleError("Invalid final-gate deadline.")
         if apps_psa not in ("restricted", "privileged"):
             raise LifecycleError("Unsupported synthetic app namespace security mode.")
+        if type(environment) is not synthetic_environment.Environment:
+            raise LifecycleError("Unsupported synthetic lifecycle environment.")
+        if api is not None and (getattr(api, "environment", synthetic_environment.FLANNEL) != environment or
+                                getattr(api, "context", environment.context) != environment.context):
+            raise LifecycleError("Lifecycle API context differs from owned environment.")
+        self.environment = environment
         self.apps_psa = apps_psa
-        self.api = api if api is not None else KubectlAPI()
+        self.api = api if api is not None else KubectlAPI(environment=environment)
         self.clock, self.sleep, self.make_temp = clock, sleep, make_temp
         self.duration, self.cleanup_budget = duration, cleanup_budget
         self.token = token_factory() if token_factory else uuid.uuid4().hex

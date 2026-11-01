@@ -203,6 +203,10 @@ class FixtureAPI:
     def __init__(self, owner, transport=_bounded):
         if not isinstance(owner, lifecycle.Lifecycle) or owner.deadline is None or owner.closed:
             raise AdapterError("A running, authorized Lifecycle is required.")
+        if (type(owner.environment) is not lifecycle.synthetic_environment.Environment or
+                getattr(owner.api, "environment", lifecycle.synthetic_environment.FLANNEL) != owner.environment or
+                getattr(owner.api, "context", owner.environment.context) != owner.environment.context):
+            raise AdapterError("Fixture API context differs from owned Lifecycle.")
         self.owner, self.transport = owner, transport
         self.exit_health_uid = None
         self.create_attempts = set()  # never retry an ambiguous remote POST
@@ -230,7 +234,7 @@ class FixtureAPI:
 
     def _call(self, args, *, payload=None, max_output=262144):
         timeout = self._time()
-        argv = ["kubectl", "--context", CONTEXT, "--request-timeout=10s", *args]
+        argv = ["kubectl", "--context", self.owner.environment.context, "--request-timeout=10s", *args]
         try:
             result = self.transport(argv, payload=payload, timeout=timeout, max_output=max_output)
             if not isinstance(result, bytes) or len(result) > max_output:
@@ -601,7 +605,7 @@ class FixtureAPI:
         self._namespace(namespace)
         # kubectl exec returns only our fixture exit status; stdout/stderr are
         # discarded. Nonzero is never interpreted as successful fail-close.
-        args = ["kubectl", "--context", CONTEXT, "--request-timeout=10s", "--namespace", namespace,
+        args = ["kubectl", "--context", self.owner.environment.context, "--request-timeout=10s", "--namespace", namespace,
                 "exec", name, "-c", container, "--", *command]
         try:
             raw = self.transport(args, timeout=min(12, self._time()), max_output=0)
