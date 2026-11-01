@@ -679,10 +679,13 @@ Ready node names/control-plane role and `ratatoskr-testenv` `variant`/`mesh`
 `Lifecycle(environment=...)`, its `KubectlAPI`, and `FixtureAPI` now share one
 immutable context for offline-tested UID-conditional namespace create/cleanup,
 fixture GET/CREATE and bounded Pod probe/exec; mixed API/owner contexts fail
-before CREATE. The CLI and advanced runners still select flannel, and node CRI
-verification and other nested callers remain flannel-only. This seam alone
-does not authorize Calico execution or coverage. A later review must pass the
-same approved identity through **all** paths, verify actual CNI and release
+before CREATE. Read-only `node_images.verify(environment=..., observed_nodes=...)`
+accepts only the exact immutable three-node tuple for non-default CRI checks;
+all three nodes must expose the approved immutable image IDs. The default CLI
+still selects flannel, `FixtureAPI` has no direct node/docker commands, and
+advanced runners and their nested node helpers remain flannel-only. This seam
+alone does not authorize Calico execution or coverage. A later review must pass
+the same approved identity through **all** paths, verify actual CNI and release
 preflight before writes, and separately authorize the disposable fixture. No
 CNI/cluster creation or destruction, release change, or coverage update occurs
 in this incremental plumbing change.

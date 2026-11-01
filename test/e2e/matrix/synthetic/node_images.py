@@ -14,9 +14,12 @@ import signal
 import subprocess
 import time
 
-NODES = ("k3d-ratatoskr-flannel-server-0",
-         "k3d-ratatoskr-flannel-agent-0",
-         "k3d-ratatoskr-flannel-agent-1")
+try:
+    from . import environment as synthetic_environment
+except ImportError:
+    import environment as synthetic_environment
+
+NODES = synthetic_environment.FLANNEL.nodes
 INIT_TAG = "ghcr.io/skaldhall/ratatoskr-init:dev"
 TAGS = {"gateway": "ghcr.io/skaldhall/ratatoskr-gateway:dev",
         "plugin": "ghcr.io/skaldhall/ratatoskr-upstream-openvpn:dev",
@@ -123,13 +126,26 @@ def _bounded(argv, *, timeout, max_output):
                 process.stdout.close()
 
 
-def verify(expected, *, init=False, transport=_bounded, clock=time.monotonic, budget=60):
-    """Fixed docker exec argv; no shell, mounts, nodes outside allowlist or logs."""
+def verify(expected, *, init=False, transport=_bounded, clock=time.monotonic, budget=60,
+           environment=synthetic_environment.FLANNEL, observed_nodes=None):
+    """Exact-environment node CRI image IDs; never auto-select other nodes.
+
+    Non-default environments require the already read-only-preflighted exact
+    Ready node names. This check does not prove that a CNI is installed, nor
+    authorize any traffic fixture, cluster writes, or CLI variant dispatch.
+    """
+    if type(environment) is not synthetic_environment.Environment:
+        raise Blocked("Node CRI environment identity invalid.")
+    if observed_nodes is not None and (type(observed_nodes) is not tuple or
+                                       observed_nodes != environment.nodes):
+        raise Blocked("Node CRI observed nodes differ from environment.")
+    if environment != synthetic_environment.FLANNEL and observed_nodes is None:
+        raise Blocked("Non-default node CRI requires exact preflighted nodes.")
     ids = approved(expected, init=init)
     if not 0 < budget <= 90:
         raise Blocked("Node CRI verification budget invalid.")
     deadline = clock() + budget
-    for node in NODES:
+    for node in environment.nodes:
         timeout = min(12, deadline - clock())
         if timeout <= 0:
             raise Blocked("Node CRI verification total deadline exceeded.")

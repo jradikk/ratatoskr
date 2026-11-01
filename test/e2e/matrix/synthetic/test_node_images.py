@@ -38,6 +38,43 @@ class CRITests(unittest.TestCase):
         prefixed = {k: "containerd://" + v for k, v in APPROVED.items()}
         self.assertTrue(module.verify(prefixed, transport=transport))
 
+    def test_calico_exact_observed_nodes_and_image_ids_without_default_dispatch(self):
+        import environment
+        calls = []
+        def transport(argv, *, timeout, max_output):
+            calls.append(argv)
+            self.assertEqual(argv[:2], ["docker", "exec"])
+            self.assertIn(argv[2], environment.CALICO.nodes)
+            self.assertEqual(argv[3:], ["/bin/crictl", "--runtime-endpoint", module.RUNTIME,
+                                        "images", "-o", "json"])
+            return json.dumps(inventory()).encode()
+        self.assertTrue(module.verify(APPROVED, environment=environment.CALICO,
+                                      observed_nodes=environment.CALICO.nodes, transport=transport))
+        self.assertEqual([argv[2] for argv in calls], list(environment.CALICO.nodes))
+        self.assertFalse(set(argv[2] for argv in calls) & set(environment.FLANNEL.nodes))
+        for env, observed in ((environment.CALICO, None),
+                              (environment.CALICO, environment.FLANNEL.nodes),
+                              (environment.FLANNEL, environment.CALICO.nodes),
+                              (environment.CALICO, tuple(reversed(environment.CALICO.nodes))),
+                              ("calico", environment.CALICO.nodes)):
+            with self.subTest(env=env, observed=observed), self.assertRaises(module.Blocked):
+                module.verify(APPROVED, environment=env, observed_nodes=observed,
+                              transport=lambda *_a, **_k: self.fail("wrong node queried"))
+        self.assertEqual(len(calls), 3)
+        # A missing/mismatched image ID on any one node must block completion.
+        for index in range(3):
+            visited = []
+            def wrong_one(argv, *, timeout, max_output):
+                visited.append(argv[2])
+                result = inventory()
+                if len(visited) == index + 1:
+                    result["images"][0]["id"] = "sha256:" + "b" * 64
+                return json.dumps(result).encode()
+            with self.subTest(node=index), self.assertRaises(module.Blocked):
+                module.verify(APPROVED, environment=environment.CALICO,
+                              observed_nodes=environment.CALICO.nodes, transport=wrong_one)
+            self.assertEqual(visited, list(environment.CALICO.nodes[:index + 1]))
+
     def test_init_only_seventh_exact_tag_and_image_id_on_three_nodes(self):
         approved = dict(APPROVED, init=DIGEST)
         items = inventory()
