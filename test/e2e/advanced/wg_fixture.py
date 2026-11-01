@@ -46,6 +46,10 @@ CHECKPOINTS = frozenset({"namespace-create", "private-pki", "fixture-adapter",
     "fixture-manifests", "source-create", "operator-secret-create",
     "operator-gateway-create", "source-ready", "gateway-owned",
     "peer-baseline", "peer-registration", "independent-tokenreview", "peer-revocation",
+    "gateway-negative-authorization", "gateway-negative-identity-pre",
+    "gateway-negative-token-request", "gateway-negative-peer-before",
+    "gateway-negative-gateway-request", "gateway-negative-identity-post",
+    "gateway-negative-peer-after", "gateway-negative-marker-after",
     "peer-lifecycle", "plaintext-denial", "cleanup-unverified",
     "plaintext-denial-validate", "plaintext-denial-pin-source", "plaintext-denial-pin-gateway",
     "plaintext-denial-guard-before", "plaintext-denial-gnv-before", "plaintext-denial-capture-start",
@@ -562,6 +566,28 @@ def observe(owner, source_api, operator, gateway_uid, workload, ids, *,
         except (tokenreview.Blocked, adapter.AdapterError, KeyError, ValueError,
                 TypeError, AttributeError):
             raise StageBlocked("independent-tokenreview") from None
+    # Independently authorized wrong-audience request exercises the actual
+    # gateway HTTPS rejection. It is not an audit of its internal TokenReview.
+    if os.environ.get("RATATOSKR_E2E_WG_NEGATIVE") == "1":
+        try:
+            try:
+                from . import gateway_negative
+            except ImportError:
+                import gateway_negative
+            proof = gateway_negative.run(owner, source_api, operator, gateway_uid,
+                                         client_uid, gateway_pod, ids,
+                                         workload["spec"]["containers"][0]["env"][1]["value"])
+            need(proof == {"wrongAudienceGatewayRejected": True,
+                           "gatewayTokenReviewCallObserved": False},
+                 "Gateway negative authorization proof incomplete.")
+        except gateway_negative.Blocked as err:
+            # The helper exposes only fixed authored stage names, never tokens.
+            reason = next((s for s in gateway_negative.STAGES
+                           if str(err) == "Gateway negative blocked at " + s + "."), None)
+            raise StageBlocked("gateway-negative-" + reason if reason else
+                               "gateway-negative-authorization") from None
+        except (Blocked, adapter.AdapterError, KeyError, ValueError, TypeError, AttributeError):
+            raise StageBlocked("gateway-negative-authorization") from None
     if os.environ.get("RATATOSKR_E2E_WG_PLAINTEXT") == "1":
         step = "plaintext-denial"
         try:
