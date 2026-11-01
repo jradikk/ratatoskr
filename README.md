@@ -105,7 +105,7 @@ for the detailed security model.
 
 The release workflow publishes versioned charts to GHCR and matching images to
 Docker Hub. Choose a version whose release has completed successfully; the
-command below uses **0.1.0** as an example, not a claim that it has been published.
+command below pins **0.1.0**. Use it once that version is available in the registry.
 
 Create `ratatoskr-values.yaml`:
 
@@ -351,30 +351,10 @@ while resources or workloads still depend on Ratatoskr.
 
 Ratatoskr is licensed under [Apache-2.0](LICENSE).
 
-## Development and compatibility
+## Contributing
 
-Contributions are welcome. Start with the [design](docs/design.md),
-[architecture decisions](docs/adr/README.md), and [chart guide](charts/ratatoskr/README.md).
-For a local k3d development environment:
-
-```sh
-hack/bootstrap.sh
-make test
-make dev-up
-make dev-deploy
-# When finished:
-make dev-down
-```
-
-Release builds and publication run in GitHub Actions; maintainer instructions
-are in [RELEASING.md](.github/RELEASING.md).
-
-Validate your target cluster before relying on it: existing runtime evidence
-covers scoped flannel/Calico scenarios, not the full CNI/service-mesh matrix or
-Linux 5.10 baseline. Some security acceptance checks and end-to-end release
-verification remain open. Passing component tests does not certify every
-configuration. The [compatibility inventory](docs/milestones/m8/report.md) and
-[acceptance record](docs/milestones/m9/final-gate.md) document tested scope and
-outstanding work. Live tests require your own private VPN configuration and
-explicit authorization; never commit credentials or report skipped tests as
-passes.
+Contributions, bug reports, and improvements to upstream integrations are welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development environment, test
+commands, and review process. The [architecture guide](docs/design.md) explains
+component responsibilities and routing, and the [security policy](SECURITY.md)
+describes trust boundaries and vulnerability reporting.

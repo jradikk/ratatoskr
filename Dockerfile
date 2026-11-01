@@ -25,7 +25,7 @@ FROM gcr.io/distroless/static-debian13:nonroot
 ARG COMPONENT
 ARG VERSION=dev
 ARG COMMIT=unknown
-LABEL org.opencontainers.image.source="https://github.com/skaldhall/ratatoskr" \
+LABEL org.opencontainers.image.source="https://github.com/jradikk/ratatoskr" \
       org.opencontainers.image.title="ratatoskr-${COMPONENT}" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \

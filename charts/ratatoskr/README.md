@@ -5,7 +5,7 @@ observed reverse-path failures on this kernel; both iproute and eBPF passed
 the bounded flannel/no-mesh/init/none direct-config fake subsets. Controller-
 created VPN gateways, restricted agent traffic, other CNIs/meshes, WireGuard
 runtime and Linux 5.10 remain unverified. This chart must not be represented
-as production validated. See `docs/milestones/m9/final-gate.md` for exact evidence
+as production validated. See `test/evidence/history/runtime-validation.md` for exact evidence
 and skipped compatibility/live cells; no image/chart has been published or signed.
 
 Install into one namespace (for example `helm upgrade --install ratatoskr

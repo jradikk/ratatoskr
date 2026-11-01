@@ -3,7 +3,7 @@
 > M8 update: `test/e2e/ci/run.sh` and `test/e2e/live/run.sh` now default to the
 > incomplete **static matrix inventory**, not this original M1 execution wrapper.
 > They return exit 4 for missing coverage. See `test/e2e/matrix/README.md` and
-> `docs/milestones/m8/report.md`. `hack/m1-proof.sh` retains its M1 direct entrypoint;
+> `test/evidence/history/compatibility.md`. `hack/m1-proof.sh` retains its M1 direct entrypoint;
 > optional `--extended` / `--datapath=ebpf` requires explicit final-gate authorization.
 > M1 interface/examples below are historical subset documentation, not a matrix pass.
 

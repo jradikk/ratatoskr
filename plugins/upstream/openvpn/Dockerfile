@@ -18,7 +18,7 @@ ARG COMMIT=unknown
 RUN apt-get update && apt-get install -y --no-install-recommends openvpn iproute2 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/ratatoskr && chmod 0700 /run/ratatoskr
-LABEL org.opencontainers.image.source="https://github.com/skaldhall/ratatoskr" \
+LABEL org.opencontainers.image.source="https://github.com/jradikk/ratatoskr" \
       org.opencontainers.image.title="ratatoskr-upstream-openvpn" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \

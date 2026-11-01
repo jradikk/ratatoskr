@@ -50,7 +50,7 @@ def _ledger(root):
         # inventory count that could substitute easier acceptance requirements.
         scenario_ids = sorted(applicability.EXPECTED_SCENARIOS)
         required = scenario_ids + list(EXTRA_GATES)
-        checklist = json.loads((root / "docs/milestones/m9/acceptance-checklist.json").read_text())
+        checklist = json.loads((root / "test/e2e/release/acceptance.json").read_text())
         result = _acceptance(root)(checklist, required)
         if result["required"] != 29 or result["passed"] != 29 or result["blocked"] or not result["ready"]:
             raise Blocked("mandatory acceptance gates remain incomplete")

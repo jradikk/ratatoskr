@@ -7,7 +7,7 @@
       "status": "PARTIAL",
       "requirement": "PodIP source, DNS/API/ClusterIP preservation; not controller admission",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -16,7 +16,7 @@
       "status": "PARTIAL",
       "requirement": "CRD deployment, authorized injection, forbidden opt-in and namespace admission",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -32,7 +32,7 @@
       "status": "PARTIAL",
       "requirement": "Include/exclude TCP port and CIDR selection on controlled fake endpoint",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -41,7 +41,7 @@
       "status": "PARTIAL",
       "requirement": "Remove healthy endpoint and prove selected requests fail while ordinary paths survive",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -50,7 +50,7 @@
       "status": "PARTIAL",
       "requirement": "Reachable controlled metadata fixture required; no real metadata service requests",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "pkg/datapath/iproute/metadata_packet_privileged_test.go"
       ],
       "remaining": "Controlled reachable TCP/UDP metadata prohibition passed in disposable namespaces. Verify corresponding supported runtime/CNI configurations."
@@ -60,7 +60,7 @@
       "status": "PARTIAL",
       "requirement": "Cluster/external UDP and TCP DNS, upstream-only external resolution and SERVFAIL",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "pkg/dns/forward_wire_test.go"
       ],
       "remaining": "Local UDP/TCP split forwarding and external SERVFAIL passed. Runtime upstream0 binding and supported CNI/mesh configurations remain unverified."
@@ -70,7 +70,7 @@
       "status": "PARTIAL",
       "requirement": "4.5 MiB deterministic payload size and SHA256 through tunnel",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -79,7 +79,7 @@
       "status": "PARTIAL",
       "requirement": "Assert gateway measured carrier/GENEVE/upstream MTUs and MSS; not PMTU blackhole testing",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -88,7 +88,7 @@
       "status": "PARTIAL",
       "requirement": "DF/fragmentation and small carrier MTU traffic plus captures",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "pkg/datapath/iproute/gateway_pmtu_privileged_test.go"
       ],
       "remaining": "Low-MTU TCP payload integrity, oversized DF UDP refusal and no plaintext escape passed in namespaces. Runtime PMTU/ICMP blackhole behavior and supported configurations remain unverified."
@@ -98,7 +98,7 @@
       "status": "PARTIAL",
       "requirement": "Forged inner/outer source, VNI and identity acceptance verifier packet tests",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "pkg/datapath/iproute/gateway_spoof_privileged_test.go"
       ],
       "remaining": "Packet-correlated outer/inner/VNI rejection passed in namespaces. Full supported runtime and encrypted spoof cases remain unverified."
@@ -108,7 +108,7 @@
       "status": "PARTIAL",
       "requirement": "Bound TokenReview registration, peer deletion, handshake and return path",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -124,7 +124,7 @@
       "status": "PARTIAL",
       "requirement": "PSA restricted admission and successful capability-free tunnel startup",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -133,7 +133,7 @@
       "status": "PARTIAL",
       "requirement": "Agent restart/adoption and endpoint replacement without workload recreation",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "test/e2e/advanced/agent_lifecycle.py"
       ],
       "remaining": "Same-workload UID gateway replacement and externally coordinated agent restart passed on flannel/no-mesh/agent/iproute/none. Other required supported modes remain unverified."
@@ -143,7 +143,7 @@
       "status": "PARTIAL",
       "requirement": "Unencrypted tc client tunnel in actual pod; 5.10 and CNI captures still missing",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -153,7 +153,7 @@
       "requirement": "Inject policy-only replacement failure and verify no stale selector survives",
       "evidence": [
         "pkg/datapath/ebpf/failure_packet_privileged_test.go",
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Actual clsact packet-path failed-update guard and stale-adoption refusal passed in disposable namespaces. Supported live CNI/runtime configurations and final-source acceptance remain unverified."
     },
@@ -163,7 +163,7 @@
       "requirement": "IPv6 present at init and assigned later, fail-closed without bypass",
       "evidence": [
         "pkg/agent/ipv6_packet_privileged_test.go",
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Late IPv6 packet quarantine and persistent IPv4/IPv6 denial passed in disposable namespaces. Actual supported CNI/runtime and final-source coverage remain unverified."
     },
@@ -172,7 +172,7 @@
       "status": "PARTIAL",
       "requirement": "1\u20133 replicas, stable affinity, endpoint churn; established flows may break",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -181,7 +181,7 @@
       "status": "PARTIAL",
       "requirement": "Loopback health gauge 1/0/1 and no PodIP:9902 exposure; not full telemetry",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -190,7 +190,7 @@
       "status": "PARTIAL",
       "requirement": "Bytes/flows/drops/peer count/handshake age not implemented by component",
       "evidence": [
-        "docs/milestones/m9/final-gate.md",
+        "test/evidence/history/runtime-validation.md",
         "pkg/observability/link.go",
         "pkg/observability/programming.go"
       ],
@@ -201,7 +201,7 @@
       "status": "PARTIAL",
       "requirement": "Fake link down causes 503/NotReady and no steered traffic, ordinary paths continue",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },
@@ -210,7 +210,7 @@
       "status": "PARTIAL",
       "requirement": "Secret-safe ipinfo exit match and optional expected country; 429 inconclusive",
       "evidence": [
-        "docs/milestones/m9/final-gate.md"
+        "test/evidence/history/runtime-validation.md"
       ],
       "remaining": "Verify the full declared scenario across its required supported configurations; scoped historical results are not final-source acceptance."
     },

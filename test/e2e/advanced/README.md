@@ -107,7 +107,7 @@ contract still lacks plaintext GENEVE packet-denial and actual gateway-call
 proof, and broader CNI/mesh/Linux 5.10 traffic acceptance is outstanding.
 These partial fixtures do not mark the scenario **COVERED**;
 `test/e2e/matrix/coverage.json` remains unchanged. See the dated runtime
-observations in `docs/milestones/m9/final-gate.md`.
+observations in `test/evidence/history/runtime-validation.md`.
 
 ## Explicit-gated read-only HA observer (live, NOT run during authoring)
 

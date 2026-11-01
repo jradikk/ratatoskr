@@ -6,7 +6,7 @@ include hack/versions.env
 
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-REGISTRY    ?= ghcr.io/skaldhall
+REGISTRY    ?= docker.io/jradikk
 TAG         ?= $(VERSION)
 PLATFORMS   ?= linux/amd64,linux/arm64
 COMPONENTS  := controller webhook agent gateway init
@@ -65,22 +65,29 @@ images: ## Build all images for the local platform (loaded into docker)
 	done
 	for p in $(PLUGINS); do \
 	  if [[ -f plugins/upstream/$$p/Dockerfile ]]; then \
-	    docker buildx build --load -f plugins/upstream/$$p/Dockerfile --build-arg VERSION=$(VERSION) \
+	    docker buildx build --load -f plugins/upstream/$$p/Dockerfile --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
 	      -t $(REGISTRY)/ratatoskr-upstream-$$p:$(TAG) . ; \
 	  fi; \
 	done
 
 .PHONY: images-multiarch
-images-multiarch: ## Build multi-arch images (no push; set PUSH=1 to push)
+images-multiarch: ## Build all multi-arch images locally; publication is GitHub Actions only
 	for c in $(COMPONENTS); do \
-	  docker buildx build --platform $(PLATFORMS) $(if $(PUSH),--push,) --build-arg COMPONENT=$$c \
+	  docker buildx build --platform $(PLATFORMS) --build-arg COMPONENT=$$c \
 	    --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) -t $(REGISTRY)/ratatoskr-$$c:$(TAG) . ; \
 	done
+	for p in $(PLUGINS); do \
+	  if [[ -f plugins/upstream/$$p/Dockerfile ]]; then \
+	    docker buildx build --platform $(PLATFORMS) -f plugins/upstream/$$p/Dockerfile \
+	      --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+	      -t $(REGISTRY)/ratatoskr-upstream-$$p:$(TAG) . ; \
+	  fi; \
+	done
 
-##@ M1 image preparation (does not execute e2e)
+##@ Component fixture images (does not execute e2e)
 
 .PHONY: m1-images
-m1-images: ## Build local M1 proof images; no import, traffic test or registry push
+m1-images: ## Build local component fixture images; no import, traffic test or registry push
 	$(MAKE) images TAG=dev
 	docker build -f test/e2e/tools/Dockerfile -t ratatoskr-tools:m1-local .
 	docker build -f test/e2e/ci/fakeupstream/Dockerfile -t ratatoskr-fakeupstream:m1-local .
@@ -105,11 +112,11 @@ dev-images: ## Build images with the dev tag and import them into the k3d cluste
 
 .PHONY: dev-deploy
 dev-deploy: dev-images ## Build, import and helm-install the chart into the k3d cluster
-	# Helm does not install newly added chart CRDs on upgrade from an M0 release.
+	# Helm does not upgrade CRDs automatically.
 	# Apply the complete CRDs first, even on an existing dev cluster.
 	kubectl --context k3d-$(DEV_CLUSTER) apply --server-side -f charts/ratatoskr/crds/
 	helm upgrade --install ratatoskr charts/ratatoskr -n ratatoskr-system --create-namespace \
-	  --kube-context k3d-$(DEV_CLUSTER) -f hack/dev-values.yaml --wait --timeout 5m
+	  --kube-context k3d-$(DEV_CLUSTER) -f hack/dev-values.yaml --set image.registry=$(REGISTRY) --wait --timeout 5m
 
 ##@ End-to-end
 

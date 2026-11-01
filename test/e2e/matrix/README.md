@@ -213,7 +213,7 @@ provider/API rate limits; select only the required cell rather than repeating.
 
 ## Blocking gaps
 
-See docs/milestones/m8/report.md and the inventory: CRD/admission, agent/restricted
+See test/evidence/history/compatibility.md and the inventory: CRD/admission, agent/restricted
 workloads and restart adoption, authenticated WireGuard and capture denial,
 gateway DNS/metadata/spoof/PMTU, HA, full telemetry, alternative CNI/mesh fixtures,
 Linux 5.10 and late-IPv6/policy-failure runtime safety remain missing. Exact

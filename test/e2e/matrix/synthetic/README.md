@@ -16,7 +16,7 @@ switch. The real Gateway and OpenVPN session reached the healthy baseline, but
 `operation not permitted`; the application never ran. Both fixture namespaces
 and private PKI were cleaned up, and the release was restored to agent mode.
 This is a **FAILED** partial traffic test, not M8 acceptance. The separate
-restricted-agent sandbox-pidfd blocker remains. See `docs/milestones/m9/final-gate.md`.
+restricted-agent sandbox-pidfd blocker remains. See `test/evidence/history/runtime-validation.md`.
 The runner now stops polling as soon as the UID-pinned one-shot Pod reports
 `phase=Failed`. It emits only `init-failed`, `app-failed` or
 `pod-failed-unknown`, then attempts the same UID-owned cleanup; waiting or

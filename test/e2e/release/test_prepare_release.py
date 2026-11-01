@@ -46,7 +46,7 @@ class Ledger:
         (self.root / "test/e2e/matrix/coverage.json").write_text(json.dumps(self.coverage))
 
     def write_checklist(self):
-        (self.root / "docs/milestones/m9/acceptance-checklist.json").write_text(json.dumps(self.checklist))
+        (self.root / "test/e2e/release/acceptance.json").write_text(json.dumps(self.checklist))
 
     def close(self):
         self.dir.cleanup()
