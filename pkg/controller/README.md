@@ -31,8 +31,11 @@ controller, programs its network namespace and polls the upstream's private
 
 The renderer supports 1–32 gateway replicas, `init` or `agent` client drivers,
 `iproute` or opt-in `ebpf` datapaths, and cluster or gateway DNS. The shipped
-upstream is **OpenVPN only**; other upstream type names in API/design material
-are not implemented images. Per-resource upstream image overrides are rejected.
+upstream is **OpenVPN only**. Both webhook admission and controller
+reconciliation reject every other upstream type. The `custom` enum is reserved
+for future implementations, not a deployable escape hatch; per-resource upstream
+image overrides are also rejected. The plugin contract is contributor guidance,
+not evidence that other upstream images are available.
 
 `wireguard` encrypts the **client-to-gateway GENEVE transport**, not the provider
 VPN. It requires `iproute`, a gateway in the operator namespace and authenticated

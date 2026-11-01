@@ -1,9 +1,11 @@
 # OpenVPN upstream
 
 Linux-only, standard-library Go supervisor plus OpenVPN 2.6+ runtime image.
-This is the shipped provider-upstream plugin. Other upstream types mentioned in
-API/design material do not imply additional plugin images are implemented. It
-builds independently of the shared component commands and gateway datapath.
+This is the only supported provider-upstream plugin. Admission and controller
+reconciliation reject non-OpenVPN types, including the reserved `custom` enum,
+and per-resource upstream image overrides. The contract below guides contributors;
+it does not enable deployment of an arbitrary custom image. This plugin builds
+independently of the shared component commands and gateway datapath.
 
 ## Pod contract
 
