@@ -35,9 +35,11 @@ class StageError(Blocked):
 
     STAGES = frozenset({"fixture-create", "gateway-baseline", "selected-create",
                         "selected-ready", "baseline-probe", "gateway-delete",
-                        "replacement-ready", "replacement-probe", "selected-uid"})
+                        "replacement-ready", "replacement-probe", "selected-uid",
+                        "agent-baseline", "agent-restart-ready", "agent-restart-probe"})
     REASONS = frozenset({"blocked", "gateway-owner", "gateway-applied-hash",
-                         "gateway-client-membership", "selected-readiness", "adapter-read"})
+                         "gateway-client-membership", "selected-readiness", "adapter-read",
+                         "agent-owner", "agent-runtime", "agent-node"})
 
     def __init__(self, stage, reason="blocked"):
         if stage not in self.STAGES or reason not in self.REASONS:
@@ -118,7 +120,7 @@ def selected_state(api, owner, ids, gateway, uid):
 
 def await_stage(owner, stage, predicate, *, seconds, clock=time.monotonic, sleep=time.sleep):
     """Bounded reconciliation; emit only fixed last-failure labels at expiry."""
-    if stage not in ("gateway-baseline", "selected-ready", "replacement-ready"):
+    if stage not in ("gateway-baseline", "selected-ready", "replacement-ready", "agent-restart-ready"):
         raise ValueError("Unknown poll checkpoint")
     limit = min(owner.deadline, clock() + seconds)
     reason = "blocked"
@@ -163,7 +165,118 @@ def checkpoint(stage, operation):
         raise StageError(stage) from None
 
 
-def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=time.sleep):
+def agent_snapshot(readonly, namespace, node, image, *, expected_ds_uid=None):
+    """One Ready, owner-bound agent Pod on the selected workload's exact node.
+
+    ReadOnlyAPI is restricted to the already-preflighted release namespace;
+    the selector comes only from the controller-owned DaemonSet, never the Pod.
+    """
+    if (not isinstance(namespace, str) or not ha.ha_live.NAME.fullmatch(namespace) or
+            not isinstance(node, str) or node not in node_images.NODES or
+            not isinstance(image, str) or not run.ID_PATTERN.fullmatch(image)):
+        raise StageError("agent-baseline", "agent-node")
+    daemon = readonly.get("daemonset", "ratatoskr-agent", namespace)
+    meta, spec = daemon["metadata"], daemon["spec"]
+    selector = spec["selector"]["matchLabels"]
+    uid = meta.get("uid")
+    if (meta.get("name") != "ratatoskr-agent" or meta.get("namespace") != namespace or
+            not isinstance(uid, str) or not lifecycle.UID.fullmatch(uid) or
+            meta.get("deletionTimestamp") or
+            expected_ds_uid is not None and uid != expected_ds_uid or
+            not isinstance(selector, dict) or not selector or
+            any(not isinstance(k, str) or not isinstance(v, str) or
+                not re.fullmatch(r"[a-z0-9./-]{1,63}", k) or
+                not re.fullmatch(r"[a-z0-9-]{1,63}", v) for k, v in selector.items()) or
+            selector.get("app.kubernetes.io/name") != "ratatoskr" or
+            selector.get("app.kubernetes.io/component") != "agent"):
+        raise StageError("agent-baseline", "agent-owner")
+    # Only these chart-owned labels can enter a kubectl selector; the release
+    # instance must match the already preflighted DaemonSet template exactly.
+    template_labels = spec["template"]["metadata"]["labels"]
+    if any(template_labels.get(k) != v for k, v in selector.items()):
+        raise StageError("agent-baseline", "agent-owner")
+    selector_text = ",".join(k + "=" + v for k, v in sorted(selector.items()))
+    pods = readonly.get("pods", namespace=namespace, selector=selector_text)
+    if pods.get("kind") != "List" or not isinstance(pods.get("items"), list) or len(pods["items"]) > 8:
+        raise StageError("agent-baseline", "agent-owner")
+    # A terminating old Pod overlapping its replacement is allowed; never
+    # accept two live Pods on the same node, even if only one is Ready.
+    live = [p for p in pods["items"] if p.get("spec", {}).get("nodeName") == node and
+            not p.get("metadata", {}).get("deletionTimestamp")]
+    if len(live) != 1:
+        raise StageError("agent-baseline", "agent-node")
+    pod = live[0]
+    pmeta = pod["metadata"]
+    containers = [c for c in pod.get("spec", {}).get("containers", []) if c.get("name") == "agent"]
+    template = [c for c in spec["template"]["spec"].get("containers", []) if c.get("name") == "agent"]
+    statuses = [s for s in pod.get("status", {}).get("containerStatuses", []) if s.get("name") == "agent"]
+    if (pod.get("kind") != "Pod" or pmeta.get("namespace") != namespace or
+            not isinstance(pmeta.get("uid"), str) or not lifecycle.UID.fullmatch(pmeta["uid"]) or
+            not run.owner_is(pod, "DaemonSet", uid) or
+            any(pmeta.get("labels", {}).get(k) != v for k, v in selector.items()) or
+            pod.get("status", {}).get("phase") != "Running" or not run.ready(pod) or
+            len(containers) != 1 or len(template) != 1 or len(statuses) != 1 or
+            containers[0].get("image") != template[0].get("image") or
+            containers[0].get("imagePullPolicy") != "Never" or
+            template[0].get("imagePullPolicy") != "Never" or
+            statuses[0].get("ready") is not True or statuses[0].get("imageID") != image):
+        raise StageError("agent-baseline", "agent-runtime")
+    return {"daemonUID": uid, "agentUID": pmeta["uid"], "node": node}
+
+
+def external_agent_restart(api, owner, ids, gateway, selected_uid, api_ip, *,
+                           readonly, release_namespace, ready_callback,
+                           expected_daemon_uid=None, clock=time.monotonic, sleep=time.sleep):
+    """Pure observer: parent alone may restart an exact agent Pod externally."""
+    if ready_callback is None or not callable(ready_callback):
+        raise StageError("agent-baseline")
+    if not isinstance(release_namespace, str) or not ha.ha_live.NAME.fullmatch(release_namespace):
+        raise StageError("agent-baseline", "agent-node")
+    def baseline():
+        selected = selected_state(api, owner, ids, gateway, selected_uid)
+        node = selected.get("spec", {}).get("nodeName")
+        if node not in node_images.NODES:
+            raise StageError("agent-baseline", "agent-node")
+        return agent_snapshot(readonly, release_namespace, node, ids["agent"],
+                              expected_ds_uid=expected_daemon_uid)
+    before = checkpoint("agent-baseline", baseline)
+    node = before["node"]
+    if owner.deadline - clock() < 165:
+        raise StageError("agent-baseline")
+    # No mutation here. A parent-owned callback can signal a separate, exact
+    # UID-preconditioned agent Pod restart while this owned selected Pod lives.
+    checkpoint("agent-baseline", lambda: ready_callback(node, before["agentUID"], before["daemonUID"]))
+    def replacement():
+        if api.get("pod", "synthetic-client", owner.names[1])["metadata"].get("uid") != selected_uid:
+            raise SelectedUIDChanged()
+        observed = agent_snapshot(readonly, release_namespace, node, ids["agent"],
+                                  expected_ds_uid=before["daemonUID"])
+        current = gateway_state(api, owner, ids, gateway["gatewayUID"])
+        if current != gateway:
+            return None
+        selected_state(api, owner, ids, current, selected_uid)
+        if observed["agentUID"] == before["agentUID"]:
+            return None
+        return observed
+    # The 150-second window is part of the existing 700-second owner budget;
+    # separate Lifecycle cleanup_budget is retained for failure and success.
+    after = await_stage(owner, "agent-restart-ready", replacement, seconds=150,
+                        clock=clock, sleep=sleep)
+    def verify():
+        if replacement() != after:
+            raise StageError("agent-restart-probe")
+        if api.probe_running("synthetic-client", selected_uid, ids["selected"],
+                             "healthy", api_ip) is not True:
+            raise StageError("agent-restart-probe")
+        if replacement() != after:
+            raise StageError("agent-restart-probe")
+    checkpoint("agent-restart-probe", verify)
+    return True
+
+
+def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=time.sleep,
+            restart_reader=None, release_namespace=None, ready_callback=None,
+            expected_daemon_uid=None):
     """One owner-checked DELETE; new Pod UID/IP and existing client reprogram."""
     ns, apps = owner.names
     gw_uid = created[("EgressGateway", ns, "synthetic")]
@@ -224,17 +337,30 @@ def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=tim
                                         api.get("service", "synthetic-vpn", ns), ids["server"])["metadata"]["uid"] != source_uid:
             raise StageError("replacement-probe")
     checkpoint("replacement-probe", replacement_probe)
-    return {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
-            "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
-            "agentRestart": "not-tested"}
+    result = {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
+              "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
+              "agentRestart": "not-tested"}
+    if restart_reader is not None:
+        external_agent_restart(api, owner, ids, after, uid, api_ip,
+                               readonly=restart_reader, release_namespace=release_namespace,
+                               ready_callback=ready_callback, expected_daemon_uid=expected_daemon_uid,
+                               clock=clock, sleep=sleep)
+        result["agentRestart"] = "observed"
+        result["agentRestartObserved"] = True
+    return result
 
 
 def execute(ids, api_ip, *, lifecycle_factory=lifecycle.Lifecycle, adapter_factory=LifecycleAPI,
-            clock=time.monotonic, sleep=time.sleep):
+            clock=time.monotonic, sleep=time.sleep, restart_reader=None,
+            release_namespace=None, ready_callback=None, expected_daemon_uid=None):
     if (not isinstance(ids, dict) or set(ids) != set(run.COMPONENTS) or
             any(not isinstance(v, str) or not run.ID_PATTERN.fullmatch(v) for v in ids.values())):
         raise Blocked("Immutable approved image IDs missing.")
     ha.ha_live.ip4(api_ip)
+    if restart_reader is not None and (ready_callback is None or not callable(ready_callback) or
+                                      not isinstance(release_namespace, str) or
+                                      not ha.ha_live.NAME.fullmatch(release_namespace)):
+        raise StageError("agent-baseline")
     with lifecycle_factory(duration=700, cleanup_budget=150) as owner:
         stage = "fixture-create"
         try:
@@ -254,36 +380,64 @@ def execute(ids, api_ip, *, lifecycle_factory=lifecycle.Lifecycle, adapter_facto
                 created[key] = identity["uid"]
             if len(created) != len(partial_gateway.BASE):
                 raise Blocked("Fixture owner manifest incomplete.")
-            return replace(api, owner, ids, created, api_ip, clock=clock, sleep=sleep)
+            return replace(api, owner, ids, created, api_ip, clock=clock, sleep=sleep,
+                           restart_reader=restart_reader, release_namespace=release_namespace,
+                           ready_callback=ready_callback, expected_daemon_uid=expected_daemon_uid)
         except (StageError, KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
             raise StageError(stage) from None
 
 
-def main(argv=None, environ=None, *, readonly_factory=run.ReadOnlyAPI, executor=execute):
+def main(argv=None, environ=None, *, readonly_factory=run.ReadOnlyAPI,
+         restart_reader_factory=run.ReadOnlyAPI, executor=execute):
     parser = argparse.ArgumentParser(description="Gated existing-client singleton gateway replacement")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--execute-agent-gateway-replacement", action="store_true")
+    parser.add_argument("--wait-external-agent-restart", action="store_true")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
     if (not args.execute or not args.execute_agent_gateway_replacement or
             env.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
-            env.get("RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT") != "1"):
+            env.get("RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT") != "1" or
+            args.wait_external_agent_restart and env.get("RATATOSKR_E2E_AGENT_RESTART") != "1"):
         print("SKIPPED: explicit gateway-replacement final gate absent; no cluster accessed.")
         return 2
     try:
         ids = run.expected_ids(env)
         readonly = readonly_factory()
-        run.preflight(readonly, ids)
+        release_namespace = run.preflight(readonly, ids)
+        expected_daemon_uid = None
+        if args.wait_external_agent_restart:
+            daemon = readonly.get("daemonset", "ratatoskr-agent", release_namespace)
+            expected_daemon_uid = daemon.get("metadata", {}).get("uid")
+            if (not isinstance(expected_daemon_uid, str) or
+                    not lifecycle.UID.fullmatch(expected_daemon_uid)):
+                raise StageError("agent-baseline", "agent-owner")
         node_images.verify({component: ids[component] for component in node_images.TAGS})
         ip = partial_gateway.api_service_ip(readonly)
-        result = executor(ids, ip)
-        if result != {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
-                      "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
-                      "agentRestart": "not-tested"}:
+        if args.wait_external_agent_restart:
+            # stdout is a fixed protocol; never disclose Pod/DaemonSet UID or
+            # node identity. Parent reads them from its own authenticated API.
+            def ready_callback(_node, _pod_uid, _daemon_uid):
+                print("READY: externally restart the UID-owned agent Pod on the selected node.", flush=True)
+            result = executor(ids, ip, restart_reader=restart_reader_factory(budget=900),
+                              release_namespace=release_namespace, ready_callback=ready_callback,
+                              expected_daemon_uid=expected_daemon_uid)
+        else:
+            result = executor(ids, ip)
+        expected = {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
+                    "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
+                    "agentRestart": "not-tested"}
+        if args.wait_external_agent_restart:
+            expected["agentRestart"] = "observed"
+            expected["agentRestartObserved"] = True
+        if result != expected:
             raise Blocked("Existing-client replacement marker incomplete.")
-        print("PARTIAL: existing selected Pod healthy on replacement Gateway Pod; established flows and agent restart NOT TESTED.")
+        if args.wait_external_agent_restart:
+            print("PARTIAL: existing selected Pod healthy after external agent Pod restart; established flows NOT TESTED.")
+        else:
+            print("PARTIAL: existing selected Pod healthy on replacement Gateway Pod; established flows and agent restart NOT TESTED.")
         return 4
     except (KeyboardInterrupt, SystemExit):
         print("FAILED: gateway replacement interrupted; inspect UID-owned namespace cleanup.")

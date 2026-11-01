@@ -48,6 +48,26 @@ observation, **not** the underlying Kubernetes response or a successful
 runtime verification. Errors and private API responses remain suppressed;
 cleanup failure still prevents a partial result.
 
+### Optional passive agent Pod restart observation (authored, not executed)
+
+With the same parent-approved release and Gateway fixture, set
+`RATATOSKR_E2E_AGENT_RESTART=1` and add `--wait-external-agent-restart` to the
+command above. After the Gateway replacement has passed, the runner verifies
+that the still-running selected Pod is on an approved node and that exactly one
+Ready release agent Pod on that node is owned by the preflight-pinned DaemonSet
+UID and runs the pinned agent image. It then prints the fixed, flushed `READY:`
+line.
+**The runner does not delete any agent Pod or change the release.** Only the
+parent, under its separate authorization, may perform an exact-UID,
+preconditioned deletion of the verified agent Pod. The runner waits at most
+150 seconds within the owned fixture deadline for a different, Ready agent Pod
+UID on that same node, still owned by the same DaemonSet UID and running the
+same immutable image. It then rechecks the selected Pod UID, Gateway endpoint,
+applied-config hash and fresh fixed healthy marker/direct-API probe before
+reporting the separate `agentRestartObserved` partial result. If no external
+restart happens, or any required identity/probe fails, no restart claim is
+awarded. No established-flow continuity is asserted.
+
 ## M4/M5 integration contract (not an executable live runner)
 
 A future **parent-authorized final-gate collector** must construct a dictionary

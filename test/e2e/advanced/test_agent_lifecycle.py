@@ -97,6 +97,61 @@ class API(FakeFixtureAPI):
         self._set_config(selected, config)
 
 
+class AgentReader:
+    """Strict fake read-only release API; never runs Kubernetes commands."""
+    namespace = "ratatoskr-system"
+    daemon_uid = "12345678-1234-1234-1234-123456789abc"
+    old_uid = "aaaaaaaa-1234-1234-1234-123456789abc"
+    new_uid = "bbbbbbbb-1234-1234-1234-123456789abc"
+    image = "containerd://sha256:" + "a" * 64
+    node = f.node_images.NODES[1]
+
+    def __init__(self):
+        self.new = False
+        self.pods = None
+        self.changed_daemon = False
+        self.wrong_image = False
+        self.wrong_node = False
+        self.wrong_owner = False
+        self.calls = []
+
+    def get(self, kind, name=None, namespace=None, selector=None):
+        self.calls.append((kind, name, namespace, selector))
+        assert namespace == self.namespace
+        labels = {"app.kubernetes.io/name": "ratatoskr",
+                  "app.kubernetes.io/instance": "ratatoskr",
+                  "app.kubernetes.io/component": "agent"}
+        if kind == "daemonset":
+            assert name == "ratatoskr-agent" and selector is None
+            return {"metadata": {"name": name, "namespace": namespace,
+                                 "uid": self.new_uid if self.changed_daemon else self.daemon_uid},
+                    "spec": {"selector": {"matchLabels": labels},
+                             "template": {"metadata": {"labels": labels}, "spec": {
+                                 "containers": [{"name": "agent", "image": "ratatoskr-agent:local",
+                                                 "imagePullPolicy": "Never"}]}}}}
+        assert kind == "pods" and name is None
+        assert selector == ",".join(k + "=" + v for k, v in sorted(labels.items()))
+        if self.pods is not None:
+            return {"kind": "List", "items": self.pods}
+        return {"kind": "List", "items": [self.pod(labels)]}
+
+    def pod(self, labels=None):
+        labels = labels or {"app.kubernetes.io/name": "ratatoskr",
+                            "app.kubernetes.io/instance": "ratatoskr",
+                            "app.kubernetes.io/component": "agent"}
+        return {"kind": "Pod", "metadata": {"uid": self.new_uid if self.new else self.old_uid,
+                "namespace": self.namespace, "labels": labels,
+                "ownerReferences": [{"kind": "DaemonSet", "uid":
+                                    self.old_uid if self.wrong_owner else self.daemon_uid,
+                                    "controller": True}]},
+                "spec": {"nodeName": f.node_images.NODES[2] if self.wrong_node else self.node,
+                         "containers": [{"name": "agent", "image": "ratatoskr-agent:local",
+                                         "imagePullPolicy": "Never"}]},
+                "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+                           "containerStatuses": [{"name": "agent", "ready": True,
+                            "imageID": "other-image" if self.wrong_image else self.image}]}}
+
+
 class GatewayReplacementTest(unittest.TestCase):
     ids = {"selected": "image-selected", "server": "image-server"}
     created = {("EgressGateway", GATEWAY, "synthetic"): GW_UID,
@@ -300,6 +355,172 @@ class GatewayReplacementTest(unittest.TestCase):
         with self.assertRaises(f.SelectedUIDChanged):
             f.await_stage(Owner(), "replacement-ready", called, seconds=3)
         called.assert_called_once_with()
+
+    def test_release_agent_owner_node_image_and_single_live_pod(self):
+        reader = AgentReader()
+        self.assertEqual(f.agent_snapshot(reader, reader.namespace, reader.node, reader.image),
+                         {"daemonUID": reader.daemon_uid, "agentUID": reader.old_uid,
+                          "node": reader.node})
+        for wrong, reason in (("wrong_node", "agent-node"), ("wrong_image", "agent-runtime"),
+                              ("wrong_owner", "agent-runtime"), ("changed_daemon", "agent-owner")):
+            with self.subTest(wrong=wrong):
+                setattr(reader, wrong, True)
+                with self.assertRaises(f.StageError) as caught:
+                    f.agent_snapshot(reader, reader.namespace, reader.node, reader.image,
+                                     expected_ds_uid=reader.daemon_uid)
+                self.assertEqual(caught.exception.reason, reason)
+                setattr(reader, wrong, False)
+        reader.pods = [reader.pod(), reader.pod()]
+        with self.assertRaises(f.StageError) as caught:
+            f.agent_snapshot(reader, reader.namespace, reader.node, reader.image)
+        self.assertEqual(caught.exception.reason, "agent-node")
+        reader.pods[0]["metadata"]["deletionTimestamp"] = "2026-10-01T00:00:00Z"
+        reader.new = True
+        reader.pods[1]["metadata"]["uid"] = reader.new_uid
+        self.assertEqual(f.agent_snapshot(reader, reader.namespace, reader.node, reader.image)["agentUID"],
+                         reader.new_uid)
+        with self.assertRaises(f.StageError):
+            f.agent_snapshot(reader, "foreign_namespace", reader.node, reader.image)
+        self.assertEqual({call[0] for call in reader.calls}, {"daemonset", "pods"})
+
+    def test_passive_restart_wait_requires_new_uid_and_fresh_probe(self):
+        api, reader, owner = API(), AgentReader(), Owner()
+        api.frame[("pod", CLIENT_NS, "synthetic-client")]["spec"]["nodeName"] = reader.node
+        ids = {**self.ids, "agent": reader.image}
+        gateway = self.state(api)
+        calls = []
+        def ready(node, agent_uid, ds_uid):
+            calls.append((node, agent_uid, ds_uid))
+            reader.new = True  # external parent action, NOT fixture mutation
+        with (patch.object(f, "selected_state", side_effect=lambda *_: api.get(
+                "pod", "synthetic-client", CLIENT_NS)),
+              patch.object(f, "gateway_state", return_value=gateway)):
+            self.assertTrue(f.external_agent_restart(api, owner, ids, gateway, CLIENT_UID,
+                                                      "10.96.0.1", readonly=reader,
+                                                      release_namespace=reader.namespace,
+                                                      ready_callback=ready))
+        self.assertEqual(calls, [(reader.node, reader.old_uid, reader.daemon_uid)])
+        self.assertEqual(len(api.probes), 1)
+        self.assertEqual(api.probes[0][1], CLIENT_UID)
+        self.assertEqual(api.actions, [])  # observer never deletes DaemonSet Pods
+
+    def test_unchanged_agent_uid_times_out_without_probe(self):
+        api, reader, owner = API(), AgentReader(), Owner()
+        api.frame[("pod", CLIENT_NS, "synthetic-client")]["spec"]["nodeName"] = reader.node
+        ids = {**self.ids, "agent": reader.image}
+        gateway = self.state(api)
+        now = [0.0]
+        owner.deadline = 200
+        owner.clock = lambda: now[0]
+        def clock(): return now[0]
+        def sleep(seconds): now[0] += seconds
+        with (patch.object(f, "selected_state", side_effect=lambda *_: api.get(
+                "pod", "synthetic-client", CLIENT_NS)),
+              patch.object(f, "gateway_state", return_value=gateway)):
+            with self.assertRaises(f.StageError) as caught:
+                f.external_agent_restart(api, owner, ids, gateway, CLIENT_UID,
+                                         "10.96.0.1", readonly=reader,
+                                         release_namespace=reader.namespace,
+                                         ready_callback=lambda *_: None, clock=clock, sleep=sleep)
+        self.assertEqual(caught.exception.stage, "agent-restart-ready")
+        self.assertEqual(now[0], 150)
+        self.assertEqual(api.probes, [])
+
+    def test_restart_selected_uid_change_is_terminal_and_probe_failure_blocks(self):
+        api, reader, owner = API(), AgentReader(), Owner()
+        api.frame[("pod", CLIENT_NS, "synthetic-client")]["spec"]["nodeName"] = reader.node
+        ids = {**self.ids, "agent": reader.image}
+        gateway = self.state(api)
+        with (patch.object(f, "selected_state", side_effect=lambda *_: api.get(
+                "pod", "synthetic-client", CLIENT_NS)),
+              patch.object(f, "gateway_state", return_value=gateway)):
+            def replaced_uid(*_):
+                reader.new = True
+                api.frame[("pod", CLIENT_NS, "synthetic-client")]["metadata"]["uid"] = "foreign-client-uid"
+            with self.assertRaises(f.SelectedUIDChanged):
+                f.external_agent_restart(api, owner, ids, gateway, CLIENT_UID,
+                                         "10.96.0.1", readonly=reader,
+                                         release_namespace=reader.namespace, ready_callback=replaced_uid)
+            self.assertEqual(api.probes, [])
+            api.frame[("pod", CLIENT_NS, "synthetic-client")]["metadata"]["uid"] = CLIENT_UID
+            reader.new = False
+            api.probe_running = Mock(return_value=False)
+            def restart_again(*_): reader.new = True
+            with self.assertRaises(f.StageError) as caught:
+                f.external_agent_restart(api, owner, ids, gateway, CLIENT_UID,
+                                         "10.96.0.1", readonly=reader,
+                                         release_namespace=reader.namespace,
+                                         ready_callback=restart_again)
+            self.assertEqual(caught.exception.stage, "agent-restart-probe")
+            api.probe_running.assert_called_once()
+
+    def test_restart_opt_in_gate_and_default_are_separate(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1",
+               "RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT": "1"}
+        readonly, executor = Mock(), Mock()
+        with redirect_stdout(io.StringIO()) as output:
+            rc = f.main(["--execute", "--execute-agent-gateway-replacement",
+                         "--wait-external-agent-restart"], env,
+                        readonly_factory=readonly, executor=executor)
+        self.assertEqual(rc, 2)
+        self.assertIn("SKIPPED", output.getvalue())
+        readonly.assert_not_called()
+        executor.assert_not_called()
+
+    def test_opt_in_main_pins_release_daemon_uid_and_emits_only_fixed_ready(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1",
+               "RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT": "1",
+               "RATATOSKR_E2E_AGENT_RESTART": "1"}
+        ids = {component: AgentReader.image for component in f.run.COMPONENTS}
+        release = AgentReader()
+        readonly = Mock()
+        readonly.get.side_effect = lambda kind, name, namespace: {
+            "metadata": {"uid": release.daemon_uid}} if (kind, name, namespace) == (
+                "daemonset", "ratatoskr-agent", release.namespace) else self.fail("unexpected preflight GET")
+        result = {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
+                  "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
+                  "agentRestart": "observed", "agentRestartObserved": True}
+        def execute(*_args, **kw):
+            self.assertEqual(kw["release_namespace"], release.namespace)
+            self.assertEqual(kw["expected_daemon_uid"], release.daemon_uid)
+            self.assertIs(kw["restart_reader"], release)
+            kw["ready_callback"](release.node, release.old_uid, release.daemon_uid)
+            return result
+        with (patch.object(f.run, "expected_ids", return_value=ids),
+              patch.object(f.run, "preflight", return_value=release.namespace),
+              patch.object(f.node_images, "verify", return_value=True),
+              patch.object(f.partial_gateway, "api_service_ip", return_value="10.96.0.1")):
+            with redirect_stdout(io.StringIO()) as output:
+                rc = f.main(["--execute", "--execute-agent-gateway-replacement",
+                             "--wait-external-agent-restart"], env,
+                            readonly_factory=lambda: readonly,
+                            restart_reader_factory=lambda **kw: release,
+                            executor=execute)
+        self.assertEqual(rc, 4)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("READY:"))
+        self.assertTrue(lines[1].startswith("PARTIAL:"))
+        self.assertNotIn(release.old_uid, output.getvalue())
+        readonly.get.assert_called_once_with("daemonset", "ratatoskr-agent", release.namespace)
+
+    def test_opt_in_rejects_changed_preflight_daemon_uid_before_fixture(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1",
+               "RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT": "1",
+               "RATATOSKR_E2E_AGENT_RESTART": "1"}
+        ids = {component: AgentReader.image for component in f.run.COMPONENTS}
+        reader, executor = AgentReader(), Mock()
+        readonly = Mock()
+        readonly.get.return_value = {"metadata": {"uid": "not-a-uid"}}
+        with (patch.object(f.run, "expected_ids", return_value=ids),
+              patch.object(f.run, "preflight", return_value=reader.namespace)):
+            with redirect_stdout(io.StringIO()) as output:
+                code = f.main(["--execute", "--execute-agent-gateway-replacement",
+                               "--wait-external-agent-restart"], env,
+                              readonly_factory=lambda: readonly, executor=executor)
+        self.assertEqual(code, 1)
+        self.assertIn("agent-baseline/agent-owner", output.getvalue())
+        executor.assert_not_called()
 
     def test_final_gate_is_noop_without_both_explicit_flags(self):
         readonly, executor = Mock(), Mock()
