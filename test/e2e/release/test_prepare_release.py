@@ -29,7 +29,9 @@ class Ledger:
         shutil.copyfile(SOURCE / "test/e2e/matrix/release_acceptance.py",
                         self.root / "test/e2e/matrix/release_acceptance.py")
         source_coverage = json.loads((SOURCE / "test/e2e/matrix/coverage.json").read_text())
-        self.coverage = {"schemaVersion": 1, "scenarios": [{"id": item["id"]} for item in source_coverage["scenarios"]]}
+        shutil.copyfile(SOURCE / "test/e2e/matrix/applicability.py",
+                        self.root / "test/e2e/matrix/applicability.py")
+        self.coverage = source_coverage
         self.write_coverage()
         self.checklist = {"schemaVersion": 1, "scope": "release-acceptance", "gates": [
             {"id": item["id"], "status": "PASSED", "requirement": "Independently reviewed",
@@ -112,9 +114,17 @@ class GuardTests(unittest.TestCase):
         self.fail_before_git()
 
     def write_synthetic_coverage(self):
-        self.ledger.coverage = {"schemaVersion": 1,
-            "scenarios": [{"id": item["id"]} for item in self.ledger.coverage["scenarios"]]}
         self.ledger.write_coverage()
+
+    def test_renamed_inventory_and_matching_ledger_cannot_replace_required_gate(self):
+        old = self.ledger.coverage["scenarios"][0]["id"]
+        self.ledger.coverage["scenarios"][0]["id"] = "easier-substitute"
+        for gate in self.ledger.checklist["gates"]:
+            if gate["id"] == old:
+                gate["id"] = "easier-substitute"
+        self.ledger.write_coverage()
+        self.ledger.write_checklist()
+        self.fail_before_git()
 
     def test_execute_version_sha_and_output_cannot_stage(self):
         for change in ({"execute": False}, {"version": "dev"}, {"version": "1.2.3-dev"},

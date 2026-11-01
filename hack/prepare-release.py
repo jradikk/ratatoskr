@@ -39,10 +39,16 @@ def _ledger(root):
     """Require exact 25 independent scenario IDs plus four fixed release gates."""
     try:
         coverage = json.loads((root / "test/e2e/matrix/coverage.json").read_text())
-        scenario_ids = [scenario["id"] for scenario in coverage["scenarios"]]
-        if (coverage["schemaVersion"] != 1 or len(scenario_ids) != 25 or
-                len(set(scenario_ids)) != 25 or any(not isinstance(s, str) or not s for s in scenario_ids)):
+        specification = importlib.util.spec_from_file_location(
+            "release_applicability", root / "test/e2e/matrix/applicability.py")
+        if specification is None or specification.loader is None:
             raise ValueError()
+        applicability = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(applicability)
+        applicability.validate(coverage)
+        # Required identities come from the reviewed contract, not a mutable
+        # inventory count that could substitute easier acceptance requirements.
+        scenario_ids = sorted(applicability.EXPECTED_SCENARIOS)
         required = scenario_ids + list(EXTRA_GATES)
         checklist = json.loads((root / "docs/milestones/m9/acceptance-checklist.json").read_text())
         result = _acceptance(root)(checklist, required)
