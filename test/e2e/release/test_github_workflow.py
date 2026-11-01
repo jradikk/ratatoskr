@@ -31,10 +31,10 @@ class GitHubReleaseTests(unittest.TestCase):
         self.assertEqual(build['with']['push'], 'true')
         self.assertEqual(build['with']['sbom'], 'true')
         self.assertEqual(build['with']['provenance'], 'mode=max')
-        self.assertIn('docker.io/${{ github.repository_owner }}', build['with']['tags'])
+        self.assertIn('ghcr.io/${{ github.repository_owner }}', build['with']['tags'])
         self.assertTrue({'images', 'binaries', 'test', 'validate'} <= set(jobs['chart']['needs']))
         staging = next(s['run'] for s in jobs['chart']['steps'] if s.get('name', '').startswith('Package chart'))
-        self.assertIn('docker.io/jradikk', staging)
+        self.assertIn('ghcr.io/jradikk', staging)
         self.assertIn('jradikk/ratatoskr', staging)
         self.assertNotIn('ghcr.io/skaldhall', staging)
         self.assertNotIn('values.write_text', staging)
@@ -50,9 +50,13 @@ class GitHubReleaseTests(unittest.TestCase):
 
     def test_credentials_and_attestation_failures_are_not_ignored(self):
         jobs = workflow('release.yaml')['jobs']
-        login = next(s for s in jobs['images']['steps'] if s.get('uses') == 'docker/login-action@v3')
-        self.assertEqual(login['with']['username'], '${{ secrets.DOCKER_USERNAME }}')
-        self.assertEqual(login['with']['password'], '${{ secrets.DOCKER_PASSWORD }}')
+        login = next(s for s in jobs['images']['steps'] if s.get('name') == 'Authenticate image publication to GHCR')
+        self.assertEqual(login['env']['GHCR_TOKEN'], '${{ secrets.GITHUB_TOKEN }}')
+        self.assertIn('docker login ghcr.io', login['run'])
+        self.assertIn('--password-stdin', login['run'])
+        self.assertEqual(jobs['images']['permissions']['packages'], 'write')
+        self.assertNotIn('DOCKER_PASSWORD', (ROOT / '.github/workflows/release.yaml').read_text())
+        self.assertNotIn('docker/login-action', (ROOT / '.github/workflows/release.yaml').read_text())
         for job in ('images', 'binaries', 'chart'):
             attest = next(s for s in jobs[job]['steps'] if s.get('uses', '').startswith('actions/attest-build-provenance@'))
             self.assertNotIn('continue-on-error', attest)

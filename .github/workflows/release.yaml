@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: write
       id-token: write
       attestations: write
     strategy:
@@ -54,11 +55,11 @@ jobs:
         run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Authenticate image publication to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
       - name: Select component Dockerfile
         id: component
         env:
@@ -77,7 +78,7 @@ jobs:
           file: ${{ steps.component.outputs.file }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ needs.validate.outputs.version }}
+          tags: ghcr.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ needs.validate.outputs.version }}
           build-args: |
             GO_VERSION=${{ env.GO_VERSION }}
             COMPONENT=${{ matrix.component }}
@@ -92,7 +93,7 @@ jobs:
       - name: Attest image provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}
+          subject-name: ghcr.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Record image digest
@@ -102,7 +103,7 @@ jobs:
           IMAGE_OWNER: ${{ github.repository_owner }}
         run: |
           mkdir -p image-digests
-          printf 'docker.io/%s/ratatoskr-%s@%s\n' "$IMAGE_OWNER" "$COMPONENT" "$IMAGE_DIGEST" > "image-digests/$COMPONENT.txt"
+          printf 'ghcr.io/%s/ratatoskr-%s@%s\n' "$IMAGE_OWNER" "$COMPONENT" "$IMAGE_DIGEST" > "image-digests/$COMPONENT.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: image-digest-${{ matrix.component }}
@@ -171,7 +172,7 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_REPOSITORY" == 'jradikk/ratatoskr' ]]
           [[ "$IMAGE_OWNER" == 'jradikk' ]]
-          test "$(sed -n 's/^  registry: //p' charts/ratatoskr/values.yaml)" = 'docker.io/jradikk'
+          test "$(sed -n 's/^  registry: //p' charts/ratatoskr/values.yaml)" = 'ghcr.io/jradikk'
           test "$(sed -n 's/^home: //p' charts/ratatoskr/Chart.yaml)" = 'https://github.com/jradikk/ratatoskr'
           helm lint charts/ratatoskr --strict
           mkdir -p dist
@@ -233,7 +234,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           body: |
-            Images: docker.io/${{ github.repository_owner }}/ratatoskr-<component>:${{ needs.validate.outputs.version }}
+            Images: ghcr.io/${{ github.repository_owner }}/ratatoskr-<component>:${{ needs.validate.outputs.version }}
             Components: controller, webhook, agent, gateway, init, upstream-openvpn.
             Helm: oci://ghcr.io/${{ github.repository_owner }}/charts/ratatoskr
             Verify provenance with `gh attestation verify` for downloaded assets and published image digests.

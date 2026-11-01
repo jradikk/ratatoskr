@@ -36,7 +36,7 @@ class PublicDocumentationTests(unittest.TestCase):
         values = yaml.safe_load((ROOT / 'charts/ratatoskr/values.yaml').read_text())
         self.assertRegex(chart['version'], r'^\d+\.\d+\.\d+$')
         self.assertEqual(str(chart['appVersion']), chart['version'])
-        self.assertEqual(values['image']['registry'], 'docker.io/jradikk')
+        self.assertEqual(values['image']['registry'], 'ghcr.io/jradikk')
         self.assertEqual(chart['home'], 'https://github.com/jradikk/ratatoskr')
         self.assertEqual(chart['sources'], ['https://github.com/jradikk/ratatoskr'])
 

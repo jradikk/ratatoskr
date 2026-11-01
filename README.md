@@ -105,7 +105,7 @@ for the detailed security model.
 ### 1. Install the operator
 
 The release workflow publishes versioned charts to GHCR and matching images to
-Docker Hub. Choose a version whose release has completed successfully; the
+GHCR. Choose a version whose release has completed successfully; the
 command below pins **0.1.0**. Use it once that version is available in the registry.
 
 Create `ratatoskr-values.yaml`:

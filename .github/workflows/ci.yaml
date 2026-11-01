@@ -95,7 +95,7 @@ jobs:
             COMPONENT=${{ matrix.component }}
             VERSION=${{ github.sha }}
             COMMIT=${{ github.sha }}
-          tags: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ github.sha }}
           sbom: true
           provenance: mode=max
           push: false
