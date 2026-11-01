@@ -10,6 +10,7 @@ from unittest.mock import patch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.dont_write_bytecode = True
+import adapter
 import environment
 import run
 
@@ -34,13 +35,10 @@ class IdentityTests(unittest.TestCase):
     def test_calico_get_is_read_only_with_exact_context_and_no_other_actions(self):
         api = run.ReadOnlyAPI(environment=environment.CALICO, clock=lambda: 0)
         calls = []
-        def subprocess_run(argv, **kwargs):
+        def bounded(argv, **kwargs):
             calls.append((argv, kwargs))
-            class Result:
-                returncode = 0
-                stdout = '{"items":[]}'
-            return Result()
-        with patch.object(run.subprocess, "run", side_effect=subprocess_run):
+            return b'{"items":[]}'
+        with patch.object(adapter, "_bounded", side_effect=bounded):
             self.assertEqual(api.get("nodes"), {"items": []})
         self.assertEqual(len(calls), 1)
         argv, kwargs = calls[0]
@@ -48,8 +46,7 @@ class IdentityTests(unittest.TestCase):
                                     "--request-timeout=10s", "get", "nodes"])
         self.assertNotIn("create", argv)
         self.assertNotIn("delete", argv)
-        self.assertEqual(set(kwargs["env"]) & {"PATH", "HOME", "KUBECONFIG"}, set(kwargs["env"]))
-        self.assertTrue(kwargs["capture_output"] and kwargs["check"] is False)
+        self.assertEqual(kwargs, {"timeout": 15, "max_output": 262144})
 
     def test_preflight_exact_calico_ready_nodes_variant_none_then_release(self):
         class API(run.ReadOnlyAPI):

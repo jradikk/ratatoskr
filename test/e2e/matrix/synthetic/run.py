@@ -61,18 +61,19 @@ class ReadOnlyAPI:
         if ignore_not_found:
             args += ["--ignore-not-found"]
         args += ["-o", "json"]
-        # Never inherit provider tokens or shell tracing/debug variables. No raw API
-        # stderr, Pod logs, profiles, Secret objects, or manifests are recorded.
-        env = {key: os.environ[key] for key in ("PATH", "HOME", "KUBECONFIG") if key in os.environ}
+        # Reuse the streaming cap/deadline transport. capture_output would
+        # allocate the entire API response before it could be size-checked.
+        # Import lazily so the inert/default runner path performs no work.
         try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=remaining,
-                                    check=False, env=env)
-            if result.returncode:
-                raise Blocked("Read-only Kubernetes preflight failed.")
-            if ignore_not_found and not result.stdout.strip():
+            try:
+                from . import adapter
+            except ImportError:
+                import adapter
+            raw = adapter._bounded(args, timeout=remaining, max_output=262144)
+            if ignore_not_found and not raw.strip():
                 return None
-            return json.loads(result.stdout)
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return json.loads(raw)
+        except (adapter.AdapterError, OSError, subprocess.TimeoutExpired, ValueError):
             raise Blocked("Read-only Kubernetes preflight unavailable or malformed.") from None
 
 

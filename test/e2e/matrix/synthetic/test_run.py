@@ -303,19 +303,21 @@ class GateTests(unittest.TestCase):
                     run.preflight(api, IDS)
 
     def test_api_no_raw_errors_or_mutations(self):
-        original = subprocess.run
+        import adapter
+        original = adapter._bounded
         try:
-            def fake(args, **_kwargs):
+            def fake(args, **kwargs):
                 self.assertEqual(args[4:6], ["get", "nodes"])
-                raise subprocess.TimeoutExpired(args, 1, stderr="private")
-            subprocess.run = fake
+                self.assertEqual(kwargs["max_output"], 262144)
+                raise adapter.AdapterError("private")
+            adapter._bounded = fake
             with self.assertRaisesRegex(run.Blocked, "unavailable") as ctx:
                 run.ReadOnlyAPI().get("nodes")
             self.assertNotIn("private", str(ctx.exception))
             with self.assertRaises(run.Blocked):
                 run.ReadOnlyAPI(budget=-1).get("nodes")
         finally:
-            subprocess.run = original
+            adapter._bounded = original
 
 
 if __name__ == "__main__":
