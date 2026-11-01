@@ -21,8 +21,8 @@ and consult its release notes for security fixes.
   **node-root-equivalent**, even though its container is not privileged. Only
   trusted administrators should install or modify the operator and its RBAC.
 - Gateway and upstream containers have network-administration capabilities.
-  Custom upstream images are trusted code in the gateway's shared network
-  namespace; review and pin them before deployment.
+  An overridden OpenVPN image is trusted code in the gateway's shared network
+  namespace; review and pin it before deployment.
 - Namespace labels used by `allowedNamespaces.namespaceSelector` are access
   controls. Restrict who can change them. A missing selector denies all access;
   an empty selector allows all namespaces.

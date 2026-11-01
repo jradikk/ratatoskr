@@ -133,6 +133,6 @@ func TestRenderWireGuardIdentityAndIngress(t *testing.T) {
 	}
 	gw.Namespace = "other"
 	if _, err := r.render(gw, nil); err == nil {
-		t.Fatal("cross-namespace M4 gateway accepted without scoped RBAC")
+		t.Fatal("cross-namespace gateway accepted without scoped RBAC")
 	}
 }

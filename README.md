@@ -9,8 +9,9 @@ without putting a VPN client in every application.
 **One label to opt in. Explicit policies when you need them. No unprotected
 fallback for traffic selected for the gateway.**
 
-- **VPN-backed egress:** use the included OpenVPN upstream or bring a container
-  implementing the [upstream plugin contract](docs/adr/0006-upstream-plugin-contract.md).
+- **VPN-backed egress:** use the included OpenVPN upstream. The
+  [upstream plugin contract](docs/adr/0006-upstream-plugin-contract.md) describes
+  how additional integrations can be developed.
 - **Selective routing:** send all non-excluded traffic through a gateway, or
   select destinations and TCP/UDP ports with an `EgressPolicy`.
 - **Fail-closed routing:** selected traffic is blocked when no usable gateway
@@ -297,8 +298,8 @@ for full semantics.
 
 The included upstream image supports **OpenVPN**. The API also reserves
 WireGuard, AmneziaWG, and strongSwan upstream types; those names do not mean
-bundled implementations are available. Custom upstreams must satisfy the plugin
-contract. The `ebpf` datapath does **not** support the optional WireGuard
+implementations are available. Only `type: openvpn` is currently deployable;
+custom upstream deployment is reserved for a future integration. The `ebpf` datapath does **not** support the optional WireGuard
 in-cluster layer; use `iproute` for that combination. Selected egress currently
 targets IPv4; IPv6 VPN routing is not supported.
 

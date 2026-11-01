@@ -89,7 +89,7 @@ func TestEBPFAdoptionRequiresKernelVerification(t *testing.T) {
 func TestModeHashBindsBackendWithoutBreakingIprouteAdoption(t *testing.T) {
 	c := datapath.ClientConfig{GatewayID: 9}
 	if HashForMode(c, "") != Hash(c) || HashForMode(c, "iproute") != Hash(c) {
-		t.Fatal("iproute M5 hash changed")
+		t.Fatal("iproute adoption hash changed")
 	}
 	if HashForMode(c, "ebpf") == Hash(c) {
 		t.Fatal("ebpf adopted iproute marker")

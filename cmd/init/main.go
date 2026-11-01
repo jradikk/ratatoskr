@@ -1,4 +1,4 @@
-// Command init programs the client netns before the workload starts (M1/M2).
+// Command init programs the client netns before the workload starts.
 package main
 
 import (
