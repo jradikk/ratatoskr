@@ -82,6 +82,35 @@ binary builds, privileged component tests and **252 offline Python tests**.
 No release artifact was published or signed; the wider compatibility matrix and
 release gate remain incomplete.
 
+## November 1, 2026 — completion audit and plaintext-denial probe
+
+Overall engineering implementation is estimated at **roughly 75%** (a subjective
+70–80% range), not release readiness or a measured compatibility pass rate.
+Core M0–M7 work is largely built; M8 still has substantial unexecuted CNI/mesh,
+packet-security and platform coverage, and M9 has no published/signed release.
+The README and M8 summaries now distinguish historical failures from verified
+scoped runtime results without upgrading full matrix coverage.
+
+A separately gated plaintext GENEVE negative-test collector was implemented.
+It checks both owned Pod/CRI identities, pins network namespace FDs in an existing
+bounded root diagnostic, and sends exactly three fixed synthetic frames through
+source `eth0` using a verified route/neighbor and AF_PACKET. It changes no
+production NetworkPolicy, workload capability or runtime setting. The sender's
+sentinel-FD, list-shaped neighbor state and omitted query-bound interface handling
+were corrected against measured output with regression tests.
+
+At `b022e3d`, the runtime collector recorded **sent=3, gateway eth0 ingress=0,
+GENEVE ingress delta=0, INPUT guard counter before=0/after=0**. The runner
+returned failure at `plaintext-denial`, with its UID-owned cleanup completed.
+This proves neither arrival nor the gateway nft drop and is **not a plaintext
+rejection acceptance pass**. Earlier network-path filtering is a possible cause;
+production policy was not relaxed to manufacture an nft-counter result.
+
+Full integrated Go race tests, vet, lint (0 issues), binary builds, privileged
+component tests and **261 offline Python tests** passed. The plaintext runtime
+acceptance gap remains open; the prior encrypted, HA and witnessed-recovery
+scoped evidence remains separate. No release artifacts were published.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
