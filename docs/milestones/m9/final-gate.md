@@ -505,6 +505,21 @@ were preserved. Actual compatibility acceptance still requires explicit approval
 for the serial cluster replacement/restoration plan and a successful runtime.
 Linux 5.10, plaintext ingress and trusted artifact requirements remain open.
 
+## Continued release goal — bounded immutable-context API preflight
+
+At `a78f4b5`, read-only synthetic preflight GETs use the shared streaming
+subprocess transport with a 256 KiB output cap and bounded deadline instead of
+allocating unrestricted capture_output. The immutable selected context is
+preserved, errors remain sanitized and the default runner stays inert.
+Updated regression tests check the exact Calico argv and transport limits.
+
+All 178 synthetic and 93 advanced tests, matrix/synthetic static checks and diff
+checks passed. Separate actual read-only GETs verified three Ready nodes and the
+flannel/no-mesh environment marker through the new transport; no cluster writes
+or topology changes occurred. This does not accept Calico runtime or any broader
+compatibility cell. Pending cluster replacement approval, Linux 5.10 resources,
+plaintext ingress and trusted artifact requirements remain open.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
