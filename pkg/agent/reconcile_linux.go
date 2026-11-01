@@ -17,6 +17,7 @@ import (
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/mtu"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/registration"
 
 	"github.com/vishvananda/netlink"
@@ -194,6 +195,17 @@ type Reconciler struct {
 	Log                     *slog.Logger
 	Ready                   *atomic.Bool
 	Own                     OwnPod
+	Programming             *observability.AgentProgramming
+}
+
+// observeProgram wraps only a completed namespace datapath/marker operation;
+// API authorization, CRI verification, registration and Pod status patches are
+// outside this timing boundary. A nil observer preserves test/embedded callers.
+func (r *Reconciler) observeProgram(operation string, apply func() error) error {
+	if r.Programming == nil {
+		return apply()
+	}
+	return r.Programming.Observe(operation, apply)
 }
 
 // pendingGateway is a normal, non-blocking projection/application lag. Only
@@ -203,7 +215,9 @@ func (r *Reconciler) pendingGateway(ctx context.Context, pod *corev1.Pod, target
 	if err := recheckSandbox(ctx, r.CRI, proof, target); err != nil {
 		return fmt.Errorf("recheck sandbox before gateway ack withdrawal: %w", err)
 	}
-	if err := ProgramClosed(ctx, target, cfg, factory); err != nil {
+	if err := r.observeProgram(observability.AgentClosed, func() error {
+		return ProgramClosed(ctx, target, cfg, factory)
+	}); err != nil {
 		return err
 	}
 	return r.setPodPending(ctx, pod)
@@ -382,7 +396,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 	}
-	if err = Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode); err != nil {
+	operation := observability.AgentUsable
+	if removing {
+		operation = observability.AgentCleanup
+	}
+	if err = r.observeProgram(operation, func() error {
+		return Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode)
+	}); err != nil {
 		if errors.Is(err, errUnsupportedIPv6) {
 			return errors.Join(fmt.Errorf("program selected datapath: %w", err), r.setPodError(ctx, pod))
 		}

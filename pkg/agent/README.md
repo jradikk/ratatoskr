@@ -9,6 +9,16 @@ needs host network namespace and privileges to enter another network namespace
 `/var/run/netns` must be mounted from the node, not exposed to workload pods.
 The health and readiness JSON endpoints listen on port 8081. The process
 refuses kernels older than 5.10.
+The separate process-lifetime programming metrics endpoint binds only to
+`127.0.0.1:9903` in the node's host network namespace; no Service or ingress
+port is published. `/metrics` reports completed client-netns operations as
+`ratatoskr_agent_programming_attempts_total`,
+`ratatoskr_agent_programming_errors_total`, and
+`ratatoskr_agent_programming_duration_seconds` with fixed `operation` values
+`usable`, `closed`, or `cleanup`. These are not Pod health or total reconcile
+attempts: CRI/API checks, WireGuard token/registration, and annotation patches
+are excluded. No identity or error text is exposed; counters reset on process
+restart.
 
 Suggested minimal Kubernetes permissions: `pods` get/list/patch (patch only for
 agent annotations, constrain with admission), `namespaces` get,

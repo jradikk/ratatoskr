@@ -17,6 +17,7 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/agent"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/datapath/ebpf"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/platform"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 
@@ -30,6 +31,22 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// Metrics remain local to this node's host network namespace. The agent has
+// one DaemonSet Pod per node; no Service, listener on the Pod IP, or RBAC is
+// added for scraping.
+const agentMetricsAddr = "127.0.0.1:9903"
+
+func agentMetricsServer(programming *observability.AgentProgramming) (*http.Server, net.Listener, error) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", observability.AgentHandler(programming))
+	server := &http.Server{Addr: agentMetricsAddr, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
+	listener, err := net.Listen("tcp4", server.Addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen private agent metrics: %w", err)
+	}
+	return server, listener, nil
+}
 
 func run(ctx context.Context) error {
 	if err := platform.CheckKernel(); err != nil {
@@ -71,10 +88,27 @@ func run(ctx context.Context) error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ready := &atomic.Bool{}
-	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), EBPFBackend: func() (datapath.Backend, error) { return ebpf.New() }, Log: logger, Own: own}
+	programming := observability.NewAgentProgramming()
+	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), EBPFBackend: func() (datapath.Backend, error) { return ebpf.New() }, Log: logger, Own: own, Programming: programming}
 	if err := reconciler.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("verify host-network agent bootstrap: %w", err)
 	}
+	metrics, metricsListener, err := agentMetricsServer(programming)
+	if err != nil {
+		return err // no metrics listener means no Ready agent process
+	}
+	go func() {
+		if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("private agent metrics server failed", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			logger.Error("agent metrics shutdown failed", "error", err)
+		}
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
