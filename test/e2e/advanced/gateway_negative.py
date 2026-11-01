@@ -192,8 +192,11 @@ def run(owner, source_api, operator, gateway_uid, selected_uid, gateway_pod,
                 "Gateway kernel peer baseline unavailable.")
         return read_peer_digest(operator, gateway_pod, ids["gateway"])
     original_digest = stage("peer-before", baseline)
-    stage("gateway-request", lambda: wg.need(send_request(ip, ca, bearer) in (401, 403),
-                                            "Gateway did not reject wrong audience."))
+    def request():
+        status = send_request(ip, ca, bearer)
+        wg.need(type(status) is int and status in (401, 403),
+                "Gateway did not reject wrong audience.")
+    stage("gateway-request", request)
     stage("identity-post", lambda: wg.need(identity() == (ip, ca),
                                            "Gateway negative identity changed."))
     def after():

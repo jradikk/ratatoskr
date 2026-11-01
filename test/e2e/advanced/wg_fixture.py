@@ -649,10 +649,12 @@ def execute(ids, *, owner_factory=lifecycle.Lifecycle, operator_factory=Operator
          "Immutable runtime image IDs required.")
     need(api_ip is not None, "Preflight Kubernetes Service IP required.")
     ipv4(api_ip)
-    # 85s source/Gateway + 150s post-CREATE config/peer + 35s deletion +
-    # 35s revocation + 35s reserved lifecycle cleanup = 340s minimum.
-    # Lifecycle accepts <=900s; never extend by an unbounded poll or fixed sleep.
-    with owner_factory(duration=390) as owner:
+    # The optional negative proof can cost bounded API/TLS/CRI/root namespace
+    # checks and must retain >=170s before revocation and verified cleanup.
+    # Leave the default fixture at 390s; only its separate explicit opt-in
+    # extends this Lifecycle within the existing <=900s hard ceiling.
+    duration = 600 if os.environ.get("RATATOSKR_E2E_WG_NEGATIVE") == "1" else 390
+    with owner_factory(duration=duration) as owner:
         stage = "namespace-create"
         operator = None
         source_api = None

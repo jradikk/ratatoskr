@@ -251,6 +251,22 @@ class WireGuardFixtureTest(unittest.TestCase):
         self.assertNotIn("hostNetwork", selected["spec"])
         self.assertEqual(app["command"], ["python3", "/usr/local/bin/check.py", "hold"])
 
+    def test_negative_optin_extends_only_owned_fixture_deadline(self):
+        durations = []
+        def owner_factory(**kwargs):
+            durations.append(kwargs["duration"])
+            return FakeOwner()
+        with patch.dict(w.os.environ, {}, clear=True), patch.object(w, "manifests", side_effect=RuntimeError("stop")):
+            with self.assertRaises(w.StageBlocked):
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=owner_factory,
+                          operator_factory=FakeOperator, source_factory=FakeSource)
+        with patch.dict(w.os.environ, {"RATATOSKR_E2E_WG_NEGATIVE": "1"}, clear=True), \
+                patch.object(w, "manifests", side_effect=RuntimeError("stop")):
+            with self.assertRaises(w.StageBlocked):
+                w.execute(IDS, api_ip="10.43.0.1", owner_factory=owner_factory,
+                          operator_factory=FakeOperator, source_factory=FakeSource)
+        self.assertEqual(durations, [390, 600])
+
     def test_phase_deadlines_are_bounded_and_reserve_cleanup(self):
         owner = FakeOwner()
         owner.clock = lambda: 100
