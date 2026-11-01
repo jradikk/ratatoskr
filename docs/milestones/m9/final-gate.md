@@ -133,6 +133,27 @@ not yet been runtime-accepted in a newly deployed gateway image.
 The mandatory 29-gate acceptance ledger remains OPEN/PARTIAL. No versioned
 release candidate or publication is authorized by these scoped results alone.
 
+## Programming metric reader and deployed-gateway integration follow-up
+
+At `e0fa2ea`, the encrypted runtime fixture completed with a rebuilt local gateway
+containing the programming metrics and the opted-in wrong-audience rejection
+check. The strict loopback metric reader accepted the emitted zero-label counters
+and fixed-bucket histogram while preserving its original WireGuard sample schema.
+Encrypted marker traffic, rejection with unchanged peer fingerprint, revocation,
+and owned cleanup completed; the runner returned 4 / INCOMPLETE, not full M8 PASS.
+
+Reader tests reject foreign labels, duplicate or unknown buckets, nonfinite values
+and inconsistent programming samples; legacy gateways without those metrics
+remain readable. Diagnostic root helpers disable Python bytecode creation before
+repository imports. Validation included 75 advanced and 156 synthetic Python
+tests, gateway/observability race tests and vet, lint (0 issues), matrix static
+checks and diff checks. The combined shell-validation task reported signal 143
+after emitting all check results, so its aggregate exit is not recorded as a
+clean full validation pass. Separate runtime and fixture test tasks completed.
+
+Full observability, plaintext ingress proof and remaining release gates are still
+open; this follow-up does not change their acceptance status.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
