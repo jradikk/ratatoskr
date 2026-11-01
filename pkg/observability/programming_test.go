@@ -35,7 +35,7 @@ func TestGatewayProgrammingCompletedAttemptsAndNoLabels(t *testing.T) {
 			snapshot := func() (bool, int) { return true, 1320 }
 			handler := GatewayHandler(snapshot, programming, NewGatewayLinkTraffic(encrypted, nil))
 			if encrypted {
-				handler = WireGuardHandler(snapshot, programming, NewGatewayLinkTraffic(true, nil), "rtkwg0", func(string) (*wgtypes.Device, error) { return &wgtypes.Device{}, nil })
+				handler = WireGuardHandler(snapshot, programming, NewGatewayLinkTraffic(true, nil), NewGatewayPlaintextGuard(nil), "rtkwg0", func(string) (*wgtypes.Device, error) { return &wgtypes.Device{}, nil })
 			}
 			initial := metricText(t, handler)
 			metricLine(t, initial, "ratatoskr_gateway_programming_attempts_total 0")

@@ -16,11 +16,11 @@ import (
 // aggregates. Unknown samples are distinguishable from known zero; no labels,
 // peer keys, IPs, bearer tokens, or profile fields are exported.
 // A semaphore limits simultaneous wgctrl reads to one per gateway process.
-func WireGuardHandler(readySnapshot func() (bool, int), programming *GatewayProgramming, traffic *GatewayLinkTraffic, deviceName string, read wireguard.DeviceReader) http.Handler {
+func WireGuardHandler(readySnapshot func() (bool, int), programming *GatewayProgramming, traffic *GatewayLinkTraffic, plaintext *GatewayPlaintextGuard, deviceName string, read wireguard.DeviceReader) http.Handler {
 	registry := prometheus.NewRegistry()
 	registerGatewayMetrics(registry, readySnapshot)
 	programming.register(registry)
-	registry.MustRegister(traffic)
+	registry.MustRegister(traffic, plaintext)
 	sem := make(chan struct{}, 1)
 	// Gather runs each GaugeFunc separately; take at most one fresh kernel read
 	// per scrape via a single custom collector below.

@@ -339,7 +339,7 @@ func run(ctx context.Context, configPath string) error {
 	traffic := observability.NewGatewayLinkTraffic(cfg.Encryption == "wireguard", netlink.LinkByName)
 	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic)
 	if cfg.Encryption == "wireguard" {
-		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, datapath.WireGuardDevice, wireguard.KernelDevice)
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice)
 	}
 	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
 	metricsListener, err := net.Listen("tcp4", metrics.Addr)
