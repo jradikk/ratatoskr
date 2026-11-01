@@ -547,6 +547,27 @@ cross-node ingress/drop proof, Linux 5.10, compatibility approvals and trusted
 artifact requirements remain incomplete. No production policy was weakened or
 release artifact published.
 
+## User-approved delivery scope — serial Calico acceptance and flannel restoration
+
+The user explicitly approved replacing the sole flannel cluster with Calico,
+running it serially, restoring flannel, and preparing a limited local unsigned
+experimental RC before full production preparation. Both Calico healthy traffic
+and witnessed outage/recovery completed with exit 4 / INCOMPLETE and verified
+owned cleanup. Flannel was restored with saved non-secret release settings and
+its encrypted lifecycle completed afterward. No two Ratatoskr clusters coexisted.
+
+The initial Calico setup failed because the pinned custom-CNI runtime reported
+standard /etc/cni/net.d and /opt/cni/bin while the installation used obsolete
+k3s-specific paths. Installation paths were corrected, without patching
+containerd; a status-resource creation wait was added. The cluster-creation
+preflight verified sufficient memory and CPUs before creating either cluster.
+These scoped results do not accept all CNI/mesh or Linux 5.10 configurations.
+
+The new experimental RC builder is separately authorized and cannot publish,
+sign or push tags. The production release guard remains blocked. An unsigned
+binary/chart bundle does not include deployable image artifacts or trusted
+provenance; those limitations remain explicit until a later image-artifact pass.
+
 ## Checks completed at the final project gate
 
 - Local CI-equivalent checks passed on the final code before the traffic attempt:
