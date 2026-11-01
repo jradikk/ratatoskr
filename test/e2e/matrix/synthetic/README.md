@@ -712,6 +712,23 @@ agent/iproute development release with exact immutable runtime image IDs. This
 runner does not install a CNI, create/delete a cluster, roll a release, change
 Helm values, or make an unsupported mesh/init/WireGuard/outage claim.
 
+The witnessed-outage sibling `calico_outage.py` is a separate explicitly
+opted-in path against the **same** already-approved Calico/no-mesh release.
+It reuses exactly the healthy runner's preflight (Ready node identities,
+testenv CNI/mesh, aligned agent/iproute, immutable node CRI IDs and controller
+fixture references) before the UID-owned outage lifecycle, including the
+read-only, selected-Pod-UID-pinned closed-route and packet-header capture.
+It is **not** dispatched by the healthy CLI, `run.py`, CI or the matrix. Its
+default path performs no cluster activity. The operator alone may run it with
+`RATATOSKR_E2E_FINAL_GATE=1`, `RATATOSKR_E2E_CALICO_OUTAGE=1`, all nine exact
+`EXPECTED_*_IMAGE_ID` values and
+`python3 test/e2e/matrix/synthetic/calico_outage.py --execute-calico-outage`.
+A successful witnessed healthy/outage/recovery subset and verified UID-owned
+cleanup still return **4 / INCOMPLETE**; no provider, alternative CNI/mesh,
+full-cell or release PASS is inferred. Failure, missing preflight or uncertain
+cleanup blocks. Neither runner creates/deletes a cluster, installs a CNI or
+rolls a release; replacing an existing cluster requires separate user approval.
+
 Only on that already-approved context, invoke explicitly:
 
 ```sh

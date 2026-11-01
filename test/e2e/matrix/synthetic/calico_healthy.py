@@ -22,12 +22,8 @@ class Blocked(Exception):
     """Only fixed, non-secret checkpoints may escape the final-gate runner."""
 
 
-def execute(environ, *, api_factory=run.ReadOnlyAPI, verifier=node_images.verify,
-            smoke=partial_gateway.execute):
-    """Authorize exactly one existing Calico context before any owned writes."""
-    if (environ.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
-            environ.get("RATATOSKR_E2E_CALICO_HEALTHY") != "1"):
-        raise Blocked("authorization")
+def preflight(environ, *, api_factory=run.ReadOnlyAPI, verifier=node_images.verify):
+    """Shared read-only existing-Calico agent preflight; no fixture mutation."""
     try:
         ids = run.expected_ids(environ)
         api = api_factory(environment=environment.CALICO)
@@ -56,6 +52,16 @@ def execute(environ, *, api_factory=run.ReadOnlyAPI, verifier=node_images.verify
     except (Blocked, run.Blocked, node_images.Blocked, KeyError, IndexError, StopIteration,
             TypeError, ValueError, AttributeError):
         raise Blocked("preflight") from None
+    return ids, ip
+
+
+def execute(environ, *, api_factory=run.ReadOnlyAPI, verifier=node_images.verify,
+            smoke=partial_gateway.execute):
+    """Authorize exactly one existing Calico context before any owned writes."""
+    if (environ.get("RATATOSKR_E2E_FINAL_GATE") != "1" or
+            environ.get("RATATOSKR_E2E_CALICO_HEALTHY") != "1"):
+        raise Blocked("authorization")
+    ids, ip = preflight(environ, api_factory=api_factory, verifier=verifier)
     try:
         result = smoke(ids, api_ip=ip, environment=environment.CALICO)
         if result is not False:
