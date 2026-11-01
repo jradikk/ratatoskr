@@ -25,6 +25,35 @@ a build/release is trustworthy. Do not supply credentials or live provider
 input to this tool. No images, chart packages, version tags, SBOMs, signatures,
 PRs or publication are produced by it.
 
+## Local unsigned experimental RC builder (separate from production guard)
+
+`hack/build-experimental-rc.py` is the user-approved **limited LOCAL UNSIGNED
+experimental RC** route, deliberately separate from the always-blocked
+`hack/prepare-release.py` production guard. It does not change acceptance
+ledger statuses or assert completion of the 29 production gates. Parent/operator
+must first review current flannel/no-mesh agent/iproute selected traffic,
+WireGuard, HA and outage/recovery evidence and finish the serial Calico check
+before choosing to run it; this utility does not evaluate that runtime evidence.
+
+Default invocation returns `BLOCKED` with no build. Explicit execution needs
+`--execute --version X.Y.Z-rc.N --source-sha <full current clean HEAD>
+--output /absolute/outside/checkout/new-directory`. Stable `X.Y.Z`, `dev`,
+relative output, dirty tracked/untracked files, ignored files other than bin/,
+or stale SHA are refused. The output must not exist; it is created exclusively
+as a private mode-0700 directory. Only local cached offline CGO-disabled
+linux/amd64 and linux/arm64 binaries for controller/webhook/agent/gateway/init
+and `helm package` of the current chart with matching version/appVersion are
+produced. SHA256SUMS and a scoped manifest bind their bytes, version and source
+SHA; failure removes partial staged output. Existing chart metadata stays `dev`.
+
+This tool does **not** build/include OCI images or the OpenVPN plugin image and
+does not verify SBOM/provenance, signatures or full CNI/mesh/kernel/live VPN
+acceptance. Release notes explicitly mark `LOCAL UNSIGNED EXPERIMENTAL RC ONLY`
+and `NOT PRODUCTION-READY`. No tag, push, registry request, signing, chart
+publication, PR or cluster mutation is performed. Stage only after parent
+confirms critical evidence and the VM/cluster is idle enough for offline Go
+cross-compilation; run in a clean checkout with dependencies already cached.
+
 ## Offline reviewed-artifact manifest policy (not wired into guard)
 
 `artifact_manifest.py` is a pure validator, **not** proof of signature, trusted
