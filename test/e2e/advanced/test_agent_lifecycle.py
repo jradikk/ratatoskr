@@ -182,6 +182,125 @@ class GatewayReplacementTest(unittest.TestCase):
                               seconds=3, clock=clock, sleep=sleep)
         self.assertEqual(now[0], 3.0)
 
+    def test_real_singleton_adapter_baseline_with_owner_and_applied_bytes(self):
+        """Exercise production adapter GET/list + evidence, not mocked gateway_ready."""
+        import test_evidence
+        ns = "rtk-syn-" + "a" * 16
+        uid = "a" * 32
+        dep_uid, rs_uid, pod_uid = "b" * 32, "c" * 32, "d" * 32
+        gw, dep, rs, pod, children = copy.deepcopy(test_evidence.fixture())
+        gw["metadata"].update(namespace=ns, uid=uid)
+        gw["spec"] = {"replicas": 1}
+        gw["status"]["endpoints"][0].update(podName="synthetic-abc123-xyz",
+            podUID=pod_uid)
+        dep["metadata"].update(namespace=ns, uid=dep_uid)
+        dep["metadata"]["ownerReferences"][0]["uid"] = uid
+        rs["metadata"].update(namespace=ns, name="synthetic-abc123", uid=rs_uid)
+        rs["metadata"]["ownerReferences"][0]["uid"] = dep_uid
+        pod["kind"] = "Pod"
+        pod["metadata"].update(namespace=ns, name="synthetic-abc123-xyz", uid=pod_uid,
+            labels={"ratatoskr.skaldhall.io/gateway-uid": uid,
+                    "ratatoskr.skaldhall.io/gateway-name": "synthetic"})
+        pod["metadata"]["ownerReferences"][0].update(name="synthetic-abc123", uid=rs_uid)
+        for child in children:
+            child["metadata"].update(namespace=ns)
+            child["metadata"]["ownerReferences"][0]["uid"] = uid
+        cm = children[1]
+        raw = json.dumps({"gatewayID": 7, "clients": ["10.42.1.8"], "encryption": "none"})
+        cm["data"] = {"gateway.json": raw}
+        gw["status"]["endpoints"][0]["appliedClientConfigHash"] = hashlib.sha256(raw.encode()).hexdigest()
+        objects = {("egressgateway", "synthetic"): gw,
+                   ("deployment", "synthetic"): dep,
+                   ("replicaset", "synthetic-abc123"): rs,
+                   ("pod", "synthetic-abc123-xyz"): pod,
+                   **{(kind.lower(), "synthetic"): child for kind, child in zip(
+                       ("Service", "ConfigMap", "NetworkPolicy"), children)}}
+        gateway_pods = {"kind": "List", "items": [pod]}
+        api = f.LifecycleAPI.__new__(f.LifecycleAPI)
+        api.owner = type("Owned", (), {"names": (ns, ns + "-apps")})()
+        api._namespace = lambda name: name if name == ns else self.fail("foreign namespace")
+        def get(argv, *, max_output=262144, payload=None):
+            self.assertIsNone(payload)
+            self.assertEqual(argv[0], "get")
+            if argv[1] == "pods":
+                return json.dumps(gateway_pods).encode()
+            self.assertIn((argv[1], argv[2]), objects)
+            return json.dumps(objects[(argv[1], argv[2])]).encode()
+        api._call = Mock(side_effect=get)
+        ids = {"gateway": test_evidence.ID, "plugin": test_evidence.ID}
+        self.assertEqual(f.gateway_state(api, api.owner, ids, uid)["podUID"], pod_uid)
+        gw["status"]["endpoints"][0]["appliedClientConfigHash"] = "0" * 64
+        with self.assertRaises(f.StageError) as caught:
+            f.gateway_state(api, api.owner, ids, uid)
+        self.assertEqual(caught.exception.reason, "gateway-applied-hash")
+        gw["status"]["endpoints"][0]["appliedClientConfigHash"] = hashlib.sha256(raw.encode()).hexdigest()
+        cm["data"]["gateway.json"] = raw + " "
+        with self.assertRaises(f.StageError) as caught:
+            f.gateway_state(api, api.owner, ids, uid)
+        self.assertEqual(caught.exception.reason, "gateway-applied-hash")
+
+    def test_checkpoint_diagnostics_only_print_fixed_stage_and_reason(self):
+        env = {"RATATOSKR_E2E_FINAL_GATE": "1",
+               "RATATOSKR_E2E_AGENT_GATEWAY_REPLACEMENT": "1"}
+        ids = {component: "sha256:" + "a" * 64 for component in f.run.COMPONENTS}
+        for exception, expected in (
+                (f.StageError("gateway-baseline", "gateway-applied-hash"),
+                 "gateway-baseline/gateway-applied-hash"),
+                (f.StageError("replacement-ready", "selected-readiness"),
+                 "replacement-ready/selected-readiness"),
+                (f.SelectedUIDChanged(), "selected-uid/blocked"),
+                (f.adapter.AdapterError("PRIVATE-ADAPTER-RESPONSE"), None)):
+            with (self.subTest(exception=type(exception).__name__),
+                  patch.object(f.run, "expected_ids", return_value=ids),
+                  patch.object(f.run, "preflight", return_value=None),
+                  patch.object(f.node_images, "verify", return_value=True),
+                  patch.object(f.partial_gateway, "api_service_ip", return_value="10.96.0.1")):
+                with redirect_stdout(io.StringIO()) as output:
+                    code = f.main(["--execute", "--execute-agent-gateway-replacement"], env,
+                                  readonly_factory=lambda: object(),
+                                  executor=Mock(side_effect=exception))
+                self.assertEqual(code, 1)
+                self.assertNotIn("PRIVATE-ADAPTER-RESPONSE", output.getvalue())
+                if expected is not None:
+                    self.assertIn(expected, output.getvalue())
+                else:
+                    self.assertIn("gateway replacement blocked", output.getvalue())
+        with self.assertRaises(ValueError):
+            f.StageError("private-from-API")
+        with self.assertRaises(ValueError):
+            f.StageError("selected-ready", "private-from-API")
+
+    def test_checkpoint_wraps_private_errors_and_never_retries_delete(self):
+        for stage in ("selected-create", "baseline-probe", "gateway-delete",
+                      "replacement-probe"):
+            with self.subTest(stage=stage):
+                calls = Mock(side_effect=f.adapter.AdapterError("PRIVATE-RESPONSE"))
+                with self.assertRaises(f.StageError) as caught:
+                    f.checkpoint(stage, calls)
+                calls.assert_called_once_with()
+                self.assertEqual(caught.exception.stage, stage)
+                self.assertEqual(caught.exception.reason, "blocked")
+                self.assertNotIn("PRIVATE-RESPONSE", str(caught.exception))
+
+    def test_poll_reasons_are_bounded_and_uid_change_is_terminal(self):
+        for error, reason in ((f.StageError("gateway-baseline", "gateway-applied-hash"),
+                               "gateway-applied-hash"),
+                              (f.adapter.AdapterError("PRIVATE-RESPONSE"), "adapter-read")):
+            now = [0.0]
+            def clock(): return now[0]
+            def sleep(seconds): now[0] += seconds
+            def fail(): raise error
+            with self.assertRaises(f.StageError) as caught:
+                f.await_stage(Owner(), "selected-ready", fail, seconds=3,
+                              clock=clock, sleep=sleep)
+            self.assertEqual((caught.exception.stage, caught.exception.reason),
+                             ("selected-ready", reason))
+            self.assertNotIn("PRIVATE-RESPONSE", str(caught.exception))
+        called = Mock(side_effect=f.SelectedUIDChanged())
+        with self.assertRaises(f.SelectedUIDChanged):
+            f.await_stage(Owner(), "replacement-ready", called, seconds=3)
+        called.assert_called_once_with()
+
     def test_final_gate_is_noop_without_both_explicit_flags(self):
         readonly, executor = Mock(), Mock()
         with redirect_stdout(io.StringIO()) as output:

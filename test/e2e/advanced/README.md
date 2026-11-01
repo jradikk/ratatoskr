@@ -40,6 +40,14 @@ probe. Missing/stale acknowledgements and replaced selected Pods cannot qualify.
 It always returns partial/incomplete, not full matrix PASS, and makes no
 assertion about established-flow continuity, WireGuard or agent restart.
 
+The gate reports only fixed non-secret checkpoint labels on failure, such as
+`gateway-baseline/gateway-owner`, `gateway-baseline/gateway-applied-hash`,
+`selected-ready/selected-readiness`, `gateway-delete/blocked`, or
+`replacement-ready/gateway-applied-hash`. These identify the last bounded
+observation, **not** the underlying Kubernetes response or a successful
+runtime verification. Errors and private API responses remain suppressed;
+cleanup failure still prevents a partial result.
+
 ## M4/M5 integration contract (not an executable live runner)
 
 A future **parent-authorized final-gate collector** must construct a dictionary

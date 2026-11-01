@@ -30,8 +30,27 @@ class Blocked(lifecycle.LifecycleError):
     """Only constant, non-secret checkpoint labels cross the cleanup boundary."""
 
 
-class SelectedUIDChanged(Blocked):
+class StageError(Blocked):
+    """Only code-authored stage and reason labels may reach stdout."""
+
+    STAGES = frozenset({"fixture-create", "gateway-baseline", "selected-create",
+                        "selected-ready", "baseline-probe", "gateway-delete",
+                        "replacement-ready", "replacement-probe", "selected-uid"})
+    REASONS = frozenset({"blocked", "gateway-owner", "gateway-applied-hash",
+                         "gateway-client-membership", "selected-readiness", "adapter-read"})
+
+    def __init__(self, stage, reason="blocked"):
+        if stage not in self.STAGES or reason not in self.REASONS:
+            raise ValueError("Unknown gateway replacement checkpoint")
+        self.stage, self.reason = stage, reason
+        super().__init__("Gateway replacement blocked at " + stage + "/" + reason + ".")
+
+
+class SelectedUIDChanged(StageError):
     """Terminal identity failure: never poll/adopt a replacement client."""
+
+    def __init__(self):
+        super().__init__("selected-uid")
 
 
 class LifecycleAPI(ha.HAFixtureAPI):
@@ -46,10 +65,13 @@ class LifecycleAPI(ha.HAFixtureAPI):
 def gateway_state(api, owner, ids, expected_uid):
     """Complete one-replica ownership, runtime and exact applied-byte checks."""
     ns = owner.names[0]
-    gateway, pod = partial_gateway.gateway_ready(api, expected_uid, ns, ids)
+    try:
+        gateway, pod = partial_gateway.gateway_ready(api, expected_uid, ns, ids)
+    except partial_gateway.Blocked:
+        raise StageError("gateway-baseline", "gateway-owner") from None
     status = gateway["status"]
     if gateway.get("spec", {}).get("replicas") != 1 or len(status.get("endpoints", [])) != 1:
-        raise Blocked("Gateway singleton contract invalid.")
+        raise StageError("gateway-baseline", "gateway-owner")
     ep = status["endpoints"][0]
     digest = ep.get("appliedClientConfigHash")
     cm = api.get("configmap", "synthetic", ns)
@@ -61,14 +83,14 @@ def gateway_state(api, owner, ids, expected_uid):
             hashlib.sha256(raw.encode()).hexdigest() != digest or
             ep.get("podUID") != pod["metadata"].get("uid") or
             ep.get("podName") != pod["metadata"].get("name")):
-        raise Blocked("Gateway endpoint applied acknowledgement invalid.")
+        raise StageError("gateway-baseline", "gateway-applied-hash")
     config = json.loads(raw)
     if (not isinstance(config, dict) or type(status.get("gatewayID")) is not int or
             config.get("gatewayID") != status.get("gatewayID") or
             config.get("encryption") != "none" or
             not isinstance(config.get("clients"), list) or
             not all(isinstance(ip, str) for ip in config["clients"])):
-        raise Blocked("Gateway applied client membership invalid.")
+        raise StageError("gateway-baseline", "gateway-client-membership")
     return {"gatewayUID": expected_uid, "gatewayID": status["gatewayID"],
             "podUID": pod["metadata"]["uid"], "podName": pod["metadata"]["name"],
             "endpoint": ep["podIP"], "hash": digest, "clients": config["clients"]}
@@ -78,7 +100,7 @@ def selected_state(api, owner, ids, gateway, uid):
     apps = owner.names[1]
     pod = api.get("pod", "synthetic-client", apps)
     if pod.get("metadata", {}).get("uid") != uid:
-        raise SelectedUIDChanged("Selected Pod UID changed; refusing replacement adoption.")
+        raise SelectedUIDChanged()
     evidence.assert_restricted_client(pod, apps, gateway["gatewayID"], gateway["endpoint"],
                                       ids["selected"])
     chosen = ha.ha_live.selected(pod, "synthetic", {gateway["endpoint"]})
@@ -90,31 +112,55 @@ def selected_state(api, owner, ids, gateway, uid):
                     for s in pod["status"].get("initContainerStatuses", [])) or
             api.pod_image_id(apps, "synthetic-client", "client", uid) != ids["selected"] or
             pod.get("spec", {}).get("containers", [{}])[0].get("imagePullPolicy") != "Never"):
-        raise Blocked("Selected Pod not ready for acknowledged gateway endpoint.")
+        raise StageError("selected-ready", "selected-readiness")
     return pod
 
 
 def await_stage(owner, stage, predicate, *, seconds, clock=time.monotonic, sleep=time.sleep):
-    """Bounded reconciliation; a changed selected UID is terminal, not retryable."""
+    """Bounded reconciliation; emit only fixed last-failure labels at expiry."""
+    if stage not in ("gateway-baseline", "selected-ready", "replacement-ready"):
+        raise ValueError("Unknown poll checkpoint")
     limit = min(owner.deadline, clock() + seconds)
+    reason = "blocked"
     while clock() < limit:
         if owner.closed or owner.clock() >= owner.deadline:
-            raise Blocked("Owned lifecycle deadline expired.")
+            raise StageError(stage)
         try:
             result = predicate()
             if result is not None:
                 return result
+            reason = "blocked"
         except SelectedUIDChanged:
             raise
+        except StageError as exc:
+            reason = exc.reason
         except Blocked:
-            pass
-        except (adapter.AdapterError, evidence.EvidenceError, ha.ha_live.Blocked,
+            reason = "blocked"
+        except adapter.AdapterError:
+            reason = "adapter-read"
+        except (evidence.EvidenceError, ha.ha_live.Blocked,
                 KeyError, ValueError, TypeError, AttributeError):
-            pass
+            reason = "blocked"
         remaining = limit - clock()
         if remaining > 0:
             sleep(min(2, remaining))
-    raise Blocked("Gateway replacement did not converge at " + stage + ".")
+    raise StageError(stage, reason)
+
+
+def checkpoint(stage, operation):
+    """Sanitize a non-poll failure without exposing adapter/API exception data."""
+    if stage not in StageError.STAGES:
+        raise ValueError("Unknown gateway replacement checkpoint")
+    try:
+        return operation()
+    except (KeyboardInterrupt, SystemExit, lifecycle.Interrupted):
+        raise
+    except SelectedUIDChanged:
+        raise
+    except StageError as exc:
+        raise StageError(stage, exc.reason) from None
+    except BaseException:
+        raise StageError(stage) from None
 
 
 def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=time.sleep):
@@ -128,11 +174,12 @@ def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=tim
                                               api.get("service", "synthetic-vpn", ns), ids["server"])
         return current if server["metadata"]["uid"] == source_uid else None
     before = await_stage(owner, "gateway-baseline", baseline, seconds=170, clock=clock, sleep=sleep)
-    identity = api.create(prepare.running_probe_pod(apps, ns, api_ip))
+    identity = checkpoint("selected-create", lambda: api.create(
+        prepare.running_probe_pod(apps, ns, api_ip)))
     if ((identity.get("kind"), identity.get("namespace"), identity.get("name")) !=
             ("Pod", apps, "synthetic-client") or
             not isinstance(identity.get("uid"), str) or not lifecycle.UID.fullmatch(identity["uid"])):
-        raise Blocked("Selected CREATE identity unavailable.")
+        raise StageError("selected-create")
     uid = identity["uid"]
     def initial():
         current = gateway_state(api, owner, ids, gw_uid)
@@ -141,19 +188,22 @@ def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=tim
         selected_state(api, owner, ids, current, uid)
         return current
     before = await_stage(owner, "selected-ready", initial, seconds=160, clock=clock, sleep=sleep)
-    if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
-        raise Blocked("Baseline fixed probe failed.")
-    selected_state(api, owner, ids, before, uid)
-    if gateway_state(api, owner, ids, gw_uid) != before:
-        raise Blocked("Gateway changed before controlled deletion.")
+    def baseline_probe():
+        if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
+            raise StageError("baseline-probe")
+        selected_state(api, owner, ids, before, uid)
+        if gateway_state(api, owner, ids, gw_uid) != before:
+            raise StageError("baseline-probe")
+    checkpoint("baseline-probe", baseline_probe)
     # delete_chosen_gateway_pod GETs the generated Pod's current status and
     # rechecks Deployment→ReplicaSet→Pod ownership before sending exactly one
     # UID-preconditioned, five-second-grace DELETE.
-    api.delete_chosen_gateway_pod(ns, before["podName"], before["podUID"])
+    checkpoint("gateway-delete", lambda: api.delete_chosen_gateway_pod(
+        ns, before["podName"], before["podUID"]))
     def replacement():
         # Check exact old selected UID BEFORE any retryable gateway transition.
         if api.get("pod", "synthetic-client", apps)["metadata"].get("uid") != uid:
-            raise SelectedUIDChanged("Selected Pod UID changed; refusing replacement adoption.")
+            raise SelectedUIDChanged()
         current = gateway_state(api, owner, ids, gw_uid)
         if (current["gatewayID"] != before["gatewayID"] or
                 current["podUID"] == before["podUID"] or
@@ -162,16 +212,18 @@ def replace(api, owner, ids, created, api_ip, *, clock=time.monotonic, sleep=tim
         selected_state(api, owner, ids, current, uid)
         return current
     after = await_stage(owner, "replacement-ready", replacement, seconds=135, clock=clock, sleep=sleep)
-    sleep(2)
-    if replacement() != after:
-        raise Blocked("Replacement endpoint or selected client unstable.")
-    if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
-        raise Blocked("Replacement fixed probe failed.")
-    if replacement() != after:
-        raise Blocked("Replacement identity changed during fixed probe.")
-    if partial_gateway.source_ready(api.get("pod", "synthetic-vpn", ns),
-                                    api.get("service", "synthetic-vpn", ns), ids["server"])["metadata"]["uid"] != source_uid:
-        raise Blocked("Source server changed during replacement probe.")
+    def replacement_probe():
+        sleep(2)
+        if replacement() != after:
+            raise StageError("replacement-probe")
+        if api.probe_running("synthetic-client", uid, ids["selected"], "healthy", api_ip) is not True:
+            raise StageError("replacement-probe")
+        if replacement() != after:
+            raise StageError("replacement-probe")
+        if partial_gateway.source_ready(api.get("pod", "synthetic-vpn", ns),
+                                        api.get("service", "synthetic-vpn", ns), ids["server"])["metadata"]["uid"] != source_uid:
+            raise StageError("replacement-probe")
+    checkpoint("replacement-probe", replacement_probe)
     return {"sameSelectedPodUID": True, "newGatewayPodUIDAndIP": True,
             "newConnectionMarker": True, "establishedFlowContinuity": "not-asserted",
             "agentRestart": "not-tested"}
@@ -203,10 +255,10 @@ def execute(ids, api_ip, *, lifecycle_factory=lifecycle.Lifecycle, adapter_facto
             if len(created) != len(partial_gateway.BASE):
                 raise Blocked("Fixture owner manifest incomplete.")
             return replace(api, owner, ids, created, api_ip, clock=clock, sleep=sleep)
-        except (Blocked, KeyboardInterrupt, SystemExit):
+        except (StageError, KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
-            raise Blocked("Gateway replacement blocked at " + stage + ".") from None
+            raise StageError(stage) from None
 
 
 def main(argv=None, environ=None, *, readonly_factory=run.ReadOnlyAPI, executor=execute):
@@ -235,6 +287,10 @@ def main(argv=None, environ=None, *, readonly_factory=run.ReadOnlyAPI, executor=
         return 4
     except (KeyboardInterrupt, SystemExit):
         print("FAILED: gateway replacement interrupted; inspect UID-owned namespace cleanup.")
+        return 1
+    except StageError as failure:
+        # StageError has a fixed allowlist, never interpolates API/adapter text.
+        print("FAILED: " + str(failure) + " Inspect UID-owned cleanup privately.")
         return 1
     except BaseException:
         print("FAILED: gateway replacement blocked; inspect UID-owned cleanup privately.")
