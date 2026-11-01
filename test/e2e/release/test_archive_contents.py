@@ -71,6 +71,12 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaises(oci.Rejected):
                 oci.verify(f)
 
+    def test_nonstandard_and_ambiguous_json_claims_rejected(self):
+        for raw in (b'{"config":{"Env":NaN}}', b'{"size":Infinity}',
+                    b'{"size":-Infinity}', b'{"os":"wrong","os":"linux"}'):
+            with self.subTest(raw=raw), self.assertRaises(oci.Rejected):
+                oci._json(raw)
+
     def test_two_platforms_and_no_attestation_claim(self):
         result = self.check(blobs_and_entries(), valid=True)
         self.assertEqual(result["platforms"], ("linux/amd64", "linux/arm64"))

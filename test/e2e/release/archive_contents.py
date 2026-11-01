@@ -42,9 +42,11 @@ def _json(raw):
                 raise Rejected("duplicate OCI JSON key")
             result[key] = value
         return result
+    def constant(_value):
+        raise Rejected("nonstandard OCI JSON constant")
     try:
-        doc = json.loads(raw, object_pairs_hook=unique)
-    except (UnicodeError, ValueError):
+        doc = json.loads(raw, object_pairs_hook=unique, parse_constant=constant)
+    except (UnicodeError, ValueError, RecursionError):
         raise Rejected("OCI JSON malformed") from None
     if type(doc) is not dict:
         raise Rejected("OCI JSON document must be an object")
