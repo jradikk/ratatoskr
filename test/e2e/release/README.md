@@ -25,6 +25,38 @@ a build/release is trustworthy. Do not supply credentials or live provider
 input to this tool. No images, chart packages, version tags, SBOMs, signatures,
 PRs or publication are produced by it.
 
+## Local 0.1.0 production-artifact candidate builder (not release-ready)
+
+`hack/build-production-artifacts.py` is an **opt-in local-only artifact builder**
+for the explicitly reviewed `0.1.0` candidate. It is distinct from the blocked
+`hack/prepare-release.py` production acceptance guard. It neither asserts the
+29 acceptance gates nor signs, publishes, tags Git, makes a PR, or deploys a
+cluster. Parent must run the critical traffic/security gate and independently
+review the output before any separate release decision.
+
+Only after a clean full source SHA and exact `--execute --version 0.1.0
+--source-sha <clean HEAD> --registry ghcr.io/jradikk --output <new absolute
+outside-checkout path>` does it query the current Buildx platform list. It
+**blocks before creating output** unless both linux/amd64 and linux/arm64 are
+advertised. This host may lack an amd64 runner: do not install QEMU/binfmt,
+alter Docker, or change VM settings without separate parent/user approval.
+Buildx may pull public base images/dependencies, and the OpenVPN Debian runtime
+stage executes apt for each architecture; platform advertisement does not prove
+those RUN steps will succeed. Six sequential `docker buildx build` calls export
+five component and one OpenVPN plugin OCI archives locally (`type=oci,dest`),
+request SBOM and max-mode provenance, and do **not** push. The version and full
+source SHA are passed as build args and recorded as image OCI labels. A Helm
+chart package is produced with version/appVersion override. The chart defaults
+remain unchanged (`ghcr.io/skaldhall`), so a separate non-secret
+`release-values.yaml` sets the reviewed registry/tag for installation. All
+artifact files receive SHA256SUMS/manifest metadata and a private output
+directory is removed on build failure. The manifest says
+`releaseReady:false`, `published:false`; SBOM/provenance are **requested**, not
+independently extracted, verified or signed. No real archive-format verifier
+is invoked; the strict existing ustar verifier may reject distroless layers
+and must not be used to imply these OCI archives are attestable. Do not treat
+local archive hashes as registry image digests or a production release.
+
 ## Local unsigned experimental RC builder (separate from production guard)
 
 `hack/build-experimental-rc.py` is the user-approved **limited LOCAL UNSIGNED
