@@ -23,8 +23,12 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 FROM gcr.io/distroless/static-debian13:nonroot
 ARG COMPONENT
+ARG VERSION=dev
+ARG COMMIT=unknown
 LABEL org.opencontainers.image.source="https://github.com/skaldhall/ratatoskr" \
       org.opencontainers.image.title="ratatoskr-${COMPONENT}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/ratatoskr /ratatoskr
 ENTRYPOINT ["/ratatoskr"]

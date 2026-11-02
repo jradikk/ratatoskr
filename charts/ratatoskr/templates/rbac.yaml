@@ -1,0 +1,149 @@
+# Gateway resources live in user namespaces; the controller watches cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ratatoskr-controller
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egressgateways, egresspolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egressgateways/status, egresspolicies/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [namespaces, pods, nodes]
+    verbs: [get, list, watch]
+  # RBAC cannot restrict patch to pods bearing a particular label. Controller
+  # code must check the Ratatoskr gateway label before touching readiness.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # M4 verifies Pod -> ReplicaSet -> owned Deployment before trusting a
+  # public registration CA/WireGuard key from that Pod's annotations.
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [servicecidrs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # Dynamic upstream Secret names cannot be restricted with resourceNames here.
+  # The controller uses uncached, direct GET only to check required keys; it
+  # never lists/watches Secrets or logs their bytes. Upstream bytes are mounted
+  # only into the upstream container, not into the controller Pod.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ratatoskr-controller
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ratatoskr-controller
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ratatoskr-webhook
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egressgateways, egresspolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
+  # Init and serving processes share this ServiceAccount. Only the two fixed
+  # admission configurations may receive CA patches.
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [mutatingwebhookconfigurations]
+    resourceNames: [ratatoskr-pods]
+    verbs: [get, update, patch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingwebhookconfigurations]
+    resourceNames: [ratatoskr-validation]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ratatoskr-webhook
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ratatoskr-webhook
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-webhook
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ratatoskr-webhook-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  # RBAC cannot enforce resourceNames on create; bootstrap always creates this
+  # exact name and reads/updates only that name thereafter.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [ratatoskr-webhook-tls]
+    verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ratatoskr-webhook-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ratatoskr-webhook-tls
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-webhook
+    namespace: {{ .Release.Namespace }}

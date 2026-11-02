@@ -1,7 +1,7 @@
 # Spec issues and resolutions
 
-Problems found in the build specification, with the resolution adopted. Each is
-reflected in `design.md` and the ADRs.
+Problems found in the build specification, with documented approaches and user
+clarifications. Do not treat unimplemented checks or skipped tests as passing.
 
 | # | Issue | Resolution |
 |---|---|---|
@@ -14,4 +14,27 @@ reflected in `design.md` and the ADRs.
 | S7 | DNS `gateway` mode must rebuild search domains, but the cluster domain is not always `cluster.local`. | Chart value `clusterDomain`. |
 | S8 | Replies to inbound connections from non-excluded sources (e.g. a LoadBalancer with `externalTrafficPolicy: Local` that preserves client IPs) would be steered into the tunnel, breaking ingress to labeled pods. | A connmark on connections entering via `eth0` routes their replies through `main`. |
 | S9 | `allowCloudMetadata` is listed under "exclusions (never steered)", which makes `false` vs `true` ambiguous. | `false` (default): `169.254.169.254` is **blocked** in labeled pods (`prohibit` route). `true`: it is reachable via the normal node path. It is never steered in either case. |
-| S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) does not fit the dev VM (3.8 GiB RAM, no swap). | M0–M7 run on flannel. Before M8, the VM needs ~8 GiB, or the matrix runs variant by variant with `FORCE=1` and reduced Istio resources. |
+| S10 | The M8 matrix (Cilium/Calico + Istio ambient, 1+2 nodes) may not fit the dev VM (3.8 GiB RAM, no swap). | Assess available resources before each variant and stop if insufficient. Do not bypass the VM limits. |
+| S12 | The previous `FORCE=1` option to bypass the k3d memory/CPU preflight conflicted with the instruction to stop on missing VM resources. | Removed the option; resource checks are mandatory before creating a cluster. |
+| S11 | The original working rules required a full live e2e suite at every milestone, although early milestones do not implement all test steps. | The user clarified on 2026-10-29 that **e2e testing is required at the end only**. Keep unit, lint, build and targeted component checks green while implementing milestones; perform the final CI and live e2e validation after implementation. If live credentials are unavailable, explicitly report the skipped tier; never count a skip as a pass. |
+
+## Resolved M2 acceptance conflict
+
+| # | Conflict | User-approved resolution |
+|---|---|---|
+| S13 | M2 originally demanded gateway PodIP change recovery **without restarting client pods**, but its `init` driver configures the pod's fixed-remote GENEVE device once. Repointing to a stable ClusterIP Service cannot work: the Linux GENEVE receive lookup rejects return packets whose actual gateway PodIP source differs from the configured Service VIP (`drivers/net/geneve.c`, `geneve_lookup`, upstream v7.0). | On October 29, 2026 the user selected option 1: keep M2 init-only and require a client-pod rollout after a gateway PodIP change; M5 `agent` mode must meet no-client-restart recovery with in-place endpoint updates. The Service VIP proposal remains rejected (ADR-0012). |
+
+## Open final-gate design conflicts (October 30, 2026)
+
+These are **unresolved release blockers**, not accepted changes to the user-approved
+routing, security or compatibility contracts. Do not mark either check passed on
+the strength of isolated unit tests, and do not silently widen egress policy.
+
+| # | Observed conflict | Required decision and proof before acceptance |
+|---|---|---|
+| S14 | The iproute client uses an nft route/output mark for port-qualified steering. A selected TCP SYN-ACK reaches client `rtk0` **without** that mark. With effective loose `rp_filter=2`, default `src_valid_mark=0`, kernel `fib_validate_source` returned `-16` and dropped the packet as `SKB_DROP_REASON_IP_RPFILTER`. Marking ingress and setting `src_valid_mark=1` passed a disposable-netns test, but the normal NET_ADMIN-only programming init container's `/proc/sys` mount is read-only, so it cannot apply that sysctl. An unmarked destination rule routes wrong-port traffic through the tunnel and breaks include-policy semantics; `iif`-scoped and throw routes did not rescue the reply. An exact `/32 + ipproto TCP/UDP + dport 8080` RPDB rule rescued selected replies in a disposable test. A preliminary apparent wrong-port leak was **IPv6 multicast**, not TCP; a bound-source8080/wrong-destination-port TCP SYN was observed only on eth0 when a route/OUTPUT bypass mark and higher-priority MAIN rule were used. The candidate is not accepted: other negative, exclusion, endpoint-loss and transition cases remain unverified. | Design and review a **NET_ADMIN-only, restricted-Pod-compatible** return-source-validation strategy or a different routing-based selector before declaring selective mode supported. Preserve `rp_filter`/source validation, client init privilege bounds, cluster exclusions and nonmatching direct paths. Prove both positive selected TCP/UDP returns and negative wrong-port/CIDR cases in disposable netns **and** final multi-pod traffic. Until then, M8 selective and M9 are blocked. |
+| S15 | The final eBPF fake-tunnel echo times out even though client and gateway components program successfully. An early uncorrelated `geneve_xmit` probe saw an skb without metadata and led to an **incorrect general claim** that tc egress loses collect-md metadata. A fresh disposable-netns test of the unchanged production BPF program/maps, and a separate flannel Pod reproduction (tag `dd6261f9ac61fee5`), instead captured outer UDP/VNI/TLV and gateway flower acceptance. The flannel return outer packet reached the client node and client `gnv0` RX, but the socket still timed out. A subsequent healthy three-netns production-component fixture traced the returned SYN-ACK on `gnv0` with mark 0: `fib_validate_source` returned -16, followed by `SKB_DROP_REASON_IP_RPFILTER` on the **same skb**. Return-source validation is therefore proven in that fixture, though a safe correction and Linux 5.10 runtime pass remain unverified. A same-netns veth/tc-ingress topology also forwarded successfully but failed return under its default source validation. Linux 5.10 runtime compatibility is unproven. | Review an attachment/routing topology for **locally generated** selected packets that preserves CNI-independent routing semantics, mark exclusions, mesh compatibility, and no-endpoint fail-close. Require captured outer packet, gateway flower accept, return traffic and supported-kernel validation—not only BPF helper success or `gnv0` TX counters. No ingress-only swap, unverified clone redirect, or plaintext fallback may be represented as the second production datapath. |
+
+The exact diagnostics, safe rollback and skipped live tier are in
+`docs/milestones/m9/final-gate.md`; no VPN configuration, key or token is
+needed to review these design choices.

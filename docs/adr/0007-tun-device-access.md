@@ -18,4 +18,9 @@ Default `mknod`: the plugin entrypoint creates `/dev/net/tun` (`c 10 200`) with 
 
 ## Consequences
 
-Works on k3d (containerd) — verified in M1. The ADR is revisited if a target runtime denies 10:200 by default.
+The M1 component check (`test/component/tun.yaml`) succeeded on k3d/containerd:
+OpenVPN created `upstream0` using only NET_ADMIN and MKNOD, without privileged
+mode, a VPN profile or external traffic. The temporary namespace was removed.
+This verifies the device access path on that runtime, not the live VPN datapath.
+Other runtime device policies and the hostPath fallback remain to be verified;
+revisit this ADR if a target runtime denies 10:200 by default.

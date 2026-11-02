@@ -1,0 +1,46 @@
+# Node-agent API permissions. Standard Kubernetes RBAC cannot constrain pods/list
+# to spec.nodeName or serviceaccounts/token to Pod UID: deploy only in trusted
+# operator namespace and add admission policy for node/Pod-bound token issuance.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratatoskr-agent
+  namespace: ratatoskr-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ratatoskr-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  # Read only the controller-owned gateway configuration for applied ack.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: ["ratatoskr.skaldhall.io"]
+    resources: ["egressgateways"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ratatoskr.skaldhall.io"]
+    resources: ["egresspolicies"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ratatoskr-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ratatoskr-agent
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-agent
+    namespace: ratatoskr-system

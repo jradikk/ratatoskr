@@ -183,6 +183,13 @@ therefore breaks established connections — documented, not hidden. The selecti
 function lives in `pkg/datapath/affinity` and is used identically by both
 datapaths. `affinity: per-pod` is the only v1 value.
 
+**M2 init-only exception (ADR-0012):** until the node agent exists, selected
+pods keep one fixed remote gateway PodIP. If that pod is replaced with a new IP,
+steered traffic fails closed and selected client pods require a rollout to pick
+up the replacement endpoint. A Service VIP is not a valid fixed GENEVE remote:
+Linux also matches the received reply's outer source to that configured remote.
+From M5, the agent updates endpoints in place without restarting client pods.
+
 ### 4.5 Coexistence details
 
 - **Istio sidecar**: steering is in routing, so Envoy's upstream sockets (pod IP
@@ -363,6 +370,12 @@ GENEVE/WireGuard (when needed)/clsact are unavailable, probing by creating and
 deleting throwaway devices in their own netns.
 
 ## 14. Testing
+
+The user clarified on 2026-10-29 that e2e validation is required **at the end
+only**, not after each milestone. During implementation, keep unit, lint, build
+and targeted component checks green and commit milestone changes. Run the CI and
+live e2e suites as the final validation gate; explicitly report missing live
+credentials and any incomplete or inconclusive cases rather than claiming a pass.
 
 - Unit: controller logic, policy compilation, exclusion detection, MTU math,
   OpenVPN sanitizer, affinity hashing.

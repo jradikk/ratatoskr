@@ -1,0 +1,47 @@
+# Component-only runtime check: no VPN profile, external network or e2e datapath.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ratatoskr-component-check
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tun-access
+  namespace: ratatoskr-component-check
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: tun-access
+      image: ratatoskr-openvpn:m1-local
+      imagePullPolicy: Never
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          mkdir -p /dev/net
+          test -c /dev/net/tun || mknod /dev/net/tun c 10 200
+          openvpn --mktun --dev upstream0 --dev-type tun --verb 0
+          ip link show upstream0 > /dev/null
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - NET_ADMIN
+            - MKNOD
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

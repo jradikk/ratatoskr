@@ -1,0 +1,154 @@
+{{- if eq .Values.driver "agent" }}
+# M5: a node-local agent requires CRI and the node's network namespace files.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ratatoskr-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+---
+# WARNING: pods/patch + cluster-wide serviceaccounts/token create combined
+# with a node CRI socket is effectively node-root-equivalent. See chart README.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ratatoskr-agent
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+  # Dynamic gateway namespaces prevent a static resourceNames restriction.
+  # The agent accepts only the owner-bound gateway config; no Secret access.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egressgateways]
+    verbs: [get, list, watch]
+  - apiGroups: [ratatoskr.skaldhall.io]
+    resources: [egresspolicies]
+    verbs: [list]
+  # The agent issues short-lived audience/Pod-bound tokens to authenticate
+  # encrypted peer registration. Create is cluster-wide across namespaces.
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ratatoskr-agent
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ratatoskr-agent
+subjects:
+  - kind: ServiceAccount
+    name: ratatoskr-agent
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ratatoskr-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ratatoskr.selectorLabels" (list . "agent") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ratatoskr.selectorLabels" (list . "agent") | nindent 8 }}
+    spec:
+      serviceAccountName: ratatoskr-agent
+      automountServiceAccountToken: true
+      hostPID: true
+      # Registration uses the host network namespace, not a steered client netns.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: agent
+          image: {{ include "ratatoskr.image" (list . "agent") | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: CRI_SOCKET
+              value: {{ .Values.agent.criSocket | quote }}
+            - name: OPERATOR_NAMESPACE
+              value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
+            - name: DATAPATH
+              value: {{ .Values.datapath | quote }}
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          securityContext:
+            runAsUser: 0
+            privileged: false
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+              add:
+                - NET_ADMIN
+                - SYS_ADMIN
+                {{- if eq .Values.datapath "ebpf" }}
+                - BPF
+                - PERFMON
+                {{- end }}
+          volumeMounts:
+            - name: cri-socket
+              mountPath: {{ .Values.agent.criSocket | quote }}
+              readOnly: true
+            - name: netns
+              mountPath: /var/run/netns
+              readOnly: true
+              # CNI creates per-sandbox nsfs bind mounts after this Pod starts.
+              # Receive them without propagating agent mounts back to the host.
+              mountPropagation: HostToContainer
+      volumes:
+        - name: cri-socket
+          hostPath:
+            path: {{ .Values.agent.criSocket | quote }}
+            type: Socket
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
+{{- end }}

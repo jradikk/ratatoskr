@@ -1,0 +1,50 @@
+# Component-only init-driver capability check; no packets are sent through a VPN.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ratatoskr-component-check
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-netadmin
+  namespace: ratatoskr-component-check
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: init-netadmin
+      image: ratatoskr-tools:m1-local
+      imagePullPolicy: Never
+      env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          printf '{"podIP":"%s","endpoint":"198.18.0.1","gatewayID":7,"mtu":1400,"exclusions":["10.42.0.0/16","10.43.0.0/16"]}' "$POD_IP" > /tmp/datapath.json
+          /ratatoskr-init -config /tmp/datapath.json
+          ip link show rtk0 > /dev/null
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+          add:
+            - NET_ADMIN
+        seccompProfile:
+          type: RuntimeDefault
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 200m
+          memory: 64Mi

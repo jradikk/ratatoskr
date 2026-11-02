@@ -5,7 +5,7 @@
 #
 # Only one Ratatoskr cluster may exist at a time (the dev VM is small); tear the
 # current one down with hack/k3d-down.sh before switching variants.
-# Set FORCE=1 to skip the memory/CPU preflight.
+# Resource preflight is mandatory; do not bypass VM limits.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -51,10 +51,8 @@ preflight() {
   avail=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) / 1024 ))
   cpus=$(nproc)
   log "preflight: ${avail} MiB available (need ~${need} MiB), ${cpus} CPUs"
-  if [[ "${FORCE:-0}" != 1 ]]; then
-    ((avail >= need)) || die "not enough memory for ${VARIANT}/mesh=${MESH}: ${avail} MiB available, ~${need} MiB needed (FORCE=1 to try anyway)"
-    ((cpus >= 2)) || die "need at least 2 CPUs, have ${cpus}"
-  fi
+  ((avail >= need)) || die "not enough memory for ${VARIANT}/mesh=${MESH}: ${avail} MiB available, ~${need} MiB needed"
+  ((cpus >= 2)) || die "need at least 2 CPUs, have ${cpus}"
   for m in geneve wireguard tun; do
     [[ -d "/sys/module/${m}" ]] || grep -q "/${m}.ko" "/lib/modules/$(uname -r)/modules.builtin" \
       || die "kernel module ${m} not loaded; run hack/bootstrap.sh"
@@ -101,6 +99,8 @@ install_calico() {
   kubectl --context "$CTX" wait --for=condition=Established crd/installations.operator.tigera.io --timeout=2m
   kubectl --context "$CTX" apply -f "${ROOT}/hack/k3d/calico-installation.yaml"
   log "waiting for Calico to become available"
+  # The operator creates this status asynchronously after Installation.
+  kubectl --context "$CTX" wait --for=create tigerastatus/calico --timeout=2m
   kubectl --context "$CTX" wait --for=condition=Available tigerastatus/calico --timeout=10m
 }
 

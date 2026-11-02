@@ -1,0 +1,21 @@
+# Server-side dry-run only. No pod is created and no traffic is sent.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ratatoskr-admission-deny-check
+  namespace: ratatoskr-system
+  labels:
+    ratatoskr.skaldhall.io/gateway: nonexistent-gateway
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: placeholder
+      image: example.invalid/ratatoskr-noop:v1
+      imagePullPolicy: Never
+      command:
+        - /bin/true
+      resources:
+        requests:
+          cpu: 1m
+          memory: 4Mi

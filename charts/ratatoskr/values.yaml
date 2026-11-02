@@ -1,27 +1,51 @@
-# Default values for the Ratatoskr chart. Components are added milestone by
-# milestone; see docs/design.md for the full picture.
-
+# Agent is the production default; init remains available for dev.
+# M6 accepts iproute or ebpf; ebpf is opt-in and requires compatible nodes.
 image:
   registry: ghcr.io/skaldhall
   # Defaults to the chart appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent
 
-# How pod network namespaces are programmed: "init" (MVP, NET_ADMIN init
-# container) or "agent" (DaemonSet; workloads need no capabilities).
 driver: agent
-
-# Datapath implementation: "iproute" or "ebpf". CRDs are identical for both.
 datapath: iproute
 
-# Kubernetes cluster DNS domain, used to rebuild search paths in dns.mode=gateway.
-clusterDomain: cluster.local
+agent:
+  # Node-local CRI socket exposed to the DaemonSet, not to workloads/gateways.
+  criSocket: /run/containerd/containerd.sock
+  resources: {}
 
-# Firewall-mark bits reserved for Ratatoskr in pod and gateway netns. Must not
-# overlap Istio (0x539 / 0xfff) or Cilium (0x0f00, 0xf000 ranges).
+# Install into this namespace (defaults to Helm's release namespace). The
+# bootstrap Secret and both webhook configurations are named by the chart.
+operatorNamespace: ""
+clusterDomain: cluster.local
+dns:
+  # External DNS questions from dns.mode=gateway go through upstream0 only.
+  # Replace when a VPN provider requires a different accessible resolver.
+  upstreamIP: "1.1.1.1"
+  # Operator-controlled tunnel-bound exit probe override. Empty retains the
+  # plugin's default external HTTPS probe; only unicast IPv4 URLs are allowed.
+  upstreamProbeURL: ""
 fwmarkMask: "0x00f00000"
 
-# Extra CIDRs never steered in any pod (in addition to auto-detected ones).
+# CIDR overrides passed to the Go processes; podCIDRs may be left empty if
+# the controller detects them from Node specs. Extra CIDRs bypass the gateway.
 exclusions:
   serviceCIDRs: []
+  podCIDRs: []
   extraCIDRs: []
+
+controller:
+  replicas: 1
+  # Required when replicas > 1; controller-runtime uses a namespaced Lease.
+  leaderElection:
+    enabled: false
+  resources: {}
+webhook:
+  # Webhook replicas share one TLS Secret and use the same CA bundle.
+  replicas: 1
+  resources: {}
+
+# These policies constrain incoming traffic; API-server/kubelet IPs cannot be
+# reliably determined by a portable chart, so 9443 and health probes are open.
+networkPolicy:
+  enabled: true

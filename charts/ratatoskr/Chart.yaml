@@ -2,6 +2,8 @@ apiVersion: v2
 name: ratatoskr
 description: Label-driven egress gateways for Kubernetes (GENEVE in-cluster, pluggable VPN upstreams).
 type: application
+# Development metadata only. At release time set BOTH --version and
+# --app-version to the same immutable release tag (without a leading v).
 version: 0.0.0-dev
 appVersion: "dev"
 kubeVersion: ">=1.29.0-0"

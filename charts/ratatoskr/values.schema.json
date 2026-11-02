@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ratatoskr Helm values",
+  "type": "object",
+  "properties": {
+    "driver": {"type": "string", "enum": ["init", "agent"]},
+    "datapath": {"type": "string", "enum": ["iproute", "ebpf"]},
+    "operatorNamespace": {"type": "string"},
+    "clusterDomain": {"type": "string", "minLength": 1},
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "criSocket": {"type": "string", "pattern": "^/.+"},
+        "resources": {"type": "object"}
+      }
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "leaderElection": {
+          "type": "object",
+          "properties": {"enabled": {"type": "boolean"}}
+        },
+        "resources": {"type": "object"}
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "resources": {"type": "object"}
+      }
+    },
+    "dns": {
+      "type": "object",
+      "properties": {
+        "upstreamIP": {"type": "string"},
+        "upstreamProbeURL": {"type": "string", "maxLength": 2048}
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "exclusions": {
+      "type": "object",
+      "properties": {
+        "serviceCIDRs": {"type": "array", "items": {"type": "string"}},
+        "podCIDRs": {"type": "array", "items": {"type": "string"}},
+        "extraCIDRs": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

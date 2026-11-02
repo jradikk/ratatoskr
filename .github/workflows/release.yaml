@@ -1,0 +1,249 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: validate
+    uses: ./.github/workflows/ci.yaml
+
+  images:
+    needs: [validate, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [controller, webhook, agent, gateway, init, upstream-openvpn]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pinned versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Select component Dockerfile
+        id: component
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          if [[ "$COMPONENT" == upstream-openvpn ]]; then
+            echo "file=plugins/upstream/openvpn/Dockerfile" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=Dockerfile" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and push versioned multiarch image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.component.outputs.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ needs.validate.outputs.version }}
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
+            COMPONENT=${{ matrix.component }}
+            VERSION=${{ needs.validate.outputs.version }}
+            COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=release-${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.component }}
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Record image digest
+        env:
+          COMPONENT: ${{ matrix.component }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: |
+          mkdir -p image-digests
+          printf 'docker.io/%s/ratatoskr-%s@%s\n' "$IMAGE_OWNER" "$COMPONENT" "$IMAGE_DIGEST" > "image-digests/$COMPONENT.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.component }}
+          path: image-digests/*.txt
+          if-no-files-found: error
+
+  binaries:
+    needs: [validate, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pinned versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Cross-build versioned release binaries
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for component in controller webhook agent gateway init; do
+            for arch in amd64 arm64; do
+              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X github.com/skaldhall/ratatoskr/pkg/version.Version=$RELEASE_VERSION -X github.com/skaldhall/ratatoskr/pkg/version.Commit=$SOURCE_SHA" \
+                -o "dist/ratatoskr-$component-linux-$arch" "./cmd/$component"
+            done
+          done
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/ratatoskr-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: dist/ratatoskr-*
+          if-no-files-found: error
+
+  chart:
+    needs: [validate, test, images, binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pinned versions
+        run: grep -E '^[A-Z_]+=' hack/versions.env >> "$GITHUB_ENV"
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Stage chart with matching version and published image registry
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          IMAGE_OWNER: ${{ github.repository_owner }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p chart-stage dist
+          cp -a charts/ratatoskr chart-stage/ratatoskr
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path('chart-stage/ratatoskr')
+          values = root / 'values.yaml'
+          text = values.read_text()
+          if text.count('registry: ghcr.io/skaldhall') != 1:
+              raise SystemExit('Chart registry defaults changed; review release staging')
+          values.write_text(text.replace('registry: ghcr.io/skaldhall', 'registry: docker.io/' + os.environ['IMAGE_OWNER']))
+          chart = root / 'Chart.yaml'
+          chart.write_text(chart.read_text().replace('https://github.com/skaldhall/ratatoskr', 'https://github.com/' + os.environ['SOURCE_REPOSITORY']))
+          PY
+          helm lint chart-stage/ratatoskr --strict
+          helm package chart-stage/ratatoskr --version "$RELEASE_VERSION" --app-version "$RELEASE_VERSION" --destination dist
+      - name: Attest chart provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tgz
+      - name: Log in to GitHub Container Registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Push Helm chart to GHCR
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: helm push "dist/ratatoskr-$RELEASE_VERSION.tgz" 'oci://ghcr.io/${{ github.repository_owner }}/charts'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-chart
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, images, binaries, chart]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          path: image-digests
+          merge-multiple: true
+      - name: Generate artifact checksums and immutable image references
+        run: |
+          set -euo pipefail
+          for component in controller webhook agent gateway init upstream-openvpn; do
+            test -s "image-digests/$component.txt"
+          done
+          test "$(find image-digests -maxdepth 1 -name '*.txt' | wc -l)" -eq 6
+          for component in controller webhook agent gateway init; do
+            for arch in amd64 arm64; do
+              test -s "dist/ratatoskr-$component-linux-$arch"
+            done
+          done
+          test "$(find dist -maxdepth 1 -name '*.tgz' | wc -l)" -eq 1
+          cat image-digests/*.txt | sort > dist/IMAGE-DIGESTS.txt
+          (cd dist && sha256sum ratatoskr-* IMAGE-DIGESTS.txt > SHA256SUMS)
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+          body: |
+            Images: docker.io/${{ github.repository_owner }}/ratatoskr-<component>:${{ needs.validate.outputs.version }}
+            Components: controller, webhook, agent, gateway, init, upstream-openvpn.
+            Helm: oci://ghcr.io/${{ github.repository_owner }}/charts/ratatoskr
+            Verify provenance with `gh attestation verify` for downloaded assets and published image digests.
+            This workflow validates component and chart checks; it does not certify the full CNI/mesh or Linux 5.10 compatibility matrix.
