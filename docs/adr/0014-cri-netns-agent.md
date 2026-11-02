@@ -15,12 +15,15 @@ The CRI socket is a powerful node-level trust boundary.
 A `hostPID: true`, **`hostNetwork: false`** DaemonSet mounts the node's CRI
 socket and host `/var/run/netns` with HostToContainer propagation. At startup
 it GETs its own Pod uncached and verifies exact Downward API
-namespace/name/UID/node identity, ServiceAccount, separate Pod netns, hostPID
-and non-deleting status. It pins the current agent thread's own netns FD for
-restoration and separately opens `/proc/1/ns/net` with hostPID as the host
-namespace **forbidden anchor**. Both FDs must be nsfs network namespace
-objects and their inodes must differ; an unavailable host anchor fails closed.
-No CRI workload namespace is derived from `/proc`.
+namespace/name/UID/node identity, ServiceAccount, separate Pod netns, hostPID,
+non-deleting status and the exact `host-netns` hostPath volume mounted read-only
+at `/var/run/ratatoskr/host-netns`. Kubelet bind-mounts node `/proc/1/ns/net`;
+the agent does **not** directly open that ptrace-gated proc path. It pins the
+current agent thread's own netns FD for restoration and opens only the fixed
+mounted host network namespace as a **forbidden anchor** (`O_NOFOLLOW`). Both
+FDs must be nsfs network namespace objects and their inodes must differ; an
+unavailable or invalid mount fails closed. No CRI workload namespace is derived
+from this host anchor or a `/proc` PID path.
 
 For each selected Pod, require exactly one READY CRI sandbox with matching
 namespace, name, Pod UID and PodIP. Its verbose status must supply a PID and

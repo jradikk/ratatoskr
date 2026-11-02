@@ -139,6 +139,9 @@ spec:
             - name: cri-socket
               mountPath: {{ .Values.agent.criSocket | quote }}
               readOnly: true
+            - name: host-netns
+              mountPath: /var/run/ratatoskr/host-netns
+              readOnly: true
             - name: netns
               mountPath: /var/run/netns
               readOnly: true
@@ -150,6 +153,10 @@ spec:
           hostPath:
             path: {{ .Values.agent.criSocket | quote }}
             type: Socket
+        - name: host-netns
+          hostPath:
+            path: /proc/1/ns/net
+            type: File
         - name: netns
           hostPath:
             path: /var/run/netns

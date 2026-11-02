@@ -23,7 +23,8 @@ func validOwnPod() (*corev1.Pod, OwnPod) {
 	for _, field := range fields {
 		env = append(env, corev1.EnvVar{Name: field.name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: field.path}}})
 	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: false, HostPID: true, ServiceAccountName: "ratatoskr-agent", Containers: []corev1.Container{{Name: "agent", Env: env}}}}
+	file := corev1.HostPathFile
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: false, HostPID: true, ServiceAccountName: "ratatoskr-agent", Volumes: []corev1.Volume{{Name: hostNetnsVolume, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc/1/ns/net", Type: &file}}}}, Containers: []corev1.Container{{Name: "agent", Env: env, VolumeMounts: []corev1.VolumeMount{{Name: hostNetnsVolume, MountPath: hostNetnsMount, ReadOnly: true}}}}}}
 	return pod, id
 }
 func TestTrustedOwnPodIdentity(t *testing.T) {
@@ -41,6 +42,24 @@ func TestTrustedOwnPodIdentity(t *testing.T) {
 		{"host network", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostNetwork = true }},
 		{"nonhost PID", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostPID = false }},
 		{"service account mismatch", func(p *corev1.Pod, _ *OwnPod) { p.Spec.ServiceAccountName = "default" }},
+		{"missing anchor volume", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes = nil }},
+		{"wrong anchor source", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes[0].HostPath.Path = "/proc/self/ns/net" }},
+		{"wrong anchor volume type", func(p *corev1.Pod, _ *OwnPod) {
+			other := corev1.HostPathDirectory
+			p.Spec.Volumes[0].HostPath.Type = &other
+		}},
+		{"missing anchor type", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes[0].HostPath.Type = nil }},
+		{"missing anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts = nil }},
+		{"writable anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].ReadOnly = false }},
+		{"wrong anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].MountPath = "/var/run/other" }},
+		{"wrong anchor mount name", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].Name = "other" }},
+		{"subpath anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].SubPath = "net" }},
+		{"duplicate anchor mount", func(p *corev1.Pod, _ *OwnPod) {
+			p.Spec.Containers[0].VolumeMounts = append(p.Spec.Containers[0].VolumeMounts, p.Spec.Containers[0].VolumeMounts[0])
+		}},
+		{"foreign anchor mount", func(p *corev1.Pod, _ *OwnPod) {
+			p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "other", VolumeMounts: p.Spec.Containers[0].VolumeMounts})
+		}},
 		{"deleting", func(p *corev1.Pod, _ *OwnPod) { now := metav1.Now(); p.DeletionTimestamp = &now }},
 		{"forged env", func(p *corev1.Pod, _ *OwnPod) {
 			p.Spec.Containers[0].Env[0].ValueFrom = nil
@@ -63,6 +82,15 @@ func TestTrustedOwnPodIdentity(t *testing.T) {
 		})
 	}
 }
+func TestHostNetnsMountFailsClosedWithoutVerifiedNSFS(t *testing.T) {
+	if _, err := openHostNetnsAnchor("/proc/1/ns/net"); err == nil {
+		t.Fatal("arbitrary PID namespace path accepted")
+	}
+	if _, err := openHostNetnsAnchor(hostNetnsMount); err == nil {
+		t.Fatal("absent host namespace mount accepted")
+	}
+}
+
 func TestUncachedOwnPodRecheck(t *testing.T) {
 	p, id := validOwnPod()
 	scheme := runtime.NewScheme()

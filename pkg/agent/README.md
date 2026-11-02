@@ -30,14 +30,18 @@ replacement after restart, but are not accepted without fresh identity checks.
 
 At startup, an uncached GET verifies the agent's own exact Pod UID, node,
 ServiceAccount, non-deleting lifecycle, separate Pod network namespace,
-`hostPID: true` and Downward API fieldRefs. It pins both its own thread netns
-for restoration and `/proc/1/ns/net` as a separately validated host-PID-1
-forbidden namespace; they must differ. Each resync rechecks the Pod identity
-and its thread against the pinned **own** namespace. This relies on the
-validated hostPID/CRI/Kubernetes trust contract, not independent PID-to-netns
-attestation. A runtime denying `/proc/1/ns/net` under existing seccomp fails
-startup closed; no additional privilege or workload-path `/proc` fallback is
-introduced.
+`hostPID: true`, Downward API fieldRefs and the exact read-only `host-netns`
+volume sourced from node `/proc/1/ns/net` and mounted at
+`/var/run/ratatoskr/host-netns`. Kubelet resolves and bind-mounts the host
+namespace path; the agent process does **not** open `/proc/1/ns/net` under
+RuntimeDefault (ptrace permission can deny that). It pins its own thread netns
+for restoration, then opens the fixed mounted nsfs host-PID-1 namespace as a
+forbidden anchor using `O_NOFOLLOW`; both FDs must be valid, network-typed and
+distinct. Each resync rechecks the Pod mount identity and its thread against
+the pinned **own** namespace. This relies on the validated
+hostPID/CRI/Kubernetes trust contract, not independent PID-to-netns
+attestation. An unavailable or invalid kubelet mount fails startup closed; no
+additional privilege or workload-path `/proc` fallback is introduced.
 
 Before programming, the agent requires READY CRI namespace/name/UID/PodIP
 metadata, a live pidfd whose cgroup contains the Pod UID, exactly one confined

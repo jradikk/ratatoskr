@@ -77,9 +77,13 @@ connections are the relevant acceptance proof, not established-flow continuity.
 The agent runs with an ordinary Pod network namespace, hostPID, NET_ADMIN and
 SYS_ADMIN, and mounts a node CRI socket plus host `/var/run/netns`
 (HostToContainer propagation). At bootstrap an uncached own-Pod GET verifies
-`hostNetwork: false` and `hostPID: true`. It pins its own thread namespace for
-restoration and a separate `/proc/1/ns/net` host-PID-1 FD as a forbidden anchor;
-these must differ. Opening the host anchor is not a fallback workload path. It
+`hostNetwork: false`, `hostPID: true` and an exact read-only hostPath mount:
+node `/proc/1/ns/net` at `/var/run/ratatoskr/host-netns`. Kubelet performs the
+host bind mount, avoiding a process-local `/proc/1/ns/net` open blocked by
+RuntimeDefault ptrace checks. The agent pins its own thread namespace for
+restoration and separately opens the fixed mounted nsfs host-PID-1 namespace
+as a forbidden anchor with `O_NOFOLLOW`; these must differ. Opening that
+anchor is not a fallback workload path. It
 requires a unique READY CRI sandbox whose namespace, name, Pod UID and PodIP
 match the Kubernetes workload. Its **CRI-authoritative** verbose sandbox info
 must contain a PID and exactly one `runtimeSpec.linux.namespaces` network path.
