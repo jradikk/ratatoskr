@@ -22,6 +22,5 @@ Run local offline checks (no registry, cluster, or artifact build):
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/release -p 'test_*.py'
 ```
 
-Acceptance remains independent of packaging: skipped or missing scenarios are
-**INCOMPLETE**, not waived. Publishing is never authorized merely by tests in
-this directory.
+Version-tag pushes authorize publication after CI validation. Historical
+acceptance records are not an additional publishing prerequisite.

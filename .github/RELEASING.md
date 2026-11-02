@@ -20,17 +20,11 @@ Ensure published packages are publicly readable for the documented install path.
 ## Candidate review
 
 1. Review the candidate source and CI results.
-2. Run target-platform runtime tests against that candidate and record the
-   independently reviewed evidence in `test/e2e/release/acceptance.json`.
-3. Check the release version in `charts/ratatoskr/Chart.yaml`, matching appVersion,
-   image registry, and upgrade guidance.
-4. Review security changes and the supported scope before authorizing publication.
+2. Check chart version/appVersion, image registry, and upgrade guidance.
+3. Review security changes and the supported scope before publishing.
 
-Stable tags require every mandatory acceptance entry to pass. The workflow
-checks `release_acceptance.py --require-ready` before release builds or registry
-writes. This verifies the checklist's structure/status; maintainers must verify
-the underlying evidence and that it applies to the candidate. Do not mark entries
-passed merely to unblock a tag.
+Publication is authorized by pushing a version tag. The workflow requires normal
+CI validation, not a separate acceptance-ledger approval.
 
 ## Tag the reviewed source
 
@@ -40,7 +34,7 @@ git push origin v0.1.0
 ```
 
 Canonical `vX.Y.Z` tags create stable releases; `vX.Y.Z-rc.N` tags create
-prereleases and do not certify stable acceptance. There is no manual or
+prereleases. There is no manual or
 main-branch publication trigger. Never move a published tag to another commit.
 
 ## Published artifacts

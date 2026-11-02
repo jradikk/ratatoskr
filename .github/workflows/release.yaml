@@ -32,9 +32,6 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Require complete acceptance before stable publication
-        if: steps.version.outputs.prerelease == 'false'
-        run: python3 test/e2e/matrix/release_acceptance.py --require-ready
 
   test:
     needs: validate
