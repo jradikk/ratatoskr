@@ -6,7 +6,7 @@ include hack/versions.env
 
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-REGISTRY    ?= docker.io/jradikk
+REGISTRY    ?= ghcr.io/jradikk
 TAG         ?= $(VERSION)
 PLATFORMS   ?= linux/amd64,linux/arm64
 COMPONENTS  := controller webhook agent gateway init

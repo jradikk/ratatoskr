@@ -6,16 +6,16 @@ commands are for development, not distribution.
 
 ## Repository setup
 
-Configure these Actions secrets, never source-controlled credentials:
+No Docker Hub account or additional registry secrets are required. The workflow
+uses the built-in `GITHUB_TOKEN` with `packages: write` to publish images and
+the Helm chart to GHCR. Repository policies must permit the declared contents,
+packages, id-token, and attestations permissions.
 
-- `DOCKER_USERNAME`: Docker Hub account authorized to publish the six images.
-- `DOCKER_PASSWORD`: Docker Hub access token with repository write permission.
-
-For this repository, images use `docker.io/jradikk`. The token must be able to
-publish every `ratatoskr-*` repository and its attestations. `GITHUB_TOKEN`
-publishes the chart to GHCR and assets to GitHub Releases; repository policies
-must allow the declared contents, packages, id-token, and attestations permissions.
-Ensure published packages are publicly readable for the documented install path.
+Images use `ghcr.io/jradikk/ratatoskr-<component>`. Set each of the six container
+packages and the Helm chart package to **Public** in GitHub package settings so
+users can pull anonymously. New GHCR packages default to private; a public
+repository does not automatically make its packages public. Publishing still
+requires authentication, supplied automatically by the workflow token.
 
 ## Candidate review
 
@@ -42,7 +42,7 @@ main-branch publication trigger. Never move a published tag to another commit.
 The workflow validates the tag and runs reusable CI before publication:
 
 1. Six component images for Linux amd64/arm64: controller, webhook, agent,
-   gateway, init, and upstream-openvpn. Docker Hub receives versioned tags,
+   gateway, init, and upstream-openvpn. GHCR receives versioned tags,
    Buildx SBOM/provenance, and GitHub provenance attestations.
 2. Ten Linux binaries: five components for the two architectures, with source
    and version metadata and provenance attestations.

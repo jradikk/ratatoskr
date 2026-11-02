@@ -1,6 +1,6 @@
 # Agent-mode values for the local k3d environment.
 image:
-  registry: docker.io/jradikk
+  registry: ghcr.io/jradikk
   tag: dev
   pullPolicy: Never
 driver: agent

@@ -1,7 +1,7 @@
 # Helm values for the local k3d dev loop (make dev-deploy). Images are built
 # locally and imported with `k3d image import`, never pulled.
 image:
-  registry: docker.io/jradikk
+  registry: ghcr.io/jradikk
   tag: dev
   pullPolicy: Never
 driver: init

@@ -1,6 +1,6 @@
 # Component images share this registry and the chart appVersion tag by default.
 image:
-  registry: docker.io/jradikk
+  registry: ghcr.io/jradikk
   # Defaults to the chart appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent

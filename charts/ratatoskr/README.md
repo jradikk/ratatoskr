@@ -33,7 +33,7 @@ values file, VPN Secret, gateway, namespace authorization, and workload setup.
 For an offline/mirrored chart, substitute its archive or local chart directory
 for the OCI reference. Use a version available in the registry.
 
-The default image registry is `docker.io/jradikk`; the default tag is the chart
+The default image registry is `ghcr.io/jradikk`; the default tag is the chart
 `appVersion` (`0.1.0`). Use `image.registry`, `image.tag` and
 `image.pullPolicy` if your verified images are mirrored or locally imported.
 `operatorNamespace`, if set, must equal the Helm release namespace. Once ready,
