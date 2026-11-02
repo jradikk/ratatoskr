@@ -33,7 +33,7 @@ def rule(doc, resource, api_group=None):
     return matching[0]
 
 
-def check_agent(docs, socket, datapath, dev=False):
+def check_agent(docs, socket, datapath, dev=False, health_port=19903):
     role = docs["ClusterRole", "ratatoskr-agent"]
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
@@ -61,8 +61,8 @@ def check_agent(docs, socket, datapath, dev=False):
         "ghcr.io/jradikk/ratatoskr-agent:0.1.0")
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
-    assert container["ports"] == [{"name": "health", "containerPort": 19903}]
-    assert next(e["value"] for e in container["env"] if e["name"] == "HEALTH_PORT") == "19903"
+    assert container["ports"] == [{"name": "health", "containerPort": health_port}]
+    assert next(e["value"] for e in container["env"] if e["name"] == "HEALTH_PORT") == str(health_port)
     bpf_enabled = datapath == "ebpf"
     assert container["securityContext"] == {
         "runAsUser": 0, "privileged": False, "allowPrivilegeEscalation": False,
@@ -92,7 +92,8 @@ def check_agent(docs, socket, datapath, dev=False):
 
 
 def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock",
-          controller_replicas=1, webhook_replicas=1, leader=False, dev=False):
+          controller_replicas=1, webhook_replicas=1, leader=False, dev=False,
+          network_policy=True, health_port=19903):
     expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
@@ -112,10 +113,16 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         ("ClusterRoleBinding", "ratatoskr-gateway"),
         ("Role", "ratatoskr-webhook-tls"),
         ("RoleBinding", "ratatoskr-webhook-tls"),
-        ("NetworkPolicy", "ratatoskr-webhook-ingress"),
         ("MutatingWebhookConfiguration", "ratatoskr-pods"),
         ("ValidatingWebhookConfiguration", "ratatoskr-validation"),
     }
+    if network_policy:
+        expected |= {
+            ("NetworkPolicy", "ratatoskr-controller-ingress"),
+            ("NetworkPolicy", "ratatoskr-webhook-ingress"),
+        }
+        if driver == "agent":
+            expected.add(("NetworkPolicy", "ratatoskr-agent-ingress"))
     if driver == "agent":
         expected |= {
             ("ServiceAccount", "ratatoskr-agent"),
@@ -151,7 +158,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                         "ghcr.io/jradikk/ratatoskr-" + component + ":0.1.0")
             assert image == expected, image
     if driver == "agent":
-        check_agent(docs, socket, datapath, dev=dev)
+        check_agent(docs, socket, datapath, dev=dev, health_port=health_port)
     # Host mounts and capabilities are only granted to the node-local agent;
     # the controller/webhook never receive the node CRI or netns paths.
     for kind, name in (("Deployment", "ratatoskr-controller"),
@@ -304,9 +311,23 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
     for role in (controller, webhook_role, tls_role):
         for r in role["rules"]:
             assert "*" not in r["resources"] and "*" not in r["verbs"]
-    policy = docs["NetworkPolicy", "ratatoskr-webhook-ingress"]["spec"]
-    assert policy["podSelector"]["matchLabels"] == docs["Service", "ratatoskr-webhook"]["spec"]["selector"]
-    assert {p["port"] for p in policy["ingress"][0]["ports"]} == {9443, 8081}
+    if network_policy:
+        expected_ports = {"controller": {8081}, "webhook": {9443, 8081}}
+        if driver == "agent":
+            expected_ports["agent"] = {health_port}
+        for component, ports in expected_ports.items():
+            policy = docs["NetworkPolicy", "ratatoskr-" + component + "-ingress"]["spec"]
+            pod = docs["DaemonSet" if component == "agent" else "Deployment",
+                       "ratatoskr-" + component]["spec"]["template"]["metadata"]["labels"]
+            assert policy["podSelector"]["matchLabels"] == {
+                key: pod[key] for key in ("app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component")}
+            assert policy["policyTypes"] == ["Ingress"] and "egress" not in policy
+            assert len(policy["ingress"]) == 1 and "from" not in policy["ingress"][0]
+            assert {p["port"] for p in policy["ingress"][0]["ports"]} == ports
+            assert all(p["protocol"] == "TCP" for p in policy["ingress"][0]["ports"])
+        assert not any("gateway" in name for kind, name in docs if kind == "NetworkPolicy")
+    else:
+        assert not any(kind == "NetworkPolicy" for kind, _ in docs)
 
 
 def check_package():
@@ -372,6 +393,14 @@ if __name__ == "__main__":
     check(render("--set", "driver=init"), "init")
     check(render("--set", "datapath=ebpf"), "agent", "ebpf")
     check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")
+    check(render("--set", "agent.healthPort=18091"), "agent", health_port=18091)
+    check(render("--set", "networkPolicy.enabled=false"), "agent", network_policy=False)
+    check(render("--set", "driver=init", "--set", "networkPolicy.enabled=false"),
+          "init", network_policy=False)
+    check(render("--set", "driver=init", "--set", "agent.healthPort=18091"),
+          "init", health_port=18091)
+    check(render("--set", "agent.healthPort=18091", "--set", "networkPolicy.enabled=false"),
+          "agent", health_port=18091, network_policy=False)
     private_probe = render("--set", "dns.upstreamProbeURL=http://198.19.0.1:8080/exit")
     probe_env = {e["name"]: e["value"] for e in private_probe["Deployment", "ratatoskr-controller"]
                  ["spec"]["template"]["spec"]["containers"][0]["env"]}

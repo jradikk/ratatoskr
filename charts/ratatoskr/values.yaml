@@ -45,7 +45,8 @@ webhook:
   replicas: 1
   resources: {}
 
-# These policies constrain incoming traffic; API-server/kubelet IPs cannot be
-# reliably determined by a portable chart, so 9443 and health probes are open.
+# Limit inbound ports on controller, webhook and (in agent mode) the node agent.
+# No egress isolation: the API, CRI and gateway peers must remain reachable.
+# API-server/kubelet source CIDRs are intentionally not guessed.
 networkPolicy:
   enabled: true
