@@ -266,14 +266,18 @@ func gatewayFailureReason(reason string) string {
 	}
 }
 
-func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, _ error) (ctrl.Result, error) {
+func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, cause error) (ctrl.Result, error) {
 	reason = gatewayFailureReason(reason)
 	message := "Gateway reconciliation blocked at " + reason + "; inspect controller and owned resources."
-	// Log only the fixed category: provider/API errors can contain private data.
-	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason)
+	category := ""
+	if reason == "ExclusionDiscoveryFailed" {
+		category, message = exclusionAdvice(cause)
+	}
+	// Log only fixed categories/advice: provider/API errors can contain private data.
+	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason, "exclusionCategory", category, "advice", message)
 	previous := meta.FindStatusCondition(gw.Status.Conditions, "Ready")
 	transition := previous == nil || previous.Status != metav1.ConditionFalse ||
-		previous.Reason != reason || previous.ObservedGeneration != gw.Generation
+		previous.Reason != reason || previous.Message != message || previous.ObservedGeneration != gw.Generation
 	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: reason, Status: metav1.ConditionTrue, Reason: reason, Message: message, ObservedGeneration: gw.Generation})
 	if e := r.status(ctx, gw, false, reason, message); e != nil {
 		return ctrl.Result{}, e
