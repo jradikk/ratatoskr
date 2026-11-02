@@ -96,6 +96,12 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 	}
 	dep := objs[2].(*appsv1.Deployment)
 	tpl := dep.Spec.Template
+	if sc := tpl.Spec.SecurityContext; sc == nil || !reflect.DeepEqual(sc.Sysctls, []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}) {
+		t.Fatalf("gateway must request exactly its namespaced forwarding prerequisite: %+v", sc)
+	}
+	if tpl.Spec.HostNetwork || tpl.Spec.HostPID || tpl.Spec.HostIPC {
+		t.Fatal("forwarding prerequisite must not enable host namespaces")
+	}
 	if tpl.Labels[GatewayLabel] != "" || tpl.Labels[IdentityLabel] != "edge" {
 		t.Fatal("gateway pod selected as workload")
 	}
@@ -157,6 +163,55 @@ func TestOperatorOnlyUpstreamProbe(t *testing.T) {
 		if _, err := r.render(gw, nil); err == nil {
 			t.Errorf("unsafe operator probe accepted: %q", endpoint)
 		}
+	}
+}
+
+func TestGatewayForwardingSysctlBoundToPodOnly(t *testing.T) {
+	r, gw := fixture(t)
+	gw.Status.GatewayID = 7
+	objects, err := r.render(gw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
+	want := []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}
+	if pod.SecurityContext == nil || !reflect.DeepEqual(pod.SecurityContext.Sysctls, want) {
+		t.Fatalf("gateway Pod must carry exactly scoped forwarding sysctl: %+v", pod.SecurityContext)
+	}
+	for _, container := range pod.Containers {
+		if container.SecurityContext == nil || container.SecurityContext.Privileged != nil && *container.SecurityContext.Privileged {
+			t.Fatal("Pod forwarding sysctl must not broaden container privileges")
+		}
+		if container.Name == "gateway" && !reflect.DeepEqual(container.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN"}) {
+			t.Fatal("gateway forwarding prerequisite changed gateway capabilities")
+		}
+		if container.Name == "upstream" && !reflect.DeepEqual(container.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "MKNOD"}) {
+			t.Fatal("gateway forwarding prerequisite changed upstream capabilities")
+		}
+	}
+}
+
+func TestGatewayForwardingSysctlExactForModes(t *testing.T) {
+	for _, mode := range []string{"none", "wireguard"} {
+		t.Run(mode, func(t *testing.T) {
+			r, gw := fixture(t)
+			gw.Status.GatewayID = 7
+			gw.Spec.Encryption = mode
+			if mode == "wireguard" {
+				gw.Namespace = r.Options.OperatorNamespace
+			}
+			objects, err := r.render(gw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
+			if pod.SecurityContext == nil || !reflect.DeepEqual(pod.SecurityContext.Sysctls, []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}) {
+				t.Fatalf("unsupported gateway forwarding sysctl set: %+v", pod.SecurityContext)
+			}
+			if pod.HostNetwork || pod.HostPID || pod.HostIPC {
+				t.Fatal("gateway forwarding sysctl requires pod namespace, not host namespace")
+			}
+		})
 	}
 }
 

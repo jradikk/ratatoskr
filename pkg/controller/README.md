@@ -76,6 +76,30 @@ Readiness requires consistent **measured** Pod/GENEVE/upstream MTUs. Do not infe
 link MTUs from defaults. Valid IPv4 MTUs below 1280 emit an IPv6-minimum warning;
 IPv6 forwarding itself is not supported.
 
+### Gateway forwarding prerequisite
+
+Gateway Pods explicitly request **only** `net.ipv4.ip_forward=1` under their
+Pod `securityContext.sysctls`. This enables forwarding in the Gateway Pod's
+**own network namespace** before its gateway and upstream containers start;
+workload Pods and the node's host network namespace are not configured by this
+setting. A restricted/container-default read-only `/proc/sys` cannot reliably
+set forwarding from the gateway binary even with NET_ADMIN. The backend still
+checks the live value and fails closed if it is not `1`; neither readiness nor
+selected-client acknowledgement should be published on failure.
+
+Kubernetes treats this namespaced sysctl as **unsafe**, not default-allowed.
+An operator must explicitly authorize the exact `net.ipv4.ip_forward` key in
+the kubelet `allowedUnsafeSysctls` setting on **each node eligible for Gateway
+Pods** (or provide a separately reviewed node-policy mechanism that sets the
+same Pod-netns value before containers start). This is an operational prerequisite,
+not a chart-side automatic kubelet change: nodes without the approval reject
+Pod sandbox creation and the Gateway stays unavailable. Do not allowlist
+`net.ipv4.*` broadly, mount a writable host `/proc`, add SYS_ADMIN/privileged,
+or switch the Gateway to host networking. Existing Pods must be recreated to
+receive a new Pod-level sysctl. On clusters that prohibit this unsafe sysctl,
+Gateway forwarding is unsupported without a separately designed, validated
+alternative; do not claim traffic-gate success from the rendered spec alone.
+
 Gateway NetworkPolicies constrain ingress, not egress. Port 9900 remains open
 for portable controller/kubelet access. Gateway DNS creates a separate Service
 for TCP/UDP 53 to port 1053 and preserves cluster DNS availability while external
