@@ -233,28 +233,7 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 				}
 			}
 		}
-		var endpoints corev1.Endpoints //nolint:staticcheck // Legacy endpoints remain a fallback on clusters not publishing API/DNS EndpointSlices.
-		if err := r.Get(ctx, svc, &endpoints); err != nil {
-			if !errors.IsNotFound(err) {
-				return nil, "", fmt.Errorf("get %s Endpoints: %w", source, err)
-			}
-		} else {
-			for _, subset := range endpoints.Subsets {
-				for _, address := range append(subset.Addresses, subset.NotReadyAddresses...) {
-					if address.IP != "" {
-						ip, e := netip.ParseAddr(address.IP)
-						if e != nil {
-							return nil, "", fmt.Errorf("invalid %s Endpoint IP", source)
-						}
-						if ip.Is4() {
-							if err := found.addIP(address.IP, source); err != nil {
-								return nil, "", err
-							}
-						}
-					}
-				}
-			}
-		}
+
 	}
 	dnsIP := ""
 	var dns corev1.Service

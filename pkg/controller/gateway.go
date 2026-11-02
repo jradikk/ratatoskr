@@ -710,11 +710,11 @@ func (r *GatewayReconciler) mapAll(ctx context.Context, _ client.Object) []recon
 	return out
 }
 
-//nolint:staticcheck // Watch legacy Endpoints as fallback alongside EndpointSlices. Secret reads are uncached GETs; do not watch/list Secrets.
+// Secret reads are uncached GETs; do not watch/list Secrets.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).For(&api.EgressGateway{}).Owns(&appsv1.Deployment{}).Owns(&corev1.ConfigMap{}).Owns(&corev1.Service{}).Owns(&networkingv1.NetworkPolicy{}).Owns(&corev1.Pod{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapAll), builder.WithPredicates(predicate.Funcs{CreateFunc: func(event.CreateEvent) bool { return true }, DeleteFunc: func(event.DeleteEvent) bool { return true }, UpdateFunc: func(e event.UpdateEvent) bool {
 			return !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) || !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) || !reflect.DeepEqual(e.ObjectOld.(*corev1.Pod).Status, e.ObjectNew.(*corev1.Pod).Status)
 		}})).
-		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&api.EgressPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Endpoints{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Complete(r)
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&api.EgressPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(r.mapAll)).Complete(r)
 }
