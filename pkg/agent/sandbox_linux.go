@@ -292,7 +292,7 @@ func openContainedNetns(path string) (*os.File, error) {
 		f.Close()
 		return nil, err
 	}
-	if err := rejectHost(f); err != nil {
+	if err := rejectOwn(f); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -309,14 +309,17 @@ func rejectForbiddenNetns(target unix.Stat_t, forbidden ...unix.Stat_t) error {
 	}
 	for _, namespace := range forbidden {
 		if sameNetns(target, namespace) {
-			return errors.New("refusing agent or host network namespace")
+			return errors.New("refusing agent network namespace")
 		}
 	}
 	return nil
 }
 
-func rejectHost(f *os.File) error {
-	own, host, err := anchorStats()
+// rejectOwn is a distinct-agent namespace guard, not a host-inode guard.
+// Host rejection relies on the READY CRI Pod UID/PodIP/cgroup binding and
+// the selected target's exact eth0 IPv4 check before any mutation.
+func rejectOwn(f *os.File) error {
+	own, err := ownStat()
 	if err != nil {
 		return err
 	}
@@ -324,7 +327,7 @@ func rejectHost(f *os.File) error {
 	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
 		return err
 	}
-	return rejectForbiddenNetns(target, own, host)
+	return rejectForbiddenNetns(target, own)
 }
 
 // InNamespace pins the calling thread throughout backend creation and execution.
@@ -342,7 +345,7 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 	if e = checkThreadOwn(); e != nil {
 		return e
 	}
-	if e = rejectHost(target); e != nil {
+	if e = rejectOwn(target); e != nil {
 		return e
 	}
 	if e = unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); e != nil {

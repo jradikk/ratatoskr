@@ -80,12 +80,10 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903):
     assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
     assert pod["volumes"] == [
         {"name": "cri-socket", "hostPath": {"path": socket, "type": "Socket"}},
-        {"name": "host-netns", "hostPath": {"path": "/proc/1/ns/net", "type": "File"}},
         {"name": "netns", "hostPath": {"path": "/var/run/netns", "type": "DirectoryOrCreate"}},
     ]
     assert container["volumeMounts"] == [
         {"name": "cri-socket", "mountPath": socket, "readOnly": True},
-        {"name": "host-netns", "mountPath": "/var/run/ratatoskr/host-netns", "readOnly": True},
         {"name": "netns", "mountPath": "/var/run/netns", "readOnly": True,
          "mountPropagation": "HostToContainer"},
     ]

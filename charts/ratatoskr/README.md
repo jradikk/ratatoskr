@@ -71,8 +71,7 @@ judge endpoint readiness.
 
 The agent runs as root with hostPID and a separate Pod network namespace
 (`hostNetwork: false`), NET_ADMIN/SYS_ADMIN (plus BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
-plus a read-only host-PID-1 network namespace anchor bind-mounted from
-`/proc/1/ns/net` at `/var/run/ratatoskr/host-netns`,
+with no host network namespace bind mount,
 and a cluster-wide token-request permission for short-lived bound registration.
 **Treat the agent as node-root-equivalent** and restrict its placement and
 ability to modify its ServiceAccount. In agent mode only, it may GET

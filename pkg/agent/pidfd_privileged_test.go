@@ -61,4 +61,24 @@ func TestPrivilegedCRIPathPodIPMismatch(t *testing.T) {
 	if err := verifyTargetPodIPv4(netip.MustParseAddr("10.10.0.2")); err != nil {
 		t.Fatal(err)
 	}
+	// A host-like secondary physical interface with its own IPv4 must not
+	// pass even when a malicious namespace reports the expected eth0 PodIP.
+	extra := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ens5"}}
+	if err := netlink.LinkAdd(extra); err != nil {
+		t.Fatal(err)
+	}
+	ens, err := netlink.LinkByName("ens5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := netlink.ParseAddr("192.0.2.11/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.AddrAdd(ens, secondary); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyTargetPodIPv4(netip.MustParseAddr("10.10.0.2")); err == nil {
+		t.Fatal("host-like secondary interface accepted")
+	}
 }

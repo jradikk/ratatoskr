@@ -23,8 +23,7 @@ func validOwnPod() (*corev1.Pod, OwnPod) {
 	for _, field := range fields {
 		env = append(env, corev1.EnvVar{Name: field.name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: field.path}}})
 	}
-	file := corev1.HostPathFile
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: false, HostPID: true, ServiceAccountName: "ratatoskr-agent", Volumes: []corev1.Volume{{Name: hostNetnsVolume, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc/1/ns/net", Type: &file}}}}, Containers: []corev1.Container{{Name: "agent", Env: env, VolumeMounts: []corev1.VolumeMount{{Name: hostNetnsVolume, MountPath: hostNetnsMount, ReadOnly: true}}}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: id.Namespace, Name: id.Name, UID: types.UID(id.UID)}, Spec: corev1.PodSpec{NodeName: id.Node, HostNetwork: false, HostPID: true, ServiceAccountName: "ratatoskr-agent", Containers: []corev1.Container{{Name: "agent", Env: env}}}}
 	return pod, id
 }
 func TestTrustedOwnPodIdentity(t *testing.T) {
@@ -42,24 +41,6 @@ func TestTrustedOwnPodIdentity(t *testing.T) {
 		{"host network", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostNetwork = true }},
 		{"nonhost PID", func(p *corev1.Pod, _ *OwnPod) { p.Spec.HostPID = false }},
 		{"service account mismatch", func(p *corev1.Pod, _ *OwnPod) { p.Spec.ServiceAccountName = "default" }},
-		{"missing anchor volume", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes = nil }},
-		{"wrong anchor source", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes[0].HostPath.Path = "/proc/self/ns/net" }},
-		{"wrong anchor volume type", func(p *corev1.Pod, _ *OwnPod) {
-			other := corev1.HostPathDirectory
-			p.Spec.Volumes[0].HostPath.Type = &other
-		}},
-		{"missing anchor type", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Volumes[0].HostPath.Type = nil }},
-		{"missing anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts = nil }},
-		{"writable anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].ReadOnly = false }},
-		{"wrong anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].MountPath = "/var/run/other" }},
-		{"wrong anchor mount name", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].Name = "other" }},
-		{"subpath anchor mount", func(p *corev1.Pod, _ *OwnPod) { p.Spec.Containers[0].VolumeMounts[0].SubPath = "net" }},
-		{"duplicate anchor mount", func(p *corev1.Pod, _ *OwnPod) {
-			p.Spec.Containers[0].VolumeMounts = append(p.Spec.Containers[0].VolumeMounts, p.Spec.Containers[0].VolumeMounts[0])
-		}},
-		{"foreign anchor mount", func(p *corev1.Pod, _ *OwnPod) {
-			p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "other", VolumeMounts: p.Spec.Containers[0].VolumeMounts})
-		}},
 		{"deleting", func(p *corev1.Pod, _ *OwnPod) { now := metav1.Now(); p.DeletionTimestamp = &now }},
 		{"forged env", func(p *corev1.Pod, _ *OwnPod) {
 			p.Spec.Containers[0].Env[0].ValueFrom = nil
@@ -82,15 +63,6 @@ func TestTrustedOwnPodIdentity(t *testing.T) {
 		})
 	}
 }
-func TestHostNetnsMountFailsClosedWithoutVerifiedNSFS(t *testing.T) {
-	if _, err := openHostNetnsAnchor("/proc/1/ns/net"); err == nil {
-		t.Fatal("arbitrary PID namespace path accepted")
-	}
-	if _, err := openHostNetnsAnchor(hostNetnsMount); err == nil {
-		t.Fatal("absent host namespace mount accepted")
-	}
-}
-
 func TestUncachedOwnPodRecheck(t *testing.T) {
 	p, id := validOwnPod()
 	scheme := runtime.NewScheme()
@@ -112,9 +84,9 @@ func TestUncachedOwnPodRecheck(t *testing.T) {
 		t.Fatal("API unavailable accepted")
 	}
 }
-func TestSeparateAnchorsRejectOwnAndHost(t *testing.T) {
-	if verifiedNamespaces.Load() != nil {
-		t.Skip("another test established process anchors")
+func TestOwnNamespaceAnchorRejectsOwnAndStaleFD(t *testing.T) {
+	if verifiedOwn.Load() != nil {
+		t.Skip("another test established process anchor")
 	}
 	goruntime.LockOSThread()
 	defer goruntime.UnlockOSThread()
@@ -123,37 +95,35 @@ func TestSeparateAnchorsRejectOwnAndHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer own.Close()
-	// Without hostPID in the unit process, PID1's netns may be the same as
-	// ours. Never silently treat equal namespaces as a safe host anchor.
-	if _, err := validateAnchors(own, own); err == nil {
-		t.Fatal("agent namespace accepted as host PID1 anchor")
-	}
 	ordinary, err := os.CreateTemp(t.TempDir(), "not-a-network-namespace")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ordinary.Close()
-	if _, err := validateAnchors(own, ordinary); err == nil {
-		t.Fatal("regular file accepted as host namespace anchor")
-	}
-	if _, err := validateAnchors(ordinary, own); err == nil {
+	if _, err := validateOwnAnchor(ordinary); err == nil {
 		t.Fatal("regular file accepted as agent namespace anchor")
 	}
-	if err := rejectHost(own); err == nil {
-		t.Fatal("unbootstrapped own namespace accepted")
+	if err := rejectOwn(own); err == nil {
+		t.Fatal("unbootstrapped namespace accepted")
 	}
 	if err := checkThreadOwn(); err == nil {
-		t.Fatal("unbootstrapped agent thread accepted")
+		t.Fatal("unbootstrapped thread accepted")
 	}
-	// A synthetic host inode exercises the rejection independently from the
-	// privileged two-netns component regression below.
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(own.Fd()), &stat); err != nil {
+	anchor, err := validateOwnAnchor(own)
+	if err != nil {
 		t.Fatal(err)
 	}
-	verifiedNamespaces.Store(&namespaceAnchors{ownFD: own, hostFD: own, ownStat: stat, hostStat: unix.Stat_t{Dev: stat.Dev, Ino: stat.Ino + 1}})
-	defer verifiedNamespaces.Store(nil)
-	if err := checkThreadOwn(); err == nil {
-		t.Fatal("mismatched host anchor accepted")
+	verifiedOwn.Store(anchor)
+	defer verifiedOwn.Store(nil)
+	if err := checkThreadOwn(); err != nil {
+		t.Fatal(err)
 	}
+	if err := rejectOwn(own); err == nil {
+		t.Fatal("agent netns accepted as target")
+	}
+	verifiedOwn.Store(&ownNamespaceAnchor{fd: own, stat: unix.Stat_t{Dev: anchor.stat.Dev, Ino: anchor.stat.Ino + 1}})
+	if err := checkThreadOwn(); err == nil {
+		t.Fatal("stale pinned agent namespace accepted")
+	}
+	verifiedOwn.Store(anchor)
 }
