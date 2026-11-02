@@ -125,12 +125,13 @@ func TestDefaultedOwnedGatewayDeploymentDoesNotUpdateOrRecreate(t *testing.T) {
 		t.Fatal("intended image upgrade did not update Deployment")
 	}
 	newTemplate := image.DeepCopy()
-	newTemplate.Spec.Template.Spec.SecurityContext.Sysctls[0].Value = "0"
+	unprivileged := false
+	newTemplate.Spec.Template.Spec.Containers[0].SecurityContext.Privileged = &unprivileged
 	if err := r.apply(context.Background(), gw, newTemplate); err != nil {
 		t.Fatal(err)
 	}
 	if wrap.updates != 2 {
-		t.Fatal("changed sysctl ignored")
+		t.Fatal("changed gateway privilege ignored")
 	}
 	// Probe destination is a security-relevant rendered field, not a server
 	// default; it must still update.

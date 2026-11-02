@@ -20,9 +20,14 @@ and consult its release notes for security fixes.
 - The node agent has host PID access and a CRI socket mount. Treat it as
   **node-root-equivalent**, even though its container is not privileged. Only
   trusted administrators should install or modify the operator and its RBAC.
-- Gateway and upstream containers have network-administration capabilities.
-  An overridden OpenVPN image is trusted code in the gateway's shared network
-  namespace; review and pin it before deployment.
+- The gateway container is **privileged** to configure IPv4 forwarding in
+  its own Pod network namespace when `/proc/sys` would otherwise be read-only.
+  This is broader than a bounded capability grant and requires an operator-
+  controlled namespace admitting privileged Pods. It does not use hostNetwork,
+  hostPID or hostPath, but privileged runtime isolation is substantially weaker.
+  The OpenVPN upstream container remains nonprivileged with NET_ADMIN/MKNOD;
+  an overridden upstream image is trusted code in the shared gateway Pod network
+  namespace. Review and pin gateway and upstream images before deployment.
 - Namespace labels used by `allowedNamespaces.namespaceSelector` are access
   controls. Restrict who can change them. A missing selector denies all access;
   an empty selector allows all namespaces.

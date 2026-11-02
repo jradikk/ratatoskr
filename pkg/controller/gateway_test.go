@@ -96,11 +96,11 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 	}
 	dep := objs[2].(*appsv1.Deployment)
 	tpl := dep.Spec.Template
-	if sc := tpl.Spec.SecurityContext; sc == nil || !reflect.DeepEqual(sc.Sysctls, []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}) {
-		t.Fatalf("gateway must request exactly its namespaced forwarding prerequisite: %+v", sc)
+	if tpl.Spec.SecurityContext != nil && len(tpl.Spec.SecurityContext.Sysctls) != 0 {
+		t.Fatalf("gateway must not require kubelet unsafe sysctl allowlist: %+v", tpl.Spec.SecurityContext)
 	}
 	if tpl.Spec.HostNetwork || tpl.Spec.HostPID || tpl.Spec.HostIPC {
-		t.Fatal("forwarding prerequisite must not enable host namespaces")
+		t.Fatal("privileged gateway must remain in a Pod network/PID namespace")
 	}
 	if tpl.Labels[GatewayLabel] != "" || tpl.Labels[IdentityLabel] != "edge" {
 		t.Fatal("gateway pod selected as workload")
@@ -126,8 +126,9 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 			t.Fatal("gateway has secret mount")
 		}
 	}
-	if u.VolumeMounts[0].Name != "upstream" || len(g.SecurityContext.Capabilities.Add) != 1 || len(u.SecurityContext.Capabilities.Add) != 2 {
-		t.Fatal("capability or secret isolation incorrect")
+	if u.VolumeMounts[0].Name != "upstream" || g.SecurityContext.Privileged == nil || !*g.SecurityContext.Privileged ||
+		u.SecurityContext.Privileged != nil && *u.SecurityContext.Privileged || len(u.SecurityContext.Capabilities.Add) != 2 {
+		t.Fatal("gateway privilege, upstream capability or secret isolation incorrect")
 	}
 }
 func TestOperatorOnlyUpstreamProbe(t *testing.T) {
@@ -166,52 +167,54 @@ func TestOperatorOnlyUpstreamProbe(t *testing.T) {
 	}
 }
 
-func TestGatewayForwardingSysctlBoundToPodOnly(t *testing.T) {
-	r, gw := fixture(t)
-	gw.Status.GatewayID = 7
-	objects, err := r.render(gw, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
-	want := []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}
-	if pod.SecurityContext == nil || !reflect.DeepEqual(pod.SecurityContext.Sysctls, want) {
-		t.Fatalf("gateway Pod must carry exactly scoped forwarding sysctl: %+v", pod.SecurityContext)
-	}
-	for _, container := range pod.Containers {
-		if container.SecurityContext == nil || container.SecurityContext.Privileged != nil && *container.SecurityContext.Privileged {
-			t.Fatal("Pod forwarding sysctl must not broaden container privileges")
+func TestGatewayPrivilegeScopedToGatewayContainer(t *testing.T) {
+	for _, backend := range []string{"iproute", "ebpf"} {
+		for _, mode := range []string{"none", "wireguard"} {
+			if backend == "ebpf" && mode == "wireguard" {
+				continue
+			}
+			t.Run(backend+"/"+mode, func(t *testing.T) {
+				r, gw := fixture(t)
+				r.Options.Datapath = backend
+				gw.Status.GatewayID = 7
+				gw.Spec.Encryption = mode
+				objects, err := r.render(gw, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
+				if pod.SecurityContext != nil && len(pod.SecurityContext.Sysctls) > 0 {
+					t.Fatal("Gateway Pod requested unsafe sysctl allowlist")
+				}
+				if pod.HostNetwork || pod.HostPID || pod.HostIPC {
+					t.Fatal("privileged gateway shares a host namespace")
+				}
+				for _, volume := range pod.Volumes {
+					if volume.HostPath != nil {
+						t.Fatal("gateway Pod acquired hostPath")
+					}
+				}
+				if len(pod.Containers) != 2 {
+					t.Fatal("gateway or upstream container absent")
+				}
+				gateway, upstream := pod.Containers[0], pod.Containers[1]
+				if gateway.Name != "gateway" || gateway.SecurityContext == nil || gateway.SecurityContext.Privileged == nil || !*gateway.SecurityContext.Privileged {
+					t.Fatal("only gateway needs privileged sysctl access")
+				}
+				if gateway.SecurityContext.AllowPrivilegeEscalation != nil && !*gateway.SecurityContext.AllowPrivilegeEscalation {
+					t.Fatal("privileged gateway falsely advertises no-new-privileges")
+				}
+				if gateway.SecurityContext.Capabilities != nil {
+					t.Fatal("privileged gateway falsely advertises bounded capabilities")
+				}
+				if upstream.Name != "upstream" || upstream.SecurityContext == nil || upstream.SecurityContext.Privileged != nil && *upstream.SecurityContext.Privileged ||
+					upstream.SecurityContext.AllowPrivilegeEscalation == nil || *upstream.SecurityContext.AllowPrivilegeEscalation ||
+					!reflect.DeepEqual(upstream.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "MKNOD"}) ||
+					!reflect.DeepEqual(upstream.SecurityContext.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+					t.Fatal("upstream confinement changed with gateway privilege")
+				}
+			})
 		}
-		if container.Name == "gateway" && !reflect.DeepEqual(container.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN"}) {
-			t.Fatal("gateway forwarding prerequisite changed gateway capabilities")
-		}
-		if container.Name == "upstream" && !reflect.DeepEqual(container.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "MKNOD"}) {
-			t.Fatal("gateway forwarding prerequisite changed upstream capabilities")
-		}
-	}
-}
-
-func TestGatewayForwardingSysctlExactForModes(t *testing.T) {
-	for _, mode := range []string{"none", "wireguard"} {
-		t.Run(mode, func(t *testing.T) {
-			r, gw := fixture(t)
-			gw.Status.GatewayID = 7
-			gw.Spec.Encryption = mode
-			if mode == "wireguard" {
-				gw.Namespace = r.Options.OperatorNamespace
-			}
-			objects, err := r.render(gw, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pod := objects[2].(*appsv1.Deployment).Spec.Template.Spec
-			if pod.SecurityContext == nil || !reflect.DeepEqual(pod.SecurityContext.Sysctls, []corev1.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}}) {
-				t.Fatalf("unsupported gateway forwarding sysctl set: %+v", pod.SecurityContext)
-			}
-			if pod.HostNetwork || pod.HostPID || pod.HostIPC {
-				t.Fatal("gateway forwarding sysctl requires pod namespace, not host namespace")
-			}
-		})
 	}
 }
 
@@ -264,8 +267,8 @@ func TestEBPFGatewayRenderingAndWireGuardRefusal(t *testing.T) {
 	if !ebpfEnv {
 		t.Fatalf("missing eBPF gateway mode: %+v", gateway.Env)
 	}
-	if !reflect.DeepEqual(gateway.SecurityContext.Capabilities.Add, []corev1.Capability{"NET_ADMIN", "BPF", "PERFMON"}) {
-		t.Fatalf("gateway eBPF capability scope: %+v", gateway.SecurityContext.Capabilities)
+	if gateway.SecurityContext.Privileged == nil || !*gateway.SecurityContext.Privileged || gateway.SecurityContext.Capabilities != nil {
+		t.Fatalf("gateway eBPF mode must share the same explicit privilege contract: %+v", gateway.SecurityContext)
 	}
 	gw.Spec.Encryption = "wireguard"
 	if _, err := r.render(gw, nil); err == nil {

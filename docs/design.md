@@ -140,7 +140,12 @@ reads an allowlist-sanitized Secret under `/etc/ratatoskr/upstream`, creates
 `upstream0`, leaves default routing and resolver management to the gateway,
 and serves private `/healthz` and `/info` on `127.0.0.1:9901`. The controller
 mounts a Pod-local writable `/dev/net` emptyDir and grants NET_ADMIN/MKNOD to
-the upstream (not `privileged`). The plugin creates `/dev/net/tun` (char 10:200)
+the upstream (not `privileged`). The **gateway container itself is privileged**
+to set `net.ipv4.ip_forward` in its own Pod network namespace when an ordinary
+container's `/proc/sys` is read-only. This broad privilege is not bounded by
+NET_ADMIN/BPF capabilities: use a trusted gateway namespace that admits
+privileged Pods, while `hostNetwork`, `hostPID` and hostPath stay off. No kubelet
+unsafe-sysctl allowlist is requested. The plugin creates `/dev/net/tun` (char 10:200)
 there if absent and verifies device number plus read/write access before
 starting OpenVPN. No chart `gateway.tunDevice` or hostPath fallback exists
 ([ADR-0007](adr/0007-tun-device-access.md)). The configured exit probe is
