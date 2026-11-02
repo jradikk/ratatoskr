@@ -72,6 +72,8 @@ class ApplicabilityTests(unittest.TestCase):
                        lambda d: d["scenarios"][0].update(mode="live"),
                        lambda d: d["scenarios"][0].update(id="invented"),
                        lambda d: d["scenarios"][0].update(implementation="unknown"),
+                       lambda d: d["scenarios"][0].update(component="provider exit"),
+                       lambda d: d["apiScenarios"][0].update(component="policy selection"),
                        lambda d: d["apiScenarios"].pop(),
                        lambda d: d.update(schemaVersion=True))
         for change in alterations:

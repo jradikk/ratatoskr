@@ -1,6 +1,6 @@
-# Agent-mode local k3d component validation; full e2e is deferred to final gate.
+# Agent-mode values for the local k3d environment.
 image:
-  registry: ghcr.io/skaldhall
+  registry: docker.io/jradikk
   tag: dev
   pullPolicy: Never
 driver: agent

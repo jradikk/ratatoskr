@@ -23,8 +23,8 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]
-  # M4 verifies Pod -> ReplicaSet -> owned Deployment before trusting a
-  # public registration CA/WireGuard key from that Pod's annotations.
+  # Verify Pod -> ReplicaSet -> controlled Deployment before trusting a
+  # public registration CA/WireGuard key from the Pod's annotations.
   - apiGroups: [apps]
     resources: [replicasets]
     verbs: [get, list, watch]

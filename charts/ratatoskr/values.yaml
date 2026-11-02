@@ -1,7 +1,6 @@
-# Agent is the production default; init remains available for dev.
-# M6 accepts iproute or ebpf; ebpf is opt-in and requires compatible nodes.
+# Component images share this registry and the chart appVersion tag by default.
 image:
-  registry: ghcr.io/skaldhall
+  registry: docker.io/jradikk
   # Defaults to the chart appVersion when empty.
   tag: ""
   pullPolicy: IfNotPresent
@@ -14,8 +13,7 @@ agent:
   criSocket: /run/containerd/containerd.sock
   resources: {}
 
-# Install into this namespace (defaults to Helm's release namespace). The
-# bootstrap Secret and both webhook configurations are named by the chart.
+# If set, must equal Helm's release namespace; admission TLS uses that namespace.
 operatorNamespace: ""
 clusterDomain: cluster.local
 dns:
@@ -27,8 +25,8 @@ dns:
   upstreamProbeURL: ""
 fwmarkMask: "0x00f00000"
 
-# CIDR overrides passed to the Go processes; podCIDRs may be left empty if
-# the controller detects them from Node specs. Extra CIDRs bypass the gateway.
+# CIDR overrides. Empty podCIDRs lets the controller discover Node PodCIDRs;
+# extraCIDRs bypass the gateway.
 exclusions:
   serviceCIDRs: []
   podCIDRs: []

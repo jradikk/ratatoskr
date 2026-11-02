@@ -42,7 +42,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-ready", action="store_true")
     args = parser.parse_args()
-    result = assess(json.loads((root / "docs/milestones/m9/acceptance-checklist.json").read_text()), required)
+    result = assess(json.loads((root / "test/e2e/release/acceptance.json").read_text()), required)
     print(json.dumps(result, sort_keys=True))
     return 1 if args.require_ready and not result["ready"] else 0
 

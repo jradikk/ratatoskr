@@ -28,7 +28,7 @@ const (
 	RouteProtocol               = 186
 )
 
-// Backend is implemented by iproute and (in M6) ebpf. Neither CRDs nor the
+// Backend is implemented by iproute and ebpf. Neither CRDs nor the
 // controller depend on backend-specific tunnel, routing or map representations.
 type Backend interface {
 	ApplyClient(context.Context, ClientConfig) error

@@ -1,221 +1,48 @@
-# M8 incomplete coverage matrix
+# Compatibility inventory and selective runners
 
-## Pure applicability inventory (not an acceptance or waiver)
+`coverage.json` declares five axes (CNI, mesh, driver, datapath, encryption),
+25 traffic scenarios and six separate API scenarios. `applicability.py` is a
+pure, non-certifying contract: 96 identities per fake/live mode; eBPF+WireGuard
+requires *refusal* evidence, not traffic or a waiver. The other cells are
+candidates, **not** declared supported. `run.py` defaults to a static JSON and
+Markdown inventory outside the checkout, without cluster or credential access.
+The checked-in matrix executes only two direct-config flannel/no-mesh/init/none
+cells. Separately gated agent/WireGuard/HA/Calico fixtures do **not** silently
+promote matrix cells. Missing or skipped evidence leaves status **INCOMPLETE**
+and exit **4**; failure returns 1, invalid/unauthorized invocation returns 2.
+A passing selected subset never makes the entire matrix green.
 
-`applicability.py` reads the existing `coverage.json` **only when explicitly
-called by an offline reviewer**; it cannot access Kubernetes, run traffic,
-change cluster state, or mark `coverage.json`/the release ledger PASSED. It
-requires the exact 4×3×2×2×2 axis contract and 25 known traffic scenarios;
-schema/axis/scenario drift blocks until reviewed. `cells(coverage, "fake")`
-and `cells(coverage, "live")` each enumerate 96 distinct identities. The only
-explicitly unsupported cells are the **24 eBPF+WireGuard combinations per
-mode**: they require observed, authorized refusal evidence, **not** a traffic
-PASS or a waiver. The other 72 are traffic-evidence *candidates*, not a
-statement that those combinations are verified supported.
-
-`decide(coverage, cell)` returns `traffic-required` or `refusal-required`.
-`decide(coverage, cell, scenario)` returns `traffic-required` or
-`not-applicable` after the scenario's declared fake/live mode, specific
-driver/datapath/encryption and known unencrypted eBPF tunnel constraints.
-For an unsupported cell, every traffic scenario is `not-applicable` **only
-because the whole cell requires refusal evidence**. A scenario's
-`not-applicable` result cannot remove that cell from the 96-cell inventory,
-excuse a failed required test, or count as acceptance. Every decision explicitly
-includes `accepted: false`; independent human review remains mandatory before
-any scenario or compatibility claim. No provider/disruption traffic is inferred
-from fake mode and no internet query is made by this contract.
-
-Run offline only:
+Offline validation:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/matrix -p test_applicability.py
+PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/matrix/static-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 test/e2e/matrix/admission-static-check.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s test/e2e/matrix -p 'test_*.py'
 ```
 
-## Existing-release API/admission-only tier (final gate only)
+Explicit execution requires an operator-approved existing release, context and
+images plus `RATATOSKR_E2E_FINAL_GATE=1` and `--execute`. The fake/live wrappers
+forward options to `run.py`: repeated `--cell=<id>`, `--report-dir=<new path
+outside checkout>`, `--no-import`, `--no-build`, `--skip`,
+`--api-admission-only` or `--with-api-admission`. Image/build provenance is a
+separate approval; absence of a live OpenVPN profile is SKIPPED, not success.
+Runs are serialized under a process lock; a failed cell stops the sequence.
+`hack/m1-proof.sh` uses the established k3d lifecycle for the two direct-config
+cells, verifies prerequisites, and cleans up private input and owned resources.
+Never paste VPN profiles, Secret data, token-bearing URLs, raw API errors or
+packet payloads into reports. SIGKILL/API outage requires operator orphan
+inspection; cleanup failure cannot count as a pass.
 
-Use `--execute --api-admission-only` to run only bounded API assertions, or
-`--with-api-admission` to run them before selected traffic scaffolds. Both still
-require `RATATOSKR_E2E_FINAL_GATE=1`; default static mode never loads/executes the
-API runner. API-only requires no VPN profile and never creates a cluster,
-builds/imports images, upgrades/reconfigures the release or starts workload Pods.
+`admission.py` tests the release/webhook/API path without a healthy VPN. It
+requires approved immutable controller/webhook runtime image IDs. The Gateway
+uses a deliberately absent Secret; workload CREATE and policy are server-dry-
+run except one inert scheduling-gated UPDATE-validation Pod. That Pod must have
+an exact never-matching nodeSelector, no execution/PodIP, UID-pinned metadata-
+only dry-run updates and verified deletion before namespace cleanup. See
+`admission-report.md` for the independent API-only contract; its result is
+recorded in `apiAdmission`, **not** as traffic/CNI/mesh coverage.
 
-Both **EXPECTED_CONTROLLER_IMAGE_ID** and **EXPECTED_WEBHOOK_IMAGE_ID** are
-required exact immutable runtime `containerStatuses[].imageID` strings approved
-by the parent/operator for the current builds. Missing expectations or mutable
-`:dev` tags are blocked before API access. Never blindly copy IDs from a known
-stale deployment to satisfy this guard. The parent must rebuild/import/roll the
-reported stale M5 release first. The tier verifies current Deployment→ReplicaSet→
-Pod ownership, rollout readiness, matching runtime IDs, aligned driver/datapath
-and fail-closed dry-run-safe webhook registration. An expected digest does not
-prove source provenance beyond the parent/operator's explicit build approval.
-
-It reuses only an existing Ready flannel/no-mesh three-node context. Complete
-non-secret Kubernetes JSON files (a YAML subset) are used—not snippets/patches.
-The 240-second total API budget, per-command timeouts and separate bounded cleanup
-cover temporary UUID-named namespaces and a Gateway whose upstream Secret is
-**deliberately nonexistent**. No Secret is created/read. Controller allocation,
-Ready=False/SecretUnavailable and absence of healthy endpoints/Deployment are
-required. Workload CREATE/Policy checks remain dry-run; the UPDATE tier persists
-one explicitly inert, scheduling-gated Pod only after dry-run barrier checks.
-It never schedules or runs a container.
-
-Assertions cover:
-- Server dry-run of both checked-in CRDs plus complete Gateway/Policy instances.
-- Authorized Pod CREATE through configured mutation/validation, with exact init/
-  waiter image, security, pending readiness and Downward-API or agent-shadow fields.
-- Forbidden namespace, missing gateway, hostNetwork and reserved-init CREATE
-  denials with precise Ratatoskr reasons—not generic API/PSA/timeouts.
-- **Only on an already-eBPF controller:** WireGuard Gateway reconciles as
-  Ready=False/Unsupported before Secret lookup and renders no Deployment. This
-  is controller rejection, **not webhook/schema rejection**. On iproute this is
-  SKIPPED/not covered; the release is never changed to manufacture evidence.
-
-Temporary namespaces/Gateway are deleted. No raw provider/API errors, pod logs,
-Secret bytes or live environment inputs are logged/propagated to kubectl. Fixture
-files retained for orphan cleanup contain non-secret objects only. SIGKILL/API
-loss still requires parent/operator cleanup.
-
-Evidence appears in the separate `apiAdmission` inventory section only after
-actual assertions plus successful release preflight/cleanup. It awards no traffic,
-CNI/mesh/agent coverage; full matrix remains INCOMPLETE/nonzero. Independent
-validator metadata UPDATE checks now have the separate scenario below; healthy
-gateway selection remains **uncovered**. See `admission-report.md`.
-
-### Approved inert UPDATE fixture
-
-A fresh complete Pod CREATE document adds exactly one unique schedulingGate and
-`nodeSelector: {ratatoskr-e2e-never-schedule: <unique suffix>}`. No node may have
-that label. The runner verifies the existing three-node API again, then performs
-server CREATE dry-run and requires the exact gate/selector to survive mutation,
-no nodeName/PodIP/startTime/container state, and the normal admission security
-contract. Rejected/pruned/changed scheduling fields fail closed **before Pod
-creation**; no ungated fallback exists.
-
-Only after those checks does it persist that exact original CREATE manifest
-(the already-mutated output is not resubmitted through CREATE). The persisted
-Pod must retain exact barriers and remain unassigned/unstarted. Before each of
-four UPDATE cases, it refreshes node labels and the Pod UID/resourceVersion,
-checks barriers/no execution and admission security, then submits a complete
-metadata-only `replace --dry-run=server` document. Cases:
-
-1. Benign unrelated annotation allowed and reflected in returned dry-run output.
-2. Gateway label tamper denied by exact Ratatoskr immutability reason.
-3. Gateway namespace label/annotation tamper denied by exact immutability reason.
-4. Client-config annotation tamper denied by exact config immutability reason.
-
-The registered mutator must remain CREATE-only, so these exercise independent
-Pod UPDATE validation. Conflict, timeout, unrelated API error or another webhook
-reason is not a pass. After every attempt, the Pod is re-read; exact barriers,
-no execution, UID/spec/labels/annotations must be unchanged (independent scheduler
-resourceVersion/condition updates are tolerated). Barriers are never removed.
-
-Cleanup first inspects/deletes the exact Pod with a bounded wait and checks
-absence, **before** deleting the temporary namespaces. Unsafe state, deletion
-failure or leftovers make cleanup/report FAILED even if earlier checks passed.
-This is separate `api-independent-update-validation` API evidence only; parent
-runs it at final gate, child executes cluster-free synthetic tests only.
-
-Allowed child validation: `python3 test/e2e/matrix/admission-static-check.py` uses
-synthetic complete fixtures, compiles Python and prohibits subprocess/API calls.
-No API runner main or e2e was executed during authoring.
-
-**All traffic execution is deferred to the final project gate.** The default
-CI/live wrappers now build an inventory, not an e2e pass. They return **4** for
-INCOMPLETE, including explicit or missing-profile skips. A listed unsupported or
-unimplemented cell is SKIPPED/not covered. A selected subset passing does not
-make the full matrix green. Error/failed run = 1; bad invocation or unauthorized
-execution = 2. There is deliberately no green matrix exit while requirements
-remain unimplemented.
-
-`coverage.json` is the auditable source: 96 cells per fake/live mode and 25 named
-scenario definitions. It is derived from docs/design.md and M2–M7 reports, not an
-invented live steps 1–13 checklist. Only flannel/none/init/{iproute,ebpf}/none has
-a **matrix direct-config runner**. Separate, explicitly gated advanced fixtures
-have yielded scoped flannel/none/agent/iproute synthetic WireGuard peer lifecycle,
-fresh-connection HA and witnessed outage/recovery evidence, plus independent
-owned-Pod Kubernetes TokenReview semantics (not the gateway's call). They are
-not wired into `coverage.json` or a full-matrix pass. Cilium,
-Cilium-WireGuard, Calico and mesh traffic fixtures remain unimplemented;
-eBPF+WireGuard is unsupported and not downgraded. Planned Cartesian combinations
-are not a compatibility guarantee.
-
-## Static output and allowed validation
-
-The wrappers' default mode reads local file/tool presence and builds JSON +
-Markdown inventory outside the repo. It performs no subprocess/cluster request,
-credential read, image operation or resource allocation. Tool presence is not a
-resource/capability/image/runtime proof. Even default/skip CLI paths were **not
-executed during authoring**; only the static checks below were run:
-
-```sh
-for script in test/e2e/ci/run.sh test/e2e/live/run.sh test/e2e/m1/run.sh test/e2e/m1/extended.sh; do
-  bash -n "$script" || exit
-done
-sh -n test/e2e/m1/ipinfo.sh
-python3 test/e2e/m1/static-check.py
-python3 test/e2e/matrix/static-check.py
-```
-
-`static-check.py` loads pure inventory/config functions without calling runner
-main. It prohibits subprocess calls while building inventory, checks 96 unique
-cells per mode, checks missing evidence cannot be passed, and validates five
-rendered non-secret selector JSON variants. M1's static validator parses all
-nine complete YAML templates (25 documents), including eBPF capability scope.
-No CLI inventory reports are claimed as e2e results.
-
-## Future final-gate use — not authorization to execute now
-
-At the final gate the wrappers accept `--execute` **and require**
-`RATATOSKR_E2E_FINAL_GATE=1` in the environment. Options:
-
-- `--mode=fake|live` (wrappers force their own mode), repeated `--cell=<id>` to
-  select inventory cells; default executes the two implemented cells only.
-- `--report-dir=/outside/repo/path`: JSON/Markdown inventory plus private
-  per-cell checkpoint reports. Defaults to a private `/tmp/ratatoskr-m8-*` dir.
-- `--no-build`: accepted; operator/parent already builds all local images.
-- `--no-import`: images are already imported into the reused cluster.
-- `--skip`: no execution, but still INCOMPLETE/nonzero, never a pass.
-
-Cell IDs include `flannel/none/init/iproute/none` and
-`flannel/none/init/ebpf/none`. Selecting an unimplemented cell yields no runner
-execution and cannot inherit another cell's result. Exact checkpoint evidence
-from the inner JSON is required before any individual scenario becomes PASSED.
-Missing checkpoints are SKIPPED/not covered; external inconclusive remains so.
-
-All selected runs are serial under a Linux process lock. Each calls the existing
-bounded `hack/m1-proof.sh`, which uses mandatory `hack/k3d-up.sh` creation
-resource/module preflight and flannel 1-server/2-agent topology. No alternate CNI
-or mesh is installed here. Other existing Ratatoskr variants must be removed
-using the existing lifecycle scripts before a flannel proof; no VM manipulation
-or preflight bypass is added. The inner run removes its namespace/Secrets,
-private input/payload files and newly-created cluster; reused cluster survives.
-On a failed/timeout/cleanup run, orchestration stops rather than starting the
-next cell on potentially dirty state. INT/TERM is forwarded to the active child
-for bounded cleanup. SIGKILL/machine loss still requires operator orphan cleanup.
-
-Extended fake checks are controlled direct-datapath tests: include/exclude CIDR
-and TCP port selection, healthy endpoint withdrawal against the same reachable
-remote with API/DNS preservation and steering restore, 4.5 MiB size/SHA256 payload,
-measured MTU/MSS, and private health gauge 1/0/1 with PodIP:9902 denial. The remote
-/32 is deliberately removed from pod exclusions only for selector tests; its
-ordinary ClusterIP is not claimed to survive DNAT into that selected address
-while the endpoint is withdrawn. It is restored for the normal M1 checks.
-No real cloud-metadata request, raw capture, provider log or token dump occurs.
-
-Live mode retains M1's exact inputs: outside-repo RATATOSKR_E2E_OVPN and optional
-RATATOSKR_E2E_OVPN_AUTH paths, optional literal env IPINFO_TOKEN written privately
-then projected as a Secret, optional RATATOSKR_E2E_EXPECT_COUNTRY. Missing profile
-skips before cluster tooling, and private curl config keeps tokens out of exec
-argv/logs. HTTP 429 gets at most one 10-second retry; external failure is
-inconclusive. Live down/up metrics and provider disruption remain not covered.
-Multiple VPN IP checks (including independent plugin health polling) can consume
-provider/API rate limits; select only the required cell rather than repeating.
-
-## Blocking gaps
-
-See docs/milestones/m8/report.md and the inventory: CRD/admission, agent/restricted
-workloads and restart adoption, authenticated WireGuard and capture denial,
-gateway DNS/metadata/spoof/PMTU, HA, full telemetry, alternative CNI/mesh fixtures,
-Linux 5.10 and late-IPv6/policy-failure runtime safety remain missing. Exact
-original live 1–13 checklist must be supplied before final live acceptance.
-This scaffold is **not complete M8 compatibility acceptance**.
+The inventory's named scenario and API identities are stable review boundaries;
+legacy inner checkpoint IDs such as `m8-*` remain protocol identifiers. An
+untested CNI/mesh combination, provider request, PMTU case or kernel runtime
+must be reported as missing evidence, never inferred from another cell.

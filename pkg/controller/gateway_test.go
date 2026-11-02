@@ -313,7 +313,7 @@ func TestReconcileAllocationAndUnsupported(t *testing.T) {
 	if gw.Status.GatewayID != id || meta.IsStatusConditionTrue(gw.Status.Conditions, "Ready") {
 		t.Fatalf("invalid unready status %+v", gw.Status)
 	}
-	// WireGuard is supported beginning with M4; a still-unsupported value
+	// WireGuard encryption is supported; a still-unsupported value
 	// must instead remove a previously rendered gateway deployment.
 	gw.Spec.Replicas = 33
 	if err := r.Update(ctx, gw); err != nil {
@@ -556,7 +556,7 @@ func TestPolicyNoLongerBlocksGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	if meta.IsStatusConditionTrue(gw.Status.Conditions, "Unsupported") {
-		t.Fatal("M3 policy incorrectly marked gateway unsupported")
+		t.Fatal("policy incorrectly marked gateway unsupported")
 	}
 	var dep appsv1.Deployment
 	if err := r.Get(ctx, req.NamespacedName, &dep); err != nil {

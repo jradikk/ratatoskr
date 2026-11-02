@@ -58,6 +58,6 @@ func TestExplicitManualConfigPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.MTU != 1400 || cfg.PodIP.String() != "10.42.1.8" {
-		t.Fatal("manual M1 config changed")
+		t.Fatal("manual client config changed")
 	}
 }

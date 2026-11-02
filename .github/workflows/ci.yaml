@@ -34,6 +34,13 @@ jobs:
         run: |
           for f in hack/*.sh test/e2e/*/*.sh; do if [[ -f $f ]]; then bash -n "$f"; fi; done
           helm lint charts/ratatoskr
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Render and validate chart security and packaging
+        run: |
+          python3 -m pip install PyYAML
+          python3 charts/ratatoskr/tests/check_chart.py
       - name: gofmt / go mod tidy clean
         run: |
           test -z "$(gofmt -s -l $(git ls-files '*.go'))"
@@ -88,7 +95,7 @@ jobs:
             COMPONENT=${{ matrix.component }}
             VERSION=${{ github.sha }}
             COMMIT=${{ github.sha }}
-          tags: ghcr.io/skaldhall/ratatoskr-${{ matrix.component }}:${{ github.sha }}
+          tags: docker.io/${{ github.repository_owner }}/ratatoskr-${{ matrix.component }}:${{ github.sha }}
           sbom: true
           provenance: mode=max
           push: false

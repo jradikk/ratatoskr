@@ -346,7 +346,7 @@ func supportedGateway(g *v1alpha1.EgressGateway) error {
 		return fmt.Errorf("gateway DNS mode %q is unsupported", g.Spec.DNS.Mode)
 	}
 	if g.Spec.Upstream.Type != "openvpn" {
-		return fmt.Errorf("gateway upstream %q is not implemented in M2", g.Spec.Upstream.Type)
+		return fmt.Errorf("gateway upstream %q is not implemented; only openvpn is currently available", g.Spec.Upstream.Type)
 	}
 	if g.Spec.FailMode != "" && g.Spec.FailMode != "closed" {
 		return fmt.Errorf("gateway failMode must be closed")

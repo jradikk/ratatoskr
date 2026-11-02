@@ -1,13 +1,100 @@
-# M2/M3 gateway controller
+# Gateway controller
 
-The controller watches EgressGateway, EgressPolicy, Pod, Namespace, Node, Service, EndpointSlice and legacy Endpoints objects across namespaces. It renders one Deployment, UDP/6081 discovery Service, non-secret `gateway.json` ConfigMap and ingress-only NetworkPolicy per gateway; dns.mode=gateway adds `<gateway>-dns` TCP/UDP53 Service routing to pod1053 (with `publishNotReadyAddresses` for cluster DNS continuity). The Service **must not** be used as the fixed GENEVE client remote: use the healthy `status.endpoints[].podIP` (the real gateway PodIP) for admission.
+This package reconciles `EgressGateway` resources and the Kubernetes objects
+needed to run them. The executable is [cmd/controller](../../cmd/controller/);
+use the [Helm chart](../../charts/ratatoskr/) for deployment and RBAC rather than
+assembling permissions from this package alone.
 
-Required env: `OPERATOR_NAMESPACE`, `GATEWAY_IMAGE`, `OPENVPN_IMAGE`. Optional: `IMAGE_PULL_POLICY`, `DRIVER=init`, `DATAPATH=iproute`, `SERVICE_CIDRS`, `POD_CIDRS`, `EXTRA_CIDRS`, `CLUSTER_DOMAIN`, `GATEWAY_UPSTREAM_DNS_IP`. CIDR values accept comma-separated IPv4 prefixes; service/pod CIDRs auto-detect via ServiceCIDR API and Node specs, with configured fallback. Use RBAC watch/list for gateways, policies, namespaces, pods, Nodes, Services and EndpointSlices; `list` ServiceCIDRs and legacy Endpoints fallback; **get-only Secrets** (uncached GET, never watch/list); create/update/delete owned Deployments, Services, ConfigMaps and NetworkPolicies; update gateway status; publish Events. The manager serves `/healthz` and `/readyz` on port 8081 and optionally elects a leader with `-leader-elect`.
+## Responsibilities
 
-This milestone supports **one replica, no encryption, OpenVPN upstream, cluster/gateway DNS, iproute datapath, init driver**. Unsupported gateway modes are marked `Unsupported`; EgressPolicies no longer block gateway reconciliation (webhook/datapath compile policies) and an owned Deployment is deleted rather than bypassing the VPN. The upstream Secret must contain `client.ovpn`; `auth.txt` and additional relative-path referenced files may also be present. The controller never reads or stores profile content except testing presence of that required key. The Secret is mounted only on the OpenVPN container. Upstream status and measured Pod/GENEVE/upstream MTUs come from the gateway container's port 9900 `/info`, never from the OpenVPN loopback-only 9901 endpoint. Missing/inconsistent MTU measurements prevent Ready; measured IPv4-safe MTU from 576 through 1279 remains Ready but emits a BelowIPv6Minimum warning condition/Event. Do not infer link MTUs from constants.
+- Allocate a persisted, collision-checked GENEVE gateway ID.
+- Select opted-in IPv4 workload PodIPs from explicitly allowed namespaces,
+  including Pods waiting for their datapath init barrier. An absent namespace
+  selector authorizes no workloads.
+- Render an owned Deployment, discovery Service, `gateway.json` ConfigMap and
+  ingress NetworkPolicy. The selected client list is non-secret, but it is an
+  authorization input and must remain controller-owned.
+- Discover Pod/Service exclusion CIDRs and cluster DNS; publish measured MTUs,
+  gateway endpoint identities and readiness conditions.
+- Read gateway port 9900 `/info` and attest its applied-config hash against the
+  exact expected ConfigMap bytes and current gateway Pod UID. A ConfigMap API
+  write is not proof that its projection has been applied in the gateway netns.
+- Reconcile init-driver completion and applied-client acknowledgments. In agent
+  mode the node agent owns workload datapath readiness instead.
 
-Client allowlists include opt-in Pods with a real IPv4 PodIP **even while Pending in an injected init container**; selected namespace labels and gateway-namespace label/annotation apply. Gateway pods have `gateway-name` and `gateway-uid` identity labels, never the workload opt-in `gateway` label. Changing selected Pod labels/IPs updates the ConfigMap; gateway binary must reload this config on update. When the gateway PodIP is lost/changed and selected clients already exist, `ClientRestartRequired=True` and a warning Event signal that **client Pod rollout is required** to replace the fixed GENEVE remote. M2 cannot transparently update an existing client netns; M5 agent mode handles that later.
+The UDP/6081 Service is for discovery, **not** a client GENEVE remote. Clients
+use healthy gateway **PodIPs** from status. The gateway process, not the
+controller, programs its network namespace and polls the upstream's private
+127.0.0.1:9901 health API.
 
-The ingress-only NetworkPolicy selects gateway identity labels, admits UDP6081 and conditional TCP/UDP1053 only from allowed namespace selector + gateway opt-in Pods, permits TCP9900 from any source for kubelet/controller portability, and does **not** restrict gateway egress. For gateway DNS, `CLUSTER_DNS_IP`, `CLUSTER_DOMAIN`, `CLUSTER_CIDRS` (discovered Pod/Service CIDRs for reverse DNS) and `GATEWAY_DNS_LISTEN_ADDR=:1053` are passed to the gateway container; its Pod keeps ClusterFirst policy. DNS Service ClusterIP must exist before publishing Ready. Optional `GATEWAY_UPSTREAM_DNS_IP` is validated as unicast IPv4 and passed as gateway `UPSTREAM_DNS_IP`; otherwise the forwarder chooses its default.
+## Supported combinations
 
-The webhook sets `ratatoskr.skaldhall.io/datapath-ready=pending` on injected workload Pods. Reconciliation promotes it to `true` only after the named `ratatoskr-init` init container reports terminated exit code 0 and a valid PodIP exists. Missing/failed init reports `error`; incomplete init remains `pending`. Pods without the webhook annotation are never promoted, and gateway Pods are never touched.
+The renderer supports 1–32 gateway replicas, `init` or `agent` client drivers,
+`iproute` or opt-in `ebpf` datapaths, and cluster or gateway DNS. The shipped
+upstream is **OpenVPN only**. Both webhook admission and controller
+reconciliation reject every other upstream type. The `custom` enum is reserved
+for future implementations, not a deployable escape hatch; per-resource upstream
+image overrides are also rejected. The plugin contract is contributor guidance,
+not evidence that other upstream images are available.
+
+`wireguard` encrypts the **client-to-gateway GENEVE transport**, not the provider
+VPN. It requires `iproute`, a gateway in the operator namespace and authenticated
+peer registration. The eBPF backend rejects WireGuard rather than falling back
+to plaintext. Unsupported combinations are reported as `Unsupported`; an owned
+Deployment is removed rather than forwarding under an invalid contract.
+
+Init-driver Pods retain their original gateway remote/trust identity. Endpoint
+loss or replacement can set `ClientRestartRequired`: roll out affected clients.
+Agent-driver Pods can reconcile their endpoint in place. Endpoint changes can
+still break established flows; they do not promise transparent session failover.
+
+## Configuration and boundaries
+
+Required controller environment: `OPERATOR_NAMESPACE`, `GATEWAY_IMAGE`,
+`OPENVPN_IMAGE`. Optional values read by `OptionsFromEnv`:
+
+| Environment | Purpose |
+|---|---|
+| `DRIVER`, `DATAPATH` | Client programming driver and backend; the chart defaults to agent/iproute. |
+| `IMAGE_PULL_POLICY` | Pull policy for rendered containers. |
+| `SERVICE_CIDRS`, `POD_CIDRS`, `EXTRA_CIDRS` | Comma-separated IPv4 discovery fallbacks/additional exclusions. |
+| `CLUSTER_DOMAIN` | Cluster DNS suffix; defaults to `cluster.local`. |
+| `GATEWAY_UPSTREAM_DNS_IP` | Optional unicast IPv4 resolver for gateway-mode external DNS. |
+| `GATEWAY_UPSTREAM_PROBE_URL` | Operator-only literal unicast IPv4 HTTP(S) override; no credentials/query/fragment. Empty retains the OpenVPN plugin default. |
+
+The manager exposes `/healthz` and `/readyz` on 8081 and supports
+`-leader-elect`. These are controller-process checks, not VPN or workload
+connectivity proofs.
+
+Secrets are obtained through uncached GETs, never list/watch. The controller
+checks that `client.ovpn` is nonempty; it does not parse or log provider material.
+The Secret is mounted only into the upstream container. OpenVPN validates
+referenced files and sanitizes provider options. Failures use fixed categories
+in status/Events instead of private API/provider error text.
+
+Readiness requires consistent **measured** Pod/GENEVE/upstream MTUs. Do not infer
+link MTUs from defaults. Valid IPv4 MTUs below 1280 emit an IPv6-minimum warning;
+IPv6 forwarding itself is not supported.
+
+Gateway NetworkPolicies constrain ingress, not egress. Port 9900 remains open
+for portable controller/kubelet access. Gateway DNS creates a separate Service
+for TCP/UDP 53 to port 1053 and preserves cluster DNS availability while external
+VPN DNS is unhealthy. WireGuard registration adds its authenticated ingress
+contract. Review [render.go](render.go) and chart policies before tightening or
+exposing these listeners; NetworkPolicy enforcement depends on the CNI.
+
+## Contributing
+
+From the repository root:
+
+```sh
+go test ./pkg/controller/...
+go vet ./pkg/controller/...
+go build -o /tmp/ratatoskr-controller ./cmd/controller
+```
+
+Tests use fake Kubernetes clients and controlled HTTP responses. Changes to
+selection, rendering or endpoint status should cover absent namespace selectors,
+foreign ownership, stale UID/hash acknowledgments and failure cleanup. Avoid
+fixtures containing real profiles, credentials, tokens or private keys. Unit
+checks do not establish a CNI/runtime's live datapath behavior.

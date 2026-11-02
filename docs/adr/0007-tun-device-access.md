@@ -1,26 +1,33 @@
-# ADR-0007: /dev/net/tun access for upstream plugins
+# ADR-0007: `/dev/net/tun` access for the OpenVPN upstream
 
 - Status: Accepted
 - Date: 2026-10-29
 
 ## Context
 
-OpenVPN, AmneziaWG and some IPsec setups need `/dev/net/tun` inside the upstream container, without making the container `privileged`.
+OpenVPN needs character device 10:200 without a privileged container or a
+host-network mount. A read-only image may not have a writable `/dev/net`.
 
 ## Decision
 
-Default `mknod`: the plugin entrypoint creates `/dev/net/tun` (`c 10 200`) with CAP_MKNOD. containerd's default device cgroup allows `c 10:200 rwm`; CRI-O does too via its defaults. Fallback `gateway.tunDevice: hostPath` mounts the host char device (`type: CharDevice`) for runtimes with stricter device policy.
+The controller renders a **Pod-local writable `/dev/net` emptyDir** mounted
+into the upstream container. Its security context grants NET_ADMIN and MKNOD,
+drops all other capabilities and does not set `privileged: true`. The plugin's
+`EnsureTUN` creates `/dev/net/tun` (10:200, mode 0600) if absent, verifies an
+existing path is the right character device and attempts an O_RDWR open before
+starting OpenVPN. If the runtime device cgroup denies access, it fails closed.
+There is **no** chart `gateway.tunDevice` option or implemented hostPath
+fallback; documentation must not invite use of one.
 
 ## Alternatives considered
 
-- Device plugin (e.g. squat/generic-device-plugin): an extra DaemonSet and an extra moving part, for an allowlist that is usually already present.
-- `privileged: true`: far too broad.
+- HostPath `/dev/net/tun`: broadens host device exposure and is not rendered
+  by the current controller.
+- Fully privileged upstream: unnecessarily broad authority.
 
 ## Consequences
 
-The M1 component check (`test/component/tun.yaml`) succeeded on k3d/containerd:
-OpenVPN created `upstream0` using only NET_ADMIN and MKNOD, without privileged
-mode, a VPN profile or external traffic. The temporary namespace was removed.
-This verifies the device access path on that runtime, not the live VPN datapath.
-Other runtime device policies and the hostPath fallback remain to be verified;
-revisit this ADR if a target runtime denies 10:200 by default.
+The Pod-local path avoids reliance on an existing host device node but still
+needs runtime permission for character device 10:200. The disposable component
+fixture exercises one runtime; it does not certify all CRI device policies or
+external VPN connectivity.

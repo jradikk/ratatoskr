@@ -1,7 +1,7 @@
 # M8 — compatibility coverage inventory and deferred scenario scaffold
 
 Status: **static and two direct-config flannel/init fake subsets passed; scoped agent/WireGuard, HA and outage evidence added; full compatibility acceptance remains INCOMPLETE**.
-This report records the M8 authoring-stage static checks and later final-gate follow-ups. Initial fake subsets failed; numbered-client-GENEVE and guarded eBPF update fixes restored positive traffic. A corrected fixture then tested selected and nonselected TCP/8080 against the **same reachable remote PodIP**: both iproute and eBPF inner suites passed serially, including directly reachable endpoint withdrawal. Separately gated flannel/no-mesh agent/iproute runs observed synthetic WireGuard peer startup/revocation, fresh-connection two-replica HA, witnessed outage/recovery with packet-correlated selected-destination fail-close, and independent owned-Pod TokenReview UID/ServiceAccount/audience semantics (not an observed gateway TokenReview call). These subsets do not cover plaintext GENEVE denial or the remaining scenario requirements. The 96-cell matrix returned INCOMPLETE/exit 4; its inventory remains unchanged. The live VPN tier skipped because its profile was unset. No full compatibility/release acceptance is claimed; see `docs/milestones/m9/final-gate.md`.
+This report records the M8 authoring-stage static checks and later final-gate follow-ups. Initial fake subsets failed; numbered-client-GENEVE and guarded eBPF update fixes restored positive traffic. A corrected fixture then tested selected and nonselected TCP/8080 against the **same reachable remote PodIP**: both iproute and eBPF inner suites passed serially, including directly reachable endpoint withdrawal. Separately gated flannel/no-mesh agent/iproute runs observed synthetic WireGuard peer startup/revocation, fresh-connection two-replica HA, witnessed outage/recovery with packet-correlated selected-destination fail-close, and independent owned-Pod TokenReview UID/ServiceAccount/audience semantics (not an observed gateway TokenReview call). These subsets do not cover plaintext GENEVE denial or the remaining scenario requirements. The 96-cell matrix returned INCOMPLETE/exit 4; its inventory remains unchanged. The live VPN tier skipped because its profile was unset. No full compatibility/release acceptance is claimed; see `test/evidence/history/runtime-validation.md`.
 
 ## Audit and implementation
 
@@ -9,7 +9,7 @@ The clean child checkout was synchronized by creating a new branch directly at
 parent commit `67237a9`. The parent had already integrated M1's separate commit,
 so the old child branch could not fast-forward; no reset, merge, parent files or
 uncommitted work were overwritten. This assignment changes only `test/e2e/**`
-and `docs/milestones/m8/**`.
+and `test/evidence/history/compatibility.md`.
 
 Before this change, `test/e2e/ci/run.sh` and `test/e2e/live/run.sh` merely called
 M1's flannel/no-mesh/init/iproute/unencrypted direct-config runner. They exercised
@@ -90,7 +90,7 @@ operations, Docker/image builds/imports, real VPN/profile/token reads or
 Go/component tests. Syntax/static checks alone cannot validate Kubernetes
 admission, BPF loads, VPN routing, fail-close or mesh behavior. The subsequent
 final-gate executions and their **failures/skips** are recorded separately in
-`docs/milestones/m9/final-gate.md`; they do not retroactively turn this static
+`test/evidence/history/runtime-validation.md`; they do not retroactively turn this static
 inventory into a passed compatibility matrix.
 
 ## Required final-gate extensions / blockers

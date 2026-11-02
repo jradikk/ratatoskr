@@ -1,4 +1,4 @@
-"""Pure, non-certifying applicability inventory for the existing M8 matrix.
+"""Pure, non-certifying applicability inventory for the compatibility matrix.
 
 No Kubernetes, runner, filesystem, network, or evidence mutation. The only
 explicitly unsupported combination is eBPF + WireGuard; all remaining cells
@@ -19,6 +19,35 @@ WG = frozenset({"wireguard-registration", "wireguard-plaintext-denial"})
 EBPF = frozenset({"ebpf-tunnel", "ebpf-revocation-failure"})
 EBPF_PLAIN = frozenset({"ebpf-tunnel"})  # Assertion explicitly says unencrypted.
 PROVIDER = frozenset({"public-exit-country", "live-provider-disruption"})
+# Descriptive subsystem is part of the reviewed scenario identity.
+COMPONENTS = {
+    "direct-cluster-baseline": "direct datapath",
+    "controller-admission-selection": "controller and admission",
+    "init-gateway-replacement": "init driver",
+    "selective-cidr-port": "policy selection",
+    "no-endpoint-revocation": "fail-closed routing",
+    "metadata-prohibition": "metadata isolation",
+    "gateway-dns": "DNS forwarding",
+    "payload-integrity": "payload integrity",
+    "measured-mtu-mss": "MTU and MSS",
+    "pmtu-fragmentation": "PMTU and fragmentation",
+    "spoof-geneve": "tunnel isolation",
+    "wireguard-registration": "WireGuard registration",
+    "wireguard-plaintext-denial": "WireGuard plaintext denial",
+    "agent-restricted-workload": "restricted node agent",
+    "agent-restart-endpoint-update": "node agent recovery",
+    "ebpf-tunnel": "eBPF datapath",
+    "ebpf-revocation-failure": "eBPF revocation",
+    "ipv6-runtime-guard": "IPv6 runtime safety",
+    "ha-affinity-failover": "gateway failover",
+    "private-health-metric": "private health telemetry",
+    "full-observability": "observability",
+    "upstream-fail-close-recovery": "upstream recovery",
+    "public-exit-country": "provider exit",
+    "live-provider-disruption": "provider recovery",
+    "cni-mesh-compatibility": "CNI and mesh compatibility",
+}
+
 EXPECTED_SCENARIOS = frozenset({
     "direct-cluster-baseline", "controller-admission-selection", "init-gateway-replacement",
     "selective-cidr-port", "no-endpoint-revocation", "metadata-prohibition", "gateway-dns",
@@ -57,33 +86,34 @@ def validate(coverage):
                 coverage["axes"][axis] != list(VALUES[axis]) for axis in AXES) or
             type(coverage.get("scenarios")) is not list or
             len(coverage["scenarios"]) != len(EXPECTED_SCENARIOS)):
-        raise InvalidInventory("M8 inventory schema/axes require review")
+        raise InvalidInventory("Compatibility inventory schema/axes require review")
     found = set()
     for item in coverage["scenarios"]:
-        if (type(item) is not dict or set(item) != {"id", "milestone", "implementation", "mode", "assertion"} or
+        if (type(item) is not dict or set(item) != {"id", "component", "implementation", "mode", "assertion"} or
                 type(item["id"]) is not str or item["id"] not in EXPECTED_SCENARIOS or
                 item["id"] in found or type(item["assertion"]) is not str or
-                not item["assertion"] or type(item["milestone"]) is not str or
-                not item["milestone"] or type(item["implementation"]) is not str or
+                not item["assertion"] or type(item["component"]) is not str or
+                item["component"] != COMPONENTS.get(item["id"]) or type(item["implementation"]) is not str or
                 not item["implementation"] or
                 item["id"] not in EXPECTED_IMPLEMENTATIONS.get(item["implementation"], ()) or
                 item["mode"] != EXPECTED_MODES.get(item["id"], "both")):
-            raise InvalidInventory("M8 scenario definition requires review")
+            raise InvalidInventory("Compatibility scenario definition requires review")
         found.add(item["id"])
     if found != EXPECTED_SCENARIOS:
-        raise InvalidInventory("M8 scenario set requires review")
+        raise InvalidInventory("Compatibility scenario set requires review")
     # Do not implicitly recategorize a newly introduced API scenario as traffic.
     if (type(coverage.get("apiScenarios")) is not list or
             len(coverage["apiScenarios"]) != 6 or
             any(type(item) is not dict or
-                set(item) != {"id", "milestone", "implementation", "mode", "assertion"} or
-                item.get("mode") != "both" or item.get("implementation") != "api-admission"
+                set(item) != {"id", "component", "implementation", "mode", "assertion"} or
+                item.get("mode") != "both" or item.get("component") != "API and admission" or
+                item.get("implementation") != "api-admission"
                 for item in coverage["apiScenarios"]) or
             {item.get("id") for item in coverage["apiScenarios"]} != {
                 "api-crd-server-dry-run", "api-authorized-mutation-validation",
                 "api-unauthorized-denial", "api-security-fields",
                 "api-ebpf-wireguard-rejection", "api-independent-update-validation"}):
-        raise InvalidInventory("M8 API scenarios require review")
+        raise InvalidInventory("Compatibility API scenarios require review")
     return coverage
 
 

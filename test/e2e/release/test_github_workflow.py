@@ -33,10 +33,25 @@ class GitHubReleaseTests(unittest.TestCase):
         self.assertEqual(build['with']['provenance'], 'mode=max')
         self.assertIn('docker.io/${{ github.repository_owner }}', build['with']['tags'])
         self.assertTrue({'images', 'binaries', 'test', 'validate'} <= set(jobs['chart']['needs']))
-        staging = next(s['run'] for s in jobs['chart']['steps'] if s.get('name', '').startswith('Stage chart'))
-        self.assertIn('registry: docker.io/', staging)
+        staging = next(s['run'] for s in jobs['chart']['steps'] if s.get('name', '').startswith('Package chart'))
+        self.assertIn('docker.io/jradikk', staging)
+        self.assertIn('jradikk/ratatoskr', staging)
+        self.assertNotIn('ghcr.io/skaldhall', staging)
+        self.assertNotIn('values.write_text', staging)
         self.assertIn('--app-version "$RELEASE_VERSION"', staging)
         self.assertEqual(set(jobs['publish']['needs']), {'validate', 'images', 'binaries', 'chart'})
+
+    def test_stable_acceptance_precedes_every_publication(self):
+        release = workflow('release.yaml')
+        validate = release['jobs']['validate']['steps']
+        checks = [i for i, s in enumerate(validate) if '--require-ready' in s.get('run', '')]
+        self.assertEqual(checks, [2])
+        gate = validate[checks[0]]
+        self.assertEqual(gate['if'], "steps.version.outputs.prerelease == 'false'")
+        self.assertIn('test/e2e/matrix/release_acceptance.py --require-ready', gate['run'])
+        for name in ('images', 'binaries', 'chart'):
+            self.assertIn('validate', release['jobs'][name]['needs'])
+        self.assertIn('validate', release['jobs']['publish']['needs'])
 
     def test_credentials_and_attestation_failures_are_not_ignored(self):
         jobs = workflow('release.yaml')['jobs']

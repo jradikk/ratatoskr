@@ -149,7 +149,7 @@ func Hash(c datapath.ClientConfig) string {
 }
 
 // HashForMode binds the authorized config to the selected backend. iproute
-// keeps the M5 digest so existing healthy routes remain adoptable.
+// keeps the original iproute digest so existing healthy routes remain adoptable.
 func HashForMode(c datapath.ClientConfig, mode string) string {
 	if backendMode(mode) == "iproute" {
 		return Hash(c)

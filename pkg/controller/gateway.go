@@ -1,4 +1,4 @@
-// Package controller renders and reconciles the fail-closed M2 gateway workload.
+// Package controller renders and reconciles the fail-closed gateway workload.
 package controller
 
 import (
@@ -146,7 +146,7 @@ func (r *GatewayReconciler) selected(ctx context.Context, gw *api.EgressGateway)
 			if target != gw.Namespace {
 				continue
 			}
-			// The M5 node agent, not the capability-free wait-init, owns Pod
+			// The node agent, not the capability-free wait-init, owns Pod
 			// readiness while driver=agent. The wait-init cannot terminate until
 			// the agent has installed its marker; interpreting it as failed init
 			// would overwrite the agent's correct datapath-ready annotation.

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "source": "docs/design.md sections 14 and milestone M2\u2013M7 reports; no invented live steps 1\u201313",
+  "source": "Design requirements and fixed compatibility axes; no inferred live-provider checklist",
   "axes": {
     "cni": [
       "flannel",
@@ -29,222 +29,222 @@
   "scenarios": [
     {
       "id": "direct-cluster-baseline",
-      "milestone": "M2",
       "implementation": "direct-config",
       "mode": "both",
-      "assertion": "PodIP source, DNS/API/ClusterIP preservation; not controller admission"
+      "assertion": "PodIP source, DNS/API/ClusterIP preservation; not controller admission",
+      "component": "direct datapath"
     },
     {
       "id": "controller-admission-selection",
-      "milestone": "M2",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "CRD deployment, authorized injection, forbidden opt-in and namespace admission"
+      "assertion": "CRD deployment, authorized injection, forbidden opt-in and namespace admission",
+      "component": "controller and admission"
     },
     {
       "id": "init-gateway-replacement",
-      "milestone": "M2",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "ADR-0012 fixed endpoint fail-close then explicit client rollout"
+      "assertion": "ADR-0012 fixed endpoint fail-close then explicit client rollout",
+      "component": "init driver"
     },
     {
       "id": "selective-cidr-port",
-      "milestone": "M3",
       "implementation": "fake-extended",
       "mode": "fake",
-      "assertion": "Include/exclude TCP port and CIDR selection on controlled fake endpoint"
+      "assertion": "Include/exclude TCP port and CIDR selection on controlled fake endpoint",
+      "component": "policy selection"
     },
     {
       "id": "no-endpoint-revocation",
-      "milestone": "M3",
       "implementation": "unimplemented",
       "mode": "fake",
-      "assertion": "Remove healthy endpoint and prove selected requests fail while ordinary paths survive"
+      "assertion": "Remove healthy endpoint and prove selected requests fail while ordinary paths survive",
+      "component": "fail-closed routing"
     },
     {
       "id": "metadata-prohibition",
-      "milestone": "M3",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Reachable controlled metadata fixture required; no real metadata service requests"
+      "assertion": "Reachable controlled metadata fixture required; no real metadata service requests",
+      "component": "metadata isolation"
     },
     {
       "id": "gateway-dns",
-      "milestone": "M3",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Cluster/external UDP and TCP DNS, upstream-only external resolution and SERVFAIL"
+      "assertion": "Cluster/external UDP and TCP DNS, upstream-only external resolution and SERVFAIL",
+      "component": "DNS forwarding"
     },
     {
       "id": "payload-integrity",
-      "milestone": "M3",
       "implementation": "fake-extended",
       "mode": "fake",
-      "assertion": "4.5 MiB deterministic payload size and SHA256 through tunnel"
+      "assertion": "4.5 MiB deterministic payload size and SHA256 through tunnel",
+      "component": "payload integrity"
     },
     {
       "id": "measured-mtu-mss",
-      "milestone": "M3",
       "implementation": "extended",
       "mode": "both",
-      "assertion": "Assert gateway measured carrier/GENEVE/upstream MTUs and MSS; not PMTU blackhole testing"
+      "assertion": "Assert gateway measured carrier/GENEVE/upstream MTUs and MSS; not PMTU blackhole testing",
+      "component": "MTU and MSS"
     },
     {
       "id": "pmtu-fragmentation",
-      "milestone": "M3",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "DF/fragmentation and small carrier MTU traffic plus captures"
+      "assertion": "DF/fragmentation and small carrier MTU traffic plus captures",
+      "component": "PMTU and fragmentation"
     },
     {
       "id": "spoof-geneve",
-      "milestone": "M3",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Forged inner/outer source, VNI and identity acceptance verifier packet tests"
+      "assertion": "Forged inner/outer source, VNI and identity acceptance verifier packet tests",
+      "component": "tunnel isolation"
     },
     {
       "id": "wireguard-registration",
-      "milestone": "M4",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Bound TokenReview registration, peer deletion, handshake and return path"
+      "assertion": "Bound TokenReview registration, peer deletion, handshake and return path",
+      "component": "WireGuard registration"
     },
     {
       "id": "wireguard-plaintext-denial",
-      "milestone": "M4",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Capture encrypted underlay and deny direct eth0 GENEVE"
+      "assertion": "Capture encrypted underlay and deny direct eth0 GENEVE",
+      "component": "WireGuard plaintext denial"
     },
     {
       "id": "agent-restricted-workload",
-      "milestone": "M5",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "PSA restricted admission and successful capability-free tunnel startup"
+      "assertion": "PSA restricted admission and successful capability-free tunnel startup",
+      "component": "restricted node agent"
     },
     {
       "id": "agent-restart-endpoint-update",
-      "milestone": "M5",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Agent restart/adoption and endpoint replacement without workload recreation"
+      "assertion": "Agent restart/adoption and endpoint replacement without workload recreation",
+      "component": "node agent recovery"
     },
     {
       "id": "ebpf-tunnel",
-      "milestone": "M6",
       "implementation": "direct-config",
       "mode": "both",
-      "assertion": "Unencrypted tc client tunnel in actual pod; 5.10 and CNI captures still missing"
+      "assertion": "Unencrypted tc client tunnel in actual pod; 5.10 and CNI captures still missing",
+      "component": "eBPF datapath"
     },
     {
       "id": "ebpf-revocation-failure",
-      "milestone": "M6",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Inject policy-only replacement failure and verify no stale selector survives"
+      "assertion": "Inject policy-only replacement failure and verify no stale selector survives",
+      "component": "eBPF revocation"
     },
     {
       "id": "ipv6-runtime-guard",
-      "milestone": "M6",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "IPv6 present at init and assigned later, fail-closed without bypass"
+      "assertion": "IPv6 present at init and assigned later, fail-closed without bypass",
+      "component": "IPv6 runtime safety"
     },
     {
       "id": "ha-affinity-failover",
-      "milestone": "M7",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "1\u20133 replicas, stable affinity, endpoint churn; established flows may break"
+      "assertion": "1\u20133 replicas, stable affinity, endpoint churn; established flows may break",
+      "component": "gateway failover"
     },
     {
       "id": "private-health-metric",
-      "milestone": "M7",
       "implementation": "extended",
       "mode": "both",
-      "assertion": "Loopback health gauge 1/0/1 and no PodIP:9902 exposure; not full telemetry"
+      "assertion": "Loopback health gauge 1/0/1 and no PodIP:9902 exposure; not full telemetry",
+      "component": "private health telemetry"
     },
     {
       "id": "full-observability",
-      "milestone": "M7",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Bytes/flows/drops/peer count/handshake age not implemented by component"
+      "assertion": "Bytes/flows/drops/peer count/handshake age not implemented by component",
+      "component": "observability"
     },
     {
       "id": "upstream-fail-close-recovery",
-      "milestone": "M2",
       "implementation": "direct-config",
       "mode": "fake",
-      "assertion": "Fake link down causes 503/NotReady and no steered traffic, ordinary paths continue"
+      "assertion": "Fake link down causes 503/NotReady and no steered traffic, ordinary paths continue",
+      "component": "upstream recovery"
     },
     {
       "id": "public-exit-country",
-      "milestone": "M2",
       "implementation": "direct-config",
       "mode": "live",
-      "assertion": "Secret-safe ipinfo exit match and optional expected country; 429 inconclusive"
+      "assertion": "Secret-safe ipinfo exit match and optional expected country; 429 inconclusive",
+      "component": "provider exit"
     },
     {
       "id": "live-provider-disruption",
-      "milestone": "M8",
       "implementation": "unimplemented",
       "mode": "live",
-      "assertion": "Real upstream disruption/recovery under controlled provider conditions"
+      "assertion": "Real upstream disruption/recovery under controlled provider conditions",
+      "component": "provider recovery"
     },
     {
       "id": "cni-mesh-compatibility",
-      "milestone": "M8",
       "implementation": "unimplemented",
       "mode": "both",
-      "assertion": "Real alternative CNI/mesh gateway/client fixture and cross-node traffic; enumerating is not implementing"
+      "assertion": "Real alternative CNI/mesh gateway/client fixture and cross-node traffic; enumerating is not implementing",
+      "component": "CNI and mesh compatibility"
     }
   ],
   "apiScenarios": [
     {
       "id": "api-crd-server-dry-run",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Existing-release server dry-run of two checked-in CRDs and complete Gateway/Policy instances; not healthy gateway deployment"
+      "assertion": "Existing-release server dry-run of two checked-in CRDs and complete Gateway/Policy instances; not healthy gateway deployment",
+      "component": "API and admission"
     },
     {
       "id": "api-authorized-mutation-validation",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Authorized Pod server CREATE dry-run passes registered mutation+validation with allocated but unhealthy Gateway; not traffic or healthy endpoint selection"
+      "assertion": "Authorized Pod server CREATE dry-run passes registered mutation+validation with allocated but unhealthy Gateway; not traffic or healthy endpoint selection",
+      "component": "API and admission"
     },
     {
       "id": "api-unauthorized-denial",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Forbidden namespace, nonexistent gateway, hostNetwork and reserved-init CREATE dry-runs denied with exact Ratatoskr reasons"
+      "assertion": "Forbidden namespace, nonexistent gateway, hostNetwork and reserved-init CREATE dry-runs denied with exact Ratatoskr reasons",
+      "component": "API and admission"
     },
     {
       "id": "api-security-fields",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Programming/wait init security, Downward API or shadow mount, exact configured image and pending fail-close state; no Pod startup"
+      "assertion": "Programming/wait init security, Downward API or shadow mount, exact configured image and pending fail-close state; no Pod startup",
+      "component": "API and admission"
     },
     {
       "id": "api-ebpf-wireguard-rejection",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Only if existing controller DATAPATH=ebpf: complete Gateway CR is reconciled Ready=False/Unsupported before Secret lookup and no Deployment rendered; NOT webhook rejection"
+      "assertion": "Only if existing controller DATAPATH=ebpf: complete Gateway CR is reconciled Ready=False/Unsupported before Secret lookup and no Deployment rendered; NOT webhook rejection",
+      "component": "API and admission"
     },
     {
       "id": "api-independent-update-validation",
-      "milestone": "M8",
       "implementation": "api-admission",
       "mode": "both",
-      "assertion": "Actual API UPDATE validating-webhook: exact scheduling-gated never-match inert Pod; benign metadata dry-run allowed, gateway label/namespace and client-config metadata tamper dry-runs denied; no scheduling/container execution and exact Pod cleanup before namespaces required"
+      "assertion": "Actual API UPDATE validating-webhook: exact scheduling-gated never-match inert Pod; benign metadata dry-run allowed, gateway label/namespace and client-config metadata tamper dry-runs denied; no scheduling/container execution and exact Pod cleanup before namespaces required",
+      "component": "API and admission"
     }
   ]
 }

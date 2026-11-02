@@ -1,20 +1,29 @@
-# ADR-0010: Kernel baseline 5.10 and feature probing
+# ADR-0010: Linux kernel baseline and feature checks
 
 - Status: Accepted
 - Date: 2026-10-29
 
 ## Context
 
-All target platforms (Talos, Ubuntu, cloud images) ship ≥ 5.10. Features we need: GENEVE collect_md, WireGuard (in-tree since 5.6), clsact/tc BPF, BPF tunnel-key helpers, LPM tries, nftables.
+GENEVE, nftables, optional WireGuard and tc/eBPF require kernel capabilities
+that vary independently of the reported kernel version.
 
 ## Decision
 
-Require ≥ 5.10. Agent and gateway check the version and also probe features by creating throwaway devices in their own netns. On failure they refuse to start with a clear Event. No L3 GENEVE (`innerprotoinherit`, 5.18+), so the Ethernet inner header and fixed MACs are needed.
+Require Linux kernel at least 5.10. Agent/gateway startup checks that baseline;
+selected backend operations then fail closed if the required network devices,
+netlink, nftables, WireGuard or tc/BPF features cannot be used. The eBPF
+backend explicitly rejects WireGuard rather than falling back. This does not
+mean startup creates and deletes every potential device or proactively probes
+all features in a throwaway namespace. The GENEVE datapath uses Ethernet/L2,
+not Linux `innerprotoinherit` L3 GENEVE.
 
 ## Alternatives considered
 
-- Require 5.15+ for nicer features: would exclude some vSphere/Ubuntu 20.04-era fleets.
+- Version check alone as a compatibility guarantee: kernels can omit modules,
+  permissions and BPF helpers despite an adequate version.
 
 ## Consequences
 
-Some cleanups (L3 GENEVE, bpf kfuncs for conntrack) wait for a future baseline bump.
+Operators need backend-specific component and runtime tests on the selected
+node/kernel; the minimum version is necessary, not certification.

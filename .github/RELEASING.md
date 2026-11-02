@@ -1,68 +1,75 @@
-# GitHub Actions releases
+# Publishing a release
 
-Release builds and publication run exclusively in `.github/workflows/release.yaml`.
-The process follows `jradikk/nats-auth-operator`: version-tag trigger, reusable
-validation first, Docker Hub images, a GHCR Helm chart, and GitHub release assets.
-The checked-in chart stays at development metadata; the workflow packages a
-copy with the tag's version and matching published image registry.
+Release builds and publication run exclusively in
+[release.yaml](workflows/release.yaml) on GitHub-hosted runners. Local build
+commands are for development, not distribution.
 
-## Repository configuration
+## Repository setup
 
-Set Actions secrets (never commit credentials):
+Configure these Actions secrets, never source-controlled credentials:
 
 - `DOCKER_USERNAME`: Docker Hub account authorized to publish the six images.
 - `DOCKER_PASSWORD`: Docker Hub access token with repository write permission.
 
-For this repository the image namespace is `docker.io/jradikk`. Ensure the token
-can push all six `ratatoskr-*` image repositories and their attestations. The
-workflow uses `GITHUB_TOKEN` for GHCR and GitHub releases; repository/organization
-policies must permit its declared contents, packages, id-token and attestations
-permissions. No separate personal access token is embedded in the workflow.
+For this repository, images use `docker.io/jradikk`. The token must be able to
+publish every `ratatoskr-*` repository and its attestations. `GITHUB_TOKEN`
+publishes the chart to GHCR and assets to GitHub Releases; repository policies
+must allow the declared contents, packages, id-token, and attestations permissions.
+Ensure published packages are publicly readable for the documented install path.
 
-## Trigger
+## Candidate review
 
-After reviewing the source, CI results and documented acceptance limitations,
-push the intended version tag pointing at that source commit:
+1. Review the candidate source and CI results.
+2. Run target-platform runtime tests against that candidate and record the
+   independently reviewed evidence in `test/e2e/release/acceptance.json`.
+3. Check the release version in `charts/ratatoskr/Chart.yaml`, matching appVersion,
+   image registry, and upgrade guidance.
+4. Review security changes and the supported scope before authorizing publication.
+
+Stable tags require every mandatory acceptance entry to pass. The workflow
+checks `release_acceptance.py --require-ready` before release builds or registry
+writes. This verifies the checklist's structure/status; maintainers must verify
+the underlying evidence and that it applies to the candidate. Do not mark entries
+passed merely to unblock a tag.
+
+## Tag the reviewed source
 
 ```sh
 git tag -a v0.1.0 -m 'Ratatoskr 0.1.0'
 git push origin v0.1.0
 ```
 
-Do not push the tag before the workflow/configuration changes are in its target
-commit. `v0.1.0-rc.1` is also accepted and creates a GitHub prerelease; canonical
-stable tags create normal releases. There is no main-branch chart publication
-or manual publication trigger. Release runs for the same tag are serialized.
-Do not move a published tag to another commit.
+Canonical `vX.Y.Z` tags create stable releases; `vX.Y.Z-rc.N` tags create
+prereleases and do not certify stable acceptance. There is no manual or
+main-branch publication trigger. Never move a published tag to another commit.
 
-## Outputs and ordering
+## Published artifacts
 
-1. Validate the canonical version tag; run reusable CI (unit/race, lint, module
-   checks, privileged components and non-publishing image builds).
-2. Build and publish six versioned images for Linux amd64/arm64 using QEMU and
-   Buildx **on GitHub-hosted runners**: controller, webhook, agent, gateway, init,
-   and upstream-openvpn. Generate Buildx SBOM/provenance and GitHub provenance
-   attestations; attestation failure is not ignored.
-3. Cross-build ten Linux component binaries and attest their provenance.
-4. After images and binaries succeed, package a chart copy whose version and
-   appVersion match the tag and whose image registry points to Docker Hub.
-   Publish it to `oci://ghcr.io/jradikk/charts/ratatoskr` and attest the archive.
-5. Attach binaries, chart, immutable image references and SHA256SUMS to the
-   GitHub release only after all prior publication/build jobs succeed.
+The workflow validates the tag and runs reusable CI before publication:
 
-Image jobs may publish independently; a failed job can leave some images pushed
-without a chart or GitHub release. Inspect and rerun the **same source/tag** rather
-than treating partial publication as a completed release. Repository/tag policy
-and registry immutability remain operator responsibilities.
+1. Six component images for Linux amd64/arm64: controller, webhook, agent,
+   gateway, init, and upstream-openvpn. Docker Hub receives versioned tags,
+   Buildx SBOM/provenance, and GitHub provenance attestations.
+2. Ten Linux binaries: five components for the two architectures, with source
+   and version metadata and provenance attestations.
+3. A Helm chart with version/appVersion matching the tag, published to
+   `oci://ghcr.io/jradikk/charts/ratatoskr` after images and binaries succeed.
+4. A GitHub release containing binaries, the chart, `IMAGE-DIGESTS.txt`, and
+   `SHA256SUMS`, only after all preceding jobs succeed.
 
-## Verification and readiness
+Attestation failures fail the workflow. Image matrix jobs publish independently;
+a failed run can leave some images uploaded without a chart or GitHub release.
+Inspect and rerun the same source/tag rather than treating partial publication
+as a completed release. Tag protection and registry immutability are maintainer
+responsibilities.
 
-Verify checksums for downloaded assets and use `gh attestation verify` against
-`jradikk/ratatoskr` for their provenance. Verify image attestations against the
-immutable references in IMAGE-DIGESTS.txt, not a mutable tag alone. Buildx SBOM
-and provenance are generated by the runner, not fabricated local claim files.
+## Verify delivery
 
-Workflow configuration is **not** a completed release or production-readiness
-certificate. The component CI does not run the full CNI/mesh or Linux 5.10 matrix.
-Consult `docs/milestones/m9/final-gate.md` and the acceptance ledger; unverified
-requirements stay unverified. No local scripts publish as part of this process.
+Check downloaded assets against `SHA256SUMS`. Verify GitHub provenance with
+`gh attestation verify` for repository `jradikk/ratatoskr`, and verify images using
+the immutable references in `IMAGE-DIGESTS.txt`, not only mutable tags.
+
+After publication, install the OCI chart in a clean target cluster, verify that
+all six image repositories are readable, and run the smoke/security scenarios
+against the exact published digests. Artifact provenance establishes origin;
+it does not by itself establish routing correctness or platform compatibility.

@@ -1,6 +1,6 @@
 # M6 — tc eBPF datapath component report
 
-Status: **implementation and local component gates passed; final eBPF traffic gate failed on October 30, 2026**. The final fake flannel eBPF client programmed successfully but the steered request timed out. A later packet-correlated flannel Pod reproduction with the unchanged production BPF program showed gateway ingress and client GENEVE return reception, so the original claim that failure occurred before gateway ingress was too broad. No VPN-backed eBPF workload or Linux 5.10 runtime pass is claimed; see `docs/milestones/m9/final-gate.md`.
+Status: **implementation and local component gates passed; final eBPF traffic gate failed on October 30, 2026**. The final fake flannel eBPF client programmed successfully but the steered request timed out. A later packet-correlated flannel Pod reproduction with the unchanged production BPF program showed gateway ingress and client GENEVE return reception, so the original claim that failure occurred before gateway ingress was too broad. No VPN-backed eBPF workload or Linux 5.10 runtime pass is claimed; see `test/evidence/history/runtime-validation.md`.
 
 ## Implemented
 
@@ -33,4 +33,4 @@ positive fake echo, 4.5 MiB payload, matching selector and upstream
 fail/recovery checks. The serial M8 matrix remains **INCOMPLETE**, because
 negative selector ordinary-path emission and no-endpoint prevention lack
 five-tuple-correlated proof, and Linux 5.10/other CNIs are untested. See
-`docs/milestones/m9/final-gate.md` for the exact reports.
+`test/evidence/history/runtime-validation.md` for the exact reports.

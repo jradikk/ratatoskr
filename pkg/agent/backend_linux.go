@@ -46,7 +46,7 @@ type ClientVerifier interface {
 
 func canAdoptClient(ctx context.Context, backend datapath.Backend, cfg datapath.ClientConfig, mode string) bool {
 	if backendMode(mode) != "ebpf" {
-		return true // Keep M5 iproute restart behavior unchanged.
+		return true // Keep iproute restart adoption compatible.
 	}
 	verifier, ok := backend.(ClientVerifier)
 	return ok && verifier.VerifyClient(ctx, cfg) == nil

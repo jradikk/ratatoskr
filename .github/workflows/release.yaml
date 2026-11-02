@@ -32,6 +32,9 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Require complete acceptance before stable publication
+        if: steps.version.outputs.prerelease == 'false'
+        run: python3 test/e2e/matrix/release_acceptance.py --require-ready
 
   test:
     needs: validate
@@ -162,29 +165,20 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: ${{ env.HELM_VERSION }}
-      - name: Stage chart with matching version and published image registry
+      - name: Package chart with reviewed repository defaults
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           IMAGE_OWNER: ${{ github.repository_owner }}
           SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          mkdir -p chart-stage dist
-          cp -a charts/ratatoskr chart-stage/ratatoskr
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          root = Path('chart-stage/ratatoskr')
-          values = root / 'values.yaml'
-          text = values.read_text()
-          if text.count('registry: ghcr.io/skaldhall') != 1:
-              raise SystemExit('Chart registry defaults changed; review release staging')
-          values.write_text(text.replace('registry: ghcr.io/skaldhall', 'registry: docker.io/' + os.environ['IMAGE_OWNER']))
-          chart = root / 'Chart.yaml'
-          chart.write_text(chart.read_text().replace('https://github.com/skaldhall/ratatoskr', 'https://github.com/' + os.environ['SOURCE_REPOSITORY']))
-          PY
-          helm lint chart-stage/ratatoskr --strict
-          helm package chart-stage/ratatoskr --version "$RELEASE_VERSION" --app-version "$RELEASE_VERSION" --destination dist
+          [[ "$SOURCE_REPOSITORY" == 'jradikk/ratatoskr' ]]
+          [[ "$IMAGE_OWNER" == 'jradikk' ]]
+          test "$(sed -n 's/^  registry: //p' charts/ratatoskr/values.yaml)" = 'docker.io/jradikk'
+          test "$(sed -n 's/^home: //p' charts/ratatoskr/Chart.yaml)" = 'https://github.com/jradikk/ratatoskr'
+          helm lint charts/ratatoskr --strict
+          mkdir -p dist
+          helm package charts/ratatoskr --version "$RELEASE_VERSION" --app-version "$RELEASE_VERSION" --destination dist
       - name: Attest chart provenance
         uses: actions/attest-build-provenance@v2
         with:

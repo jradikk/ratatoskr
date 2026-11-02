@@ -5,17 +5,29 @@
 
 ## Context
 
-`iproute` is quick to build and easy to debug. eBPF scales better (one LPM lookup per packet instead of linear `ip rule` evaluation) and can attach identity TLVs.
+`iproute` is inspectable and uses kernel routing plus nftables; a tc/eBPF
+selector offers a different policy implementation. Both must share one
+validated client config and fail closed without requiring a CRD change.
 
 ## Decision
 
-`pkg/datapath` defines `ClientConfig` (compiled, datapath-agnostic) and a `Datapath` interface (`Ensure(netns, cfg)`, `Remove(netns)`, `Probe()`). `iproute` ships first; `ebpf` arrives in M6. The controller and CRDs never see which is active; the choice is a Helm value.
+`pkg/datapath.Backend` defines `ApplyClient(context.Context, ClientConfig)`,
+`RemoveClient(context.Context, ClientConfig)`, `ApplyGateway(context.Context,
+GatewayConfig)` and `Close()`. The caller enters the intended network namespace
+on a locked OS thread **before** constructing a backend. `iproute` uses netlink
+routes/rules and nftables; `ebpf` selects client traffic with clsact/tc and an
+external GENEVE device, while the gateway side currently delegates to iproute.
+The chart `datapath` choice is explicit; unsupported eBPF + WireGuard is
+rejected, never silently downgraded to plaintext.
 
 ## Alternatives considered
 
-- eBPF only: slower to reach a working MVP and harder to debug on old kernels.
-- iproute only: rule count grows linearly with policy size, and there are no TLVs.
+- eBPF only: requires compatible kernel features everywhere and is harder to
+  inspect than routes/nftables.
+- iproute only: limits future packet-selection options.
 
 ## Consequences
 
-Policy compilation (`pkg/policy`) is shared and unit-tested once. Both datapaths share the e2e suites. TLVs exist only in ebpf mode (MTU accounts for this per mode).
+Policy compilation and fail-closed acceptance are shared contracts, but the
+two backends have separate packet tests. The `Backend` API does not provide
+`Ensure(netns,cfg)`, `Probe()` or implicit namespace switching.
