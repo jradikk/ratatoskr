@@ -49,14 +49,14 @@ policy selection are enforced by admission. The controller and webhook serve
 |---|---|---|
 | `driver` | `agent` | `agent` runs one node-local DaemonSet; `init` programs each opted-in Pod using a NET_ADMIN init container. |
 | `datapath` | `iproute` | `iproute` or opt-in `ebpf`; eBPF needs supported kernel/seccomp/BPF capability policy. eBPF plus WireGuard is not supported. |
-| `agent.healthPort` | `19903` | Host-network health/readiness port; must be unused on each node. |
+| `agent.healthPort` | `19903` | Agent Pod-network health/readiness port; set a different port if required by cluster policy. |
 | `agent.criSocket` | `/run/containerd/containerd.sock` | Node CRI Unix socket; on k3s/k3d use `/run/k3s/containerd/containerd.sock`. |
 | `clusterDomain` | `cluster.local` | Kubernetes DNS domain for webhook certificates and gateway DNS. |
 | `dns.upstreamIP` | `1.1.1.1` | Gateway-mode upstream resolver, accessible over the VPN. |
 | `dns.upstreamProbeURL` | empty | Optional operator-only tunnel-bound literal IPv4 HTTP(S) exit probe; leave empty for the plugin default. No credentials in URL. |
 | `exclusions.serviceCIDRs`, `exclusions.podCIDRs`, `exclusions.extraCIDRs` | `[]` | Direct-network ranges; confirm cluster Pod/Service ranges before steering traffic. |
 | `controller.replicas`, `webhook.replicas` | `1`, `1` | Controller replicas >1 require `controller.leaderElection.enabled=true`. |
-| `networkPolicy.enabled` | `true` | Portable webhook ingress restriction to ports 9443/8081. |
+| `networkPolicy.enabled` | `true` | Install component-specific ingress-only policies: controller 8081, webhook 9443/8081, agent `agent.healthPort` in agent mode. |
 
 Agent-mode workload wait-init is unprivileged and has no workload API token;
 its readiness depends on the node agent's applied gateway-configuration
@@ -71,8 +71,7 @@ judge endpoint readiness.
 
 The agent runs as root with hostPID and a separate Pod network namespace
 (`hostNetwork: false`), NET_ADMIN/SYS_ADMIN (plus BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
-plus a read-only host-PID-1 network namespace anchor bind-mounted from
-`/proc/1/ns/net` at `/var/run/ratatoskr/host-netns`,
+with no host network namespace bind mount,
 and a cluster-wide token-request permission for short-lived bound registration.
 **Treat the agent as node-root-equivalent** and restrict its placement and
 ability to modify its ServiceAccount. In agent mode only, it may GET
@@ -95,6 +94,19 @@ replicas use the same TLS Secret. Only one Helm release per cluster is
 supported because admission configurations and ClusterRoles have fixed names.
 The controller does not expose a metrics Service; gateway metrics remain
 loopback-only within gateway Pods.
+
+**Ingress policies:** With `networkPolicy.enabled=true`, the chart selects
+controller, webhook, and (only in agent mode) agent Pods by component labels and
+allows only their listening ports. Probe and API-server source IPs vary among
+clusters, so these portable policies do not restrict ingress source CIDRs.
+They deliberately do **not** isolate egress: Kubernetes API, DNS, node CRI and
+gateway registration/control-plane paths must stay reachable. Set
+`networkPolicy.enabled=false` to render **no chart-managed NetworkPolicies**;
+review any namespace-wide policies separately. The controller manages gateway
+Pod ingress policies dynamically in EgressGateway namespaces; this chart flag
+does not weaken or override those gateway policies. CNIs must enforce the
+standard networking.k8s.io/v1 NetworkPolicy API for ingress restrictions to
+have effect.
 
 ## Upgrade and validate
 

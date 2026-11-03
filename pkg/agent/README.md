@@ -30,23 +30,24 @@ replacement after restart, but are not accepted without fresh identity checks.
 
 At startup, an uncached GET verifies the agent's own exact Pod UID, node,
 ServiceAccount, non-deleting lifecycle, separate Pod network namespace,
-`hostPID: true`, Downward API fieldRefs and the exact read-only `host-netns`
-volume sourced from node `/proc/1/ns/net` and mounted at
-`/var/run/ratatoskr/host-netns`. Kubelet resolves and bind-mounts the host
-namespace path; the agent process does **not** open `/proc/1/ns/net` under
-RuntimeDefault (ptrace permission can deny that). It pins its own thread netns
-for restoration, then opens the fixed mounted nsfs host-PID-1 namespace as a
-forbidden anchor using `O_NOFOLLOW`; both FDs must be valid, network-typed and
-distinct. Each resync rechecks the Pod mount identity and its thread against
-the pinned **own** namespace. This relies on the validated
-hostPID/CRI/Kubernetes trust contract, not independent PID-to-netns
-attestation. An unavailable or invalid kubelet mount fails startup closed; no
-additional privilege or workload-path `/proc` fallback is introduced.
+`hostPID: true` and Downward API fieldRefs. It validates and pins its **own**
+thread's nsfs network namespace as the restoration anchor; each resync
+rechecks the Pod identity and calling thread. No `/proc/1/ns/net` or kubelet
+host-namespace mount is opened: RuntimeDefault blocked direct proc access and
+containerd could not mount its proc magic symlink. This explicitly removes
+independent host-inode rejection. The trust boundary is the Kubernetes Pod
+identity plus the CRI's READY sandbox-ID-to-netns-path association, live
+Pod-UID-cgroup pidfd and PodIP; a malicious CRI that forges all of them could
+redirect programming into another namespace. The agent refuses its own pinned
+namespace, and the target must have exactly the selected PodIP on `eth0` and
+no additional physical-looking numbered interface. The latter guard is
+supplementary and not independent host identity proof. No workload namespace
+is derived from `/proc` and no additional privilege is granted.
 
 Before programming, the agent requires READY CRI namespace/name/UID/PodIP
 metadata, a live pidfd whose cgroup contains the Pod UID, exactly one confined
 nsfs network namespace path, and a unique eth0 IPv4 matching the PodIP. The
-candidate netns must differ from both pinned own and host anchors. Sandbox identity,
+candidate netns must differ from the pinned agent-own anchor. Sandbox identity,
 path and namespace inode are rechecked around programming. The CRI-reported
 path-to-PID association remains **trusted CRI authority**, not independent
 pidfd namespace ownership proof.
@@ -113,7 +114,7 @@ go build -o /tmp/ratatoskr-agent ./cmd/agent
 ```
 
 Keep fake API/CRI tests separate from explicitly privileged namespace/kernel
-checks. Cover stale Pod/sandbox identities, changed host anchors, revoked
+checks. Cover stale Pod/sandbox identities, changed own anchors, revoked
 selection, invalid gateway acknowledgments, backend failures and marker
 withdrawal. Never use a user's runtime socket, profile, token or private key as
 a fixture. Unit tests do not establish runtime/seccomp compatibility.

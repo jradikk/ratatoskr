@@ -12,14 +12,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A disposable two-netns component exercises the exact thread restoration
-// path with an agent namespace distinct from both the host anchor and target.
-// No host or cluster network namespace is modified.
+// Disposable netns exercise own-namespace restoration. The test host namespace
+// is not used as a target and no cluster or existing host netns is mutated.
 func TestPrivilegedSeparateAgentNamespaceRestoration(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root and CAP_SYS_ADMIN")
 	}
-	if verifiedNamespaces.Load() != nil {
+	if verifiedOwn.Load() != nil {
 		t.Skip("process anchor already established")
 	}
 	runtime.LockOSThread()
@@ -47,29 +46,17 @@ func TestPrivilegedSeparateAgentNamespaceRestoration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer own.Close()
-	hostFD, err := unix.Dup(int(original))
+	anchor, err := validateOwnAnchor(own)
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := os.NewFile(uintptr(hostFD), "original-test-netns")
-	defer host.Close()
-	anchor, err := validateAnchors(own, host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifiedNamespaces.Store(anchor)
-	defer verifiedNamespaces.Store(nil)
+	verifiedOwn.Store(anchor)
+	defer verifiedOwn.Store(nil)
 	if err := checkThreadOwn(); err != nil {
 		t.Fatal(err)
 	}
-	if a, h, err := anchorStats(); err != nil || sameNetns(a, h) {
-		t.Fatalf("own and host anchors not distinct: %v", err)
-	}
-	if err := rejectHost(own); err == nil {
-		t.Fatal("accepted agent namespace as selected workload")
-	}
-	if err := rejectHost(host); err == nil {
-		t.Fatal("accepted host anchor as selected workload")
+	if err := rejectOwn(own); err == nil {
+		t.Fatal("accepted agent namespace as target")
 	}
 	targetNS, err := netns.New()
 	if err != nil {

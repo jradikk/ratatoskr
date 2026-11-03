@@ -77,20 +77,21 @@ connections are the relevant acceptance proof, not established-flow continuity.
 The agent runs with an ordinary Pod network namespace, hostPID, NET_ADMIN and
 SYS_ADMIN, and mounts a node CRI socket plus host `/var/run/netns`
 (HostToContainer propagation). At bootstrap an uncached own-Pod GET verifies
-`hostNetwork: false`, `hostPID: true` and an exact read-only hostPath mount:
-node `/proc/1/ns/net` at `/var/run/ratatoskr/host-netns`. Kubelet performs the
-host bind mount, avoiding a process-local `/proc/1/ns/net` open blocked by
-RuntimeDefault ptrace checks. The agent pins its own thread namespace for
-restoration and separately opens the fixed mounted nsfs host-PID-1 namespace
-as a forbidden anchor with `O_NOFOLLOW`; these must differ. Opening that
-anchor is not a fallback workload path. It
+`hostNetwork: false` and `hostPID: true`. It pins its **own** thread's nsfs
+namespace for restoration. Direct `/proc/1/ns/net` access is ptrace-gated by
+RuntimeDefault and kubelet/containerd could not bind-mount its proc magic
+symlink on the validated runtime. The agent does **not** have an independent
+host namespace FD or host-inode rejection. It
 requires a unique READY CRI sandbox whose namespace, name, Pod UID and PodIP
 match the Kubernetes workload. Its **CRI-authoritative** verbose sandbox info
 must contain a PID and exactly one `runtimeSpec.linux.namespaces` network path.
 A live pidfd pins that process, whose cgroup must contain the workload UID.
 The path must be a direct child under `/var/run/netns`, opened with confined
 `openat2` flags and validated as an nsfs network-namespace FD; the agent
-rejects both its own and the host namespace anchors. Repeated CRI and
+rejects its own pinned namespace and requires exactly the selected PodIP on
+`eth0`, without additional physical-looking numbered IPv4 interfaces. The
+latter is not a host-identity proof: protection relies on the trusted API/CRI
+READY sandbox UID, PID/cgroup, PodIP and path association. Repeated CRI and
 pinned-FD checks precede mutation. Namespace entry/restoration to the **own
 agent Pod namespace** occurs on one locked OS thread. There is **no `/proc/<pid>/ns/net` fallback** and no claim of independent
 PID-to-path namespace attestation beyond the CRI trust contract

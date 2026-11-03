@@ -16,14 +16,12 @@ A `hostPID: true`, **`hostNetwork: false`** DaemonSet mounts the node's CRI
 socket and host `/var/run/netns` with HostToContainer propagation. At startup
 it GETs its own Pod uncached and verifies exact Downward API
 namespace/name/UID/node identity, ServiceAccount, separate Pod netns, hostPID,
-non-deleting status and the exact `host-netns` hostPath volume mounted read-only
-at `/var/run/ratatoskr/host-netns`. Kubelet bind-mounts node `/proc/1/ns/net`;
-the agent does **not** directly open that ptrace-gated proc path. It pins the
-current agent thread's own netns FD for restoration and opens only the fixed
-mounted host network namespace as a **forbidden anchor** (`O_NOFOLLOW`). Both
-FDs must be nsfs network namespace objects and their inodes must differ; an
-unavailable or invalid mount fails closed. No CRI workload namespace is derived
-from this host anchor or a `/proc` PID path.
+non-deleting status and Downward API identity fieldRefs. It pins the current
+agent thread's **own** nsfs netns FD for restoration, not a node host namespace
+FD. Opening `/proc/1/ns/net` from the RuntimeDefault agent was denied by
+ptrace checks; containerd could not use a direct hostPath File mount of that
+proc magic symlink. No host namespace volume or host-network dependency is
+retained. No CRI workload namespace is derived from a `/proc` PID path.
 
 For each selected Pod, require exactly one READY CRI sandbox with matching
 namespace, name, Pod UID and PodIP. Its verbose status must supply a PID and
@@ -32,8 +30,11 @@ sandbox-ID-to-netns-path mapping; do not independently claim the PID's netns
 inode attests that path. A pidfd pins the live PID and its cgroup must contain
 the selected Pod UID. Open only a direct child of `/var/run/netns` using
 `openat2` confinement (`RESOLVE_BENEATH`, no symlinks or magic links); validate
-nsfs and `CLONE_NEWNET`, reject both agent-own and host anchors and verify the
-target has the expected PodIP as its sole `eth0` IPv4. Recheck sandbox ID,
+nsfs and `CLONE_NEWNET`, reject the pinned agent-own namespace and verify the
+target has the expected PodIP as its sole `eth0` IPv4 and no extra numbered
+physical-looking IPv4 interface. This is not independent host identity
+attestation; a malicious CRI that forges UID/PID/cgroup/PodIP/path remains in
+scope of the CRI trust boundary. Recheck sandbox ID,
 state, PID, path, UID, PodIP and pinned FD inode before mutation. Enter and
 restore to the **agent Pod's own** namespace on a locked OS thread; a failed
 restoration is fatal, never hidden.

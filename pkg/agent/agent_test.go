@@ -190,39 +190,23 @@ func TestReadinessMarkerRequiresUp(t *testing.T) {
 	}
 }
 
-func TestHostPIDNetnsIdentity(t *testing.T) {
-	var self unix.Stat_t
-	if err := unix.Stat("/proc/thread-self/ns/net", &self); err != nil {
-		t.Fatal(err)
-	}
-	fd, err := unix.PidfdOpen(1, 0)
-	if err != nil {
-		t.Skipf("cannot pin host PID1 on this test host: %v", err)
-	}
-	defer unix.Close(fd)
-	// A nonprivileged test cannot enter PID1's netns. Exercise the actual
-	// rejection of our own namespace and synthetic distinct host identity.
+func TestOwnNamespaceIdentity(t *testing.T) {
 	f, err := os.Open("/proc/thread-self/ns/net")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := rejectHost(f); err == nil {
-		t.Fatal("accepted own network namespace")
+	if err := rejectOwn(f); err == nil {
+		t.Fatal("unbootstrapped own network namespace accepted")
 	}
-	host := unix.Stat_t{Dev: self.Dev, Ino: self.Ino + 1}
-	if err := rejectForbiddenNetns(self, self, host); err == nil {
-		t.Fatal("agent netns accepted")
+	var own unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &own); err != nil {
+		t.Fatal(err)
 	}
-	if err := rejectForbiddenNetns(host, self, host); err == nil {
-		t.Fatal("hostPID netns accepted")
+	if err := rejectForbiddenNetns(own, own); err == nil {
+		t.Fatal("agent namespace accepted as target")
 	}
-	// Isolated hostPID simulation: even if self and host differ, host identity
-	// must still be denied, while an unrelated sandbox identity remains valid.
-	if err := rejectForbiddenNetns(unix.Stat_t{Dev: 11, Ino: 12}, unix.Stat_t{Dev: 11, Ino: 13}, unix.Stat_t{Dev: 11, Ino: 12}); err == nil {
-		t.Fatal("distinct host namespace accepted")
-	}
-	if err := rejectForbiddenNetns(unix.Stat_t{Dev: 11, Ino: 14}, unix.Stat_t{Dev: 11, Ino: 13}, unix.Stat_t{Dev: 11, Ino: 12}); err != nil {
+	if err := rejectForbiddenNetns(unix.Stat_t{Dev: own.Dev, Ino: own.Ino + 1}, own); err != nil {
 		t.Fatalf("rejected unrelated sandbox: %v", err)
 	}
 }

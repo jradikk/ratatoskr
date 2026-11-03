@@ -1,6 +1,23 @@
 {{- if .Values.networkPolicy.enabled }}
-# Portable NetworkPolicy only: ingress to webhook HTTPS and kubelet health
-# probes; no dependency on host-network node selectors or CNI-specific APIs.
+# API-server and kubelet sources vary by cluster. Restrict ingress ports but
+# do not guess source CIDRs or isolate egress to Kubernetes, CRI or VPN peers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ratatoskr-controller-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ratatoskr.selectorLabels" (list . "controller") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8081
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,4 +36,25 @@ spec:
           port: 9443
         - protocol: TCP
           port: 8081
+{{- if eq .Values.driver "agent" }}
+---
+# The node agent has an ordinary Pod network namespace; its only inbound
+# listener is the configured health/readiness probe port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ratatoskr-agent-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ratatoskr.selectorLabels" (list . "agent") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.agent.healthPort }}
+{{- end }}
 {{- end }}
