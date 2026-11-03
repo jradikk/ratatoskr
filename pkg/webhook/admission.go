@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"slices"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -267,6 +269,15 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		cfg.Policy = compiled
 	}
 	if h.driver() == "agent" {
+		// The API server may assign generateName after mutation and before
+		// validation. Preserve empty-name admission intent across both passes;
+		// the agent resolves the assigned name and UID from the live Pod.
+		// A supplied name must match its prefix; never normalize a different
+		// explicit identity or an already assigned UID.
+		if pod.GenerateName != "" && pod.UID == "" &&
+			(pod.Name == "" || strings.HasPrefix(pod.Name, pod.GenerateName)) {
+			cfg.Identity.Pod = ""
+		}
 		// CREATE admission has no assigned Pod UID or post-CNI IP, and Gateway
 		// endpoint/MTU/exclusion status can change between mutation and validation.
 		// Persist only authorized immutable intent. The node agent resolves live
@@ -597,7 +608,7 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 	}
 	var cfg datapath.ClientConfig
 	if err := json.Unmarshal([]byte(config), &cfg); err != nil {
-		return fmt.Errorf("client config annotation invalid: %w", err)
+		return fmt.Errorf("client config annotation invalid")
 	}
 	expected, err := h.clientConfig(ctx, admissionNamespace, pod)
 	if err != nil {
@@ -615,7 +626,7 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 		return fmt.Errorf("encode authorized client config: %w", err)
 	}
 	if !bytes.Equal(actualJSON, expectedJSON) {
-		return fmt.Errorf("client config differs from authorized gateway status")
+		return fmt.Errorf("client config differs from authorized gateway status (%s)", clientConfigMismatch(&cfg, &expected))
 	}
 	if h.driver() == "init" && expected.Encryption == "wireguard" {
 		if err := validateWireGuardToken(pod); err != nil {
@@ -632,6 +643,35 @@ func (h *Handler) validateInjectedPod(ctx context.Context, admissionNamespace st
 		}
 	}
 	return h.validateGatewayDNS(ctx, admissionNamespace, pod)
+}
+
+// clientConfigMismatch emits only authored field categories, never Pod names,
+// addresses, policy values, public CA material or token-bearing annotations.
+// A mismatch still always denies; this only makes rollout diagnostics useful.
+func clientConfigMismatch(actual, expected *datapath.ClientConfig) string {
+	switch {
+	case actual.Identity.Namespace != expected.Identity.Namespace:
+		return "identity-namespace"
+	case actual.Identity.Pod != expected.Identity.Pod:
+		return "identity-pod"
+	case actual.Identity.UID != expected.Identity.UID:
+		return "identity-uid"
+	case actual.Identity.Policy != expected.Identity.Policy:
+		return "identity-policy"
+	case actual.GatewayID != expected.GatewayID:
+		return "gateway-id"
+	case actual.Encryption != expected.Encryption:
+		return "encryption"
+	case actual.Endpoint != expected.Endpoint || actual.GatewayPublicKey != expected.GatewayPublicKey ||
+		actual.RegistrationCACert != expected.RegistrationCACert || actual.WireGuardPort != expected.WireGuardPort:
+		return "gateway-endpoint-identity"
+	case actual.MTU != expected.MTU || !slices.Equal(actual.Exclusions, expected.Exclusions):
+		return "gateway-status"
+	case actual.AllowCloudMetadata != expected.AllowCloudMetadata || !reflect.DeepEqual(actual.Policy, expected.Policy):
+		return "authorized-policy"
+	default:
+		return "config-rollout"
+	}
 }
 
 func sameMapEntry(old, updated map[string]string, key string) bool {
