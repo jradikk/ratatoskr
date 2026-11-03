@@ -30,6 +30,12 @@ func TestPrivilegedGatewayBidirectionalReturn(t *testing.T) {
 
 // carrierMTU is the CNI veth MTU; upstreamMTU is 0 for the normal baseline.
 func gatewayBidirectionalReturn(t *testing.T, carrierMTU, innerMTU, upstreamMTU int) {
+	gatewayBidirectionalReturnWithHook(t, carrierMTU, innerMTU, upstreamMTU, nil)
+}
+
+// hook runs in the disposable gateway namespace after real UDP/TCP request and
+// reply traffic; both client sockets remain open until this fixture returns.
+func gatewayBidirectionalReturnWithHook(t *testing.T, carrierMTU, innerMTU, upstreamMTU int, hook func(netns.NsHandle, netip.Addr, net.IP)) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	orig, err := netns.Get()
@@ -236,6 +242,7 @@ func gatewayBidirectionalReturn(t *testing.T, carrierMTU, innerMTU, upstreamMTU 
 		t.Fatalf("client request did not reach upstream: %v", err)
 	}
 	t.Logf("upstream received src=%s payload=%s", src, string(buf[:n]))
+	upstreamSrcIP := append(net.IP(nil), src.IP...)
 	if _, err := upstream.WriteToUDP([]byte("response"), src); err != nil {
 		t.Fatal(err)
 	}
@@ -342,6 +349,12 @@ func gatewayBidirectionalReturn(t *testing.T, carrierMTU, innerMTU, upstreamMTU 
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
+	}
+	if err := netns.Set(gwNS); err != nil {
+		t.Fatal(err)
+	}
+	if hook != nil {
+		hook(gwNS, clientIP, upstreamSrcIP)
 	}
 	if err := netns.Set(clientNS); err != nil {
 		t.Fatal(err)

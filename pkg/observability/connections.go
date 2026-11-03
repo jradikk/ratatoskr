@@ -22,8 +22,10 @@ type ConntrackReader func() ([]*netlink.ConntrackFlow, error)
 // GatewayConnections samples only IPv4 TCP/UDP conntrack tuples whose original
 // source is a selected client and whose reply destination is the upstream SNAT
 // address. It counts tracked NAT flows (not live sockets or healthy VPN peers).
-// Conntrack does not record ingress interface, so the tuple match is the limit
-// of what this kernel source can prove. There are no client-IP metric labels.
+// Conntrack does not record ingress interface or workload identity, so an
+// old entry whose source IP is recycled for a new selected Pod may be included
+// until conntrack expires. This is a tuple count, never a workload attribution
+// or claim of a healthy WireGuard peer. There are no client-IP metric labels.
 type GatewayConnections struct {
 	scope ConnectionScope
 	read  ConntrackReader
