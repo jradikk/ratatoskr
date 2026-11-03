@@ -4,6 +4,8 @@ package iproute
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"runtime"
 	"strings"
@@ -11,11 +13,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
-	"net/http"
-	"net/http/httptest"
+
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 )
 
 // Samples real, bidirectionally forwarded GENEVE->upstream0 SNAT flows in a
