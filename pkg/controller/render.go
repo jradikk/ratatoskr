@@ -64,8 +64,8 @@ func upstreamProbeArgs(endpoint string) ([]string, error) {
 }
 
 func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clusterDNS ...string) ([]client.Object, error) {
-	if gw.Spec.Upstream.SecretRef.Name == "" {
-		return nil, fmt.Errorf("upstream secretRef.name required")
+	if _, err := gatewayProfileNames(gw); err != nil {
+		return nil, err
 	}
 	probeArgs, err := upstreamProbeArgs(r.Options.GatewayUpstreamProbeURL)
 	if err != nil {
@@ -203,8 +203,20 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		}
 		pod.Containers[0].Ports = append(pod.Containers[0].Ports, corev1.ContainerPort{Name: "dns-udp", ContainerPort: 1053, Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "dns-tcp", ContainerPort: 1053, Protocol: corev1.ProtocolTCP})
 	}
-	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
-	objects := []client.Object{cm, svc, dep}
+	objects := []client.Object{cm, svc}
+	if len(gw.Spec.Upstream.Profiles) == 0 {
+		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, Labels: selector, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
+		objects = append(objects, dep)
+	} else {
+		for _, profile := range gw.Spec.Upstream.Profiles {
+			profilePod := *pod.DeepCopy()
+			profilePod.Volumes[1].Secret.SecretName = profile.SecretRef.Name
+			identity := map[string]string{IdentityLabel: gw.Name, ownerUIDLabel: string(gw.UID), profileLabel: profile.Name}
+			one := int32(1)
+			dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: profileDeploymentName(gw.Name, profile.Name), Namespace: gw.Namespace, Labels: identity, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &one, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: identity}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: identity}, Spec: profilePod}}}
+			objects = append(objects, dep)
+		}
+	}
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: selector}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}}}
 	// Kubelet readiness and controller /info use PodIP from host/network locations
 	// not expressible as portable namespace/pod selectors; keep only this TCP port open.

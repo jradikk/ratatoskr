@@ -367,10 +367,49 @@ func (r *GatewayReconciler) managedGatewayPod(ctx context.Context, gw *api.Egres
 	if err := r.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: depRef.Name}, &dep); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	if dep.UID != depRef.UID || dep.Name != gw.Name || !metav1.IsControlledBy(&dep, gw) {
+	names, err := gatewayProfileNames(gw)
+	if err != nil {
+		return false, err
+	}
+	allowed := false
+	for _, name := range names {
+		if dep.Name == name {
+			allowed = true
+			break
+		}
+	}
+	if dep.UID != depRef.UID || !allowed || !metav1.IsControlledBy(&dep, gw) {
 		return false, nil
 	}
 	return true, nil
+}
+
+const profileLabel = "ratatoskr.skaldhall.io/profile"
+
+func profileDeploymentName(gatewayName, profileName string) string {
+	return gatewayName + "-" + profileName
+}
+
+func gatewayProfileNames(gw *api.EgressGateway) ([]string, error) {
+	if len(gw.Spec.Upstream.Profiles) == 0 {
+		if gw.Spec.Upstream.SecretRef.Name == "" {
+			return nil, fmt.Errorf("legacy upstream Secret required")
+		}
+		return []string{gw.Name}, nil
+	}
+	if gw.Spec.Upstream.SecretRef.Name != "" || gw.Spec.Replicas > 1 || len(gw.Spec.Upstream.Profiles) > 8 {
+		return nil, fmt.Errorf("profiles require no legacy secretRef and replicas=1")
+	}
+	seen := map[string]bool{}
+	names := make([]string, 0, len(gw.Spec.Upstream.Profiles))
+	for _, p := range gw.Spec.Upstream.Profiles {
+		if p.Name == "" || p.SecretRef.Name == "" || seen[p.Name] || len(profileDeploymentName(gw.Name, p.Name)) > 63 {
+			return nil, fmt.Errorf("profile name, Secret or Deployment identity invalid")
+		}
+		seen[p.Name] = true
+		names = append(names, profileDeploymentName(gw.Name, p.Name))
+	}
+	return names, nil
 }
 
 // expectedGatewayConfigHash hashes the exact bytes that Kubernetes projects
@@ -427,12 +466,24 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if (gw.Spec.Replicas < 0 || gw.Spec.Replicas > 32) || (gw.Spec.Encryption != "" && gw.Spec.Encryption != "none" && gw.Spec.Encryption != "wireguard") || (gw.Spec.Encryption == "wireguard" && gw.Namespace != r.Options.OperatorNamespace) || gw.Spec.Upstream.Type != "openvpn" || gw.Spec.Upstream.Image != "" || (gw.Spec.DNS.Mode != "" && gw.Spec.DNS.Mode != "cluster" && gw.Spec.DNS.Mode != "gateway") || (r.Options.Datapath != "" && r.Options.Datapath != "iproute" && r.Options.Datapath != "ebpf") || (r.Options.Datapath == "ebpf" && gw.Spec.Encryption == "wireguard") || (r.Options.Driver != "" && r.Options.Driver != "init" && r.Options.Driver != "agent") {
 		return r.unsupported(ctx, &gw, "requested replicas, encryption, upstream image/type, driver or datapath not supported")
 	}
-	var secret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Spec.Upstream.SecretRef.Name}, &secret); err != nil {
-		return r.block(ctx, &gw, "SecretUnavailable", fmt.Errorf("upstream Secret unavailable: %w", err))
+	if _, err := gatewayProfileNames(&gw); err != nil {
+		return r.unsupported(ctx, &gw, "invalid or ambiguous upstream profiles")
 	}
-	if len(secret.Data["client.ovpn"]) == 0 {
-		return r.block(ctx, &gw, "SecretInvalid", fmt.Errorf("upstream Secret missing client.ovpn"))
+	secrets := []string{gw.Spec.Upstream.SecretRef.Name}
+	if len(gw.Spec.Upstream.Profiles) > 0 {
+		secrets = secrets[:0]
+		for _, profile := range gw.Spec.Upstream.Profiles {
+			secrets = append(secrets, profile.SecretRef.Name)
+		}
+	}
+	for _, name := range secrets {
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: name}, &secret); err != nil {
+			return r.block(ctx, &gw, "SecretUnavailable", fmt.Errorf("upstream Secret unavailable: %w", err))
+		}
+		if len(secret.Data["client.ovpn"]) == 0 {
+			return r.block(ctx, &gw, "SecretInvalid", fmt.Errorf("upstream Secret missing client.ovpn"))
+		}
 	}
 	exclusions, dnsIP, err := r.collectExclusions(ctx, &gw)
 	if err != nil {
@@ -467,6 +518,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 			return r.block(ctx, &gw, "ApplyFailed", err)
 		}
+	}
+	// A removed profile must not keep running an old credential. Delete only
+	// Deployments still controlled by this exact Gateway UID; never adopt or
+	// remove a similarly named foreign Deployment. This check is idempotent.
+	if err := r.removeStaleProfileDeployments(ctx, &gw, resources); err != nil {
+		return r.block(ctx, &gw, "ApplyFailed", err)
 	}
 	if gw.Spec.DNS.Mode != "gateway" {
 		var oldDNS corev1.Service
@@ -606,6 +663,29 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
+func (r *GatewayReconciler) removeStaleProfileDeployments(ctx context.Context, gw *api.EgressGateway, desired []client.Object) error {
+	wanted := map[string]bool{}
+	for _, obj := range desired {
+		if dep, ok := obj.(*appsv1.Deployment); ok {
+			wanted[dep.Name] = true
+		}
+	}
+	var deployments appsv1.DeploymentList
+	if err := r.List(ctx, &deployments, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); err != nil {
+		return classifyApplyError(&appsv1.Deployment{}, "read", err)
+	}
+	for i := range deployments.Items {
+		dep := &deployments.Items[i]
+		if !metav1.IsControlledBy(dep, gw) || dep.Labels[IdentityLabel] != gw.Name || wanted[dep.Name] || dep.DeletionTimestamp != nil {
+			continue
+		}
+		if err := r.Delete(ctx, dep, client.Preconditions{UID: &dep.UID}); err != nil && !apierrors.IsNotFound(err) {
+			return classifyApplyError(dep, "update", err)
+		}
+	}
+	return nil
+}
+
 // endpointRestartRequired compares healthy endpoints by PodIP, not Pod name.
 // Added replicas do not invalidate a pinned init client, but removal, loss
 // of health, or a changed authenticated identity does.
@@ -629,11 +709,28 @@ func endpointRestartRequired(before, after []api.GatewayEndpoint, encrypted bool
 }
 
 func (r *GatewayReconciler) block(ctx context.Context, gw *api.EgressGateway, reason string, err error) (ctrl.Result, error) {
-	// A formerly supported gateway must not keep forwarding under a failed contract.
-	var deployment appsv1.Deployment
-	e := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, &deployment)
-	if e == nil && metav1.IsControlledBy(&deployment, gw) {
-		if e = r.Delete(ctx, &deployment); e != nil {
+	// A failed contract must not leave ANY formerly owned profile serving.
+	// Namespace/UID owner checks and UID-preconditioned DELETE forbid touching
+	// another Gateway's similarly named Deployment.
+	var deployments appsv1.DeploymentList
+	if e := r.List(ctx, &deployments, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); e != nil {
+		return ctrl.Result{}, e
+	}
+	for i := range deployments.Items {
+		dep := &deployments.Items[i]
+		if !metav1.IsControlledBy(dep, gw) || dep.Labels[IdentityLabel] != gw.Name || dep.DeletionTimestamp != nil {
+			continue
+		}
+		if e := r.Delete(ctx, dep, client.Preconditions{UID: &dep.UID}); e != nil && !apierrors.IsNotFound(e) {
+			return ctrl.Result{}, e
+		}
+	}
+	// Legacy pre-upgrade Deployments may have no controller-added labels;
+	// verify exact name and controlling Gateway UID before deleting one.
+	var legacy appsv1.Deployment
+	e := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, &legacy)
+	if e == nil && metav1.IsControlledBy(&legacy, gw) && legacy.DeletionTimestamp == nil {
+		if e = r.Delete(ctx, &legacy, client.Preconditions{UID: &legacy.UID}); e != nil && !apierrors.IsNotFound(e) {
 			return ctrl.Result{}, e
 		}
 	} else if client.IgnoreNotFound(e) != nil {
