@@ -63,12 +63,16 @@ type EgressRule struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.matchName) != has(self.matchPattern)",message="exactly one of matchName or matchPattern is required"
+// +kubebuilder:validation:XValidation:rule="!has(self.matchName) || self.matchName.split('.').all(label, size(label) <= 63)",message="DNS labels must be at most 63 characters"
+// +kubebuilder:validation:XValidation:rule="!has(self.matchPattern) || self.matchPattern.substring(2).split('.').all(label, size(label) <= 63)",message="wildcard suffix labels must be at most 63 characters"
 type DomainSelector struct {
 	// Exact DNS name; canonical lowercase ASCII without a trailing dot.
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 	MatchName string `json:"matchName,omitempty"`
 	// Only '*.example.com' suffix wildcards, with at least two suffix labels.
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^\\*\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 	MatchPattern string `json:"matchPattern,omitempty"`
 }
 

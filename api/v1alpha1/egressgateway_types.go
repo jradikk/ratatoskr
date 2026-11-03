@@ -158,7 +158,7 @@ type GatewayEndpoint struct {
 	// ConfigMap bytes consumed by this Pod after successful datapath application.
 	// It proves the applied config without publishing the client IP list in status.
 	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:validation:Pattern=^[a-f0-9]{64}$
+	// +kubebuilder:validation:Pattern="^[a-f0-9]{64}$"
 	AppliedClientConfigHash string `json:"appliedClientConfigHash,omitempty"`
 	UpstreamExitIP          string `json:"upstreamExitIP,omitempty"`
 	UpstreamHealthy         bool   `json:"upstreamHealthy"`

@@ -213,31 +213,38 @@ spec:
                     minLength: 1
                     type: string
                   profiles:
-                    description: Each independent upstream profile owns one gateway Pod and Secret.
-                    maxItems: 8
+                    description: |-
+                      Profiles create one independent gateway Pod/Deployment per Secret. Names
+                      are unique DNS labels; profiles and legacy secretRef are mutually exclusive.
                     items:
-                      type: object
+                      description: |-
+                        UpstreamProfile is an independent OpenVPN credential/exit profile. Secret
+                        contents remain in the Gateway namespace and never appear in API status.
+                      properties:
+                        name:
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        secretRef:
+                          properties:
+                            name:
+                              description: Secret in the gateway's namespace.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
                       required:
                       - name
                       - secretRef
-                      properties:
-                        name:
-                          type: string
-                          minLength: 1
-                          maxLength: 32
-                          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-                        secretRef:
-                          type: object
-                          required:
-                          - name
-                          properties:
-                            name:
-                              type: string
-                              minLength: 1
-                              maxLength: 253
+                      type: object
+                    maxItems: 8
                     type: array
                   secretRef:
                     description: Legacy single-profile Secret in this Gateway namespace.
+                      Omit when profiles are set.
                     properties:
                       name:
                         description: Secret in the gateway's namespace.
