@@ -77,7 +77,7 @@ func domainFixture(t *testing.T, mode string) (*Reconciler, *corev1.Pod, *api.Eg
 	}
 	proof := sandboxProof{inode: inode, pidfd: -1}
 	programs := &atomic.Int32{}
-	r.domainOps = &domainOperations{mark: func(int) error { return nil }, own: func(context.Context) error { return nil }, enter: func(_ *os.File, run func() error) error { return run() }, verifyTarget: func(netip.Addr) error { return nil }, recheck: func(context.Context, cri.RuntimeServiceClient, sandboxProof, *os.File) error { return nil }, sandbox: func(context.Context, cri.RuntimeServiceClient, string, string, string, string) (*os.File, sandboxProof, error) {
+	r.domainOps = &domainOperations{measure: func(*datapath.ClientConfig) error { return nil }, mark: func(int) error { return nil }, own: func(context.Context) error { return nil }, enter: func(_ *os.File, run func() error) error { return run() }, verifyTarget: func(netip.Addr) error { return nil }, recheck: func(context.Context, cri.RuntimeServiceClient, sandboxProof, *os.File) error { return nil }, sandbox: func(context.Context, cri.RuntimeServiceClient, string, string, string, string) (*os.File, sandboxProof, error) {
 		fd, e := unix.Dup(int(f.Fd()))
 		return os.NewFile(uintptr(fd), "fake-proof"), proof, e
 	}, program: func(context.Context, *os.File, *datapath.ClientConfig, int, string, bool, BackendFactory, string) error {
@@ -217,6 +217,14 @@ func TestDomainLocalUDPAndTCPForwardUseControlAndBeforeReplyApply(t *testing.T) 
 	defer func() { _ = udpServer.Shutdown(); _ = tcpServer.Shutdown() }()
 	<-readyUDP
 	<-readyTCP
+	r.domainOps.measure = func(next *datapath.ClientConfig) error { next.MTU = 1300; return nil }
+	r.domainOps.program = func(_ context.Context, _ *os.File, next *datapath.ClientConfig, gatewayMTU int, _ string, _ bool, _ BackendFactory, _ string) error {
+		if next.MTU != 1300 || gatewayMTU != 1400 {
+			t.Fatal("domain callback skipped target carrier MTU measurement")
+		}
+		programs.Add(1)
+		return nil
+	}
 	var controlCalls atomic.Int32
 	r.domainOps.mark = func(int) error { controlCalls.Add(1); return nil }
 	r.domainOps.dial = func(ctx context.Context, network, address string, control func(string, string, syscall.RawConn) error) (net.Conn, error) {

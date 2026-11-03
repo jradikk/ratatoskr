@@ -33,6 +33,7 @@ import (
 // domainOperations keeps kernel-only effects injectable for offline race/failure
 // tests. Production defaults always use verified netns entry and marked sockets.
 type domainOperations struct {
+	measure        func(*datapath.ClientConfig) error
 	mark           func(int) error
 	own            func(context.Context) error
 	enter          func(*os.File, func() error) error
@@ -54,7 +55,7 @@ func (r *Reconciler) domainOperations() domainOperations {
 	if r.domainOps != nil {
 		return *r.domainOps
 	}
-	return domainOperations{mark: func(fd int) error {
+	return domainOperations{measure: completeClientMTU, mark: func(fd int) error {
 		return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, int(iproute.DNSControlMark))
 	}, own: r.VerifyOwnPod, enter: InNamespace, verifyTarget: verifyTargetPodIPv4, recheck: recheckSandbox, sandbox: Sandbox, program: Program, quarantine: quarantineUnknownAuthorization, redirect: iproute.InstallDNSRedirect, verifyRedirect: iproute.VerifyDNSRedirect, removeRedirect: iproute.RemoveDNSRedirect, listenPacket: net.ListenPacket, listen: net.Listen, dial: func(ctx context.Context, network, address string, control func(string, string, syscall.RawConn) error) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second, Control: control}).DialContext(ctx, network, address)
@@ -479,8 +480,12 @@ func (r *Reconciler) applyDomain(ctx context.Context, rt *domainRuntime, u fqdn.
 	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().verifyRedirect(rt.resolver) }); err != nil {
 		return err
 	}
+	gatewayMTU := cfg.MTU
+	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().measure(&next) }); err != nil {
+		return err
+	}
 	previous := pod.Annotations[HashAnnotation]
-	if err = r.domainOperations().program(ctx, target, &next, cfg.MTU, previous, false, factory, backendMode(r.Datapath)); err != nil {
+	if err = r.domainOperations().program(ctx, target, &next, gatewayMTU, previous, false, factory, backendMode(r.Datapath)); err != nil {
 		return r.poisonDomain(rt, target, &pod, err)
 	}
 	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().verifyRedirect(rt.resolver) }); err != nil {
