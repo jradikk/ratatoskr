@@ -286,6 +286,45 @@ func condition(b bool) metav1.ConditionStatus {
 	return metav1.ConditionFalse
 }
 
+// dnsFailure contains only a fixed public category; an API error is retained
+// internally for classification but never serialized into status or Events.
+type dnsFailure struct {
+	code  string
+	cause error
+}
+
+func (e *dnsFailure) Error() string { return e.code }
+func (e *dnsFailure) Unwrap() error { return e.cause }
+
+func dnsReadFailure(err error) error {
+	code := "GatewayServiceReadFailed"
+	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
+		code = "GatewayServiceReadDenied"
+	}
+	return &dnsFailure{code: code, cause: err}
+}
+
+func dnsAdvice(err error) (category, message string) {
+	var failure *dnsFailure
+	if !errors.As(err, &failure) {
+		return "Unknown", "Gateway DNS unavailable; inspect controller access and the owned DNS Service."
+	}
+	switch failure.code {
+	case "ClusterDNSIPv4Missing":
+		return failure.code, "Cluster DNS lacks a usable IPv4 Service address; inspect kube-system/kube-dns before enabling gateway DNS."
+	case "GatewayServiceIPv4Missing":
+		return failure.code, "Gateway DNS Service has no usable IPv4 ClusterIP; inspect the Gateway-owned DNS Service."
+	case "GatewayServiceReadDenied":
+		return failure.code, "Cannot GET Gateway DNS Service; grant the controller services get permission."
+	case "GatewayServiceReadFailed":
+		return failure.code, "Cannot GET Gateway DNS Service; check API availability and controller access."
+	case "GatewayServiceOwnership":
+		return failure.code, "Gateway DNS Service name is occupied by another owner; inspect the conflicting Service."
+	default:
+		return "Unknown", "Gateway DNS unavailable; inspect controller access and the owned DNS Service."
+	}
+}
+
 // gatewayFailureReason is a fixed public vocabulary. API/provider errors may
 // include credentials or profile bytes: never place their text in Events,
 // Gateway status or structured logs. Unknown reasons use one generic category.
@@ -310,6 +349,8 @@ func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, 
 		category, message = exclusionAdvice(cause)
 	case "ApplyFailed":
 		category, message = applyAdvice(cause)
+	case "DNSUnavailable":
+		category, message = dnsAdvice(cause)
 	}
 	// Log only fixed categories/advice: provider/API errors can contain private data.
 	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason, "exclusionCategory", category, "advice", message)
@@ -501,7 +542,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	gw.Status.EffectiveExclusions = exclusions
 	gw.Status.MTU = api.GatewayMTUStatus{} // Set only from measured /info link attributes below.
 	if gw.Spec.DNS.Mode == "gateway" && dnsIP == "" {
-		return r.block(ctx, &gw, "DNSUnavailable", fmt.Errorf("kube-system/kube-dns has no IPv4 ClusterIP"))
+		return r.block(ctx, &gw, "DNSUnavailable", &dnsFailure{code: "ClusterDNSIPv4Missing"})
 	}
 	ips, err := r.selected(ctx, &gw)
 	if err != nil {
@@ -552,12 +593,28 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	if gw.Spec.DNS.Mode == "gateway" {
 		var dnsService corev1.Service
-		if err := r.Get(ctx, types.NamespacedName{Name: gw.Name + "-dns", Namespace: gw.Namespace}, &dnsService); err != nil {
-			return r.block(ctx, &gw, "DNSUnavailable", err)
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client // fake clients and explicitly injected readers
+		}
+		if err := reader.Get(ctx, types.NamespacedName{Name: gw.Name + "-dns", Namespace: gw.Namespace}, &dnsService); err != nil {
+			if apierrors.IsNotFound(err) || retryableApplyError(err) {
+				// The just-created Service may not yet be visible in the cache or
+				// allocated its ClusterIP. This is not proof of a bad contract:
+				// retain existing forwarding while retrying from fresh objects.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.block(ctx, &gw, "DNSUnavailable", dnsReadFailure(err))
+		}
+		if !metav1.IsControlledBy(&dnsService, &gw) || dnsService.DeletionTimestamp != nil {
+			return r.block(ctx, &gw, "DNSUnavailable", &dnsFailure{code: "GatewayServiceOwnership"})
+		}
+		if dnsService.Spec.ClusterIP == "" {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		ip, err := netip.ParseAddr(dnsService.Spec.ClusterIP)
-		if err != nil || !ip.Is4() || ip.IsUnspecified() {
-			return r.block(ctx, &gw, "DNSUnavailable", fmt.Errorf("gateway DNS Service has no usable IPv4 ClusterIP"))
+		if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() {
+			return r.block(ctx, &gw, "DNSUnavailable", &dnsFailure{code: "GatewayServiceIPv4Missing"})
 		}
 	}
 	var pods corev1.PodList
