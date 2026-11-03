@@ -458,6 +458,13 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	for _, obj := range resources {
 		if err := r.apply(ctx, &gw, obj); err != nil {
+			var applyErr *applyFailure
+			if errors.As(err, &applyErr) && applyErr.transient {
+				// A known API race/overload is not evidence that the current
+				// gateway contract became invalid. Do not destroy its Deployment
+				// or publish a new Ready status; retry from fresh objects.
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return r.block(ctx, &gw, "ApplyFailed", err)
 		}
 	}
@@ -703,6 +710,7 @@ func (r *GatewayReconciler) info(ctx context.Context, ip string) (gatewayInfo, e
 type applyFailure struct {
 	resource, category string
 	cause              error
+	transient          bool // only recognized API retryable errors, never arbitrary failures
 }
 
 func (e *applyFailure) Error() string { return "Gateway " + e.resource + " apply " + e.category }
@@ -723,19 +731,24 @@ func applyResource(obj client.Object) string {
 	}
 }
 
+func retryableApplyError(err error) bool {
+	return apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) || apierrors.IsTimeout(err) ||
+		apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err)
+}
+
 func classifyApplyError(obj client.Object, operation string, cause error) error {
 	category := "ReadFailed"
 	switch {
 	case apierrors.IsForbidden(cause) || apierrors.IsUnauthorized(cause):
 		category = "ReadDenied"
-	case apierrors.IsConflict(cause) || apierrors.IsAlreadyExists(cause):
+	case apierrors.IsAlreadyExists(cause) || apierrors.IsConflict(cause):
 		category = "Conflict"
 	case apierrors.IsInvalid(cause) || apierrors.IsBadRequest(cause):
 		category = "Invalid"
 	case operation == "create" || operation == "update":
 		category = "WriteFailed"
 	}
-	return &applyFailure{resource: applyResource(obj), category: category, cause: cause}
+	return &applyFailure{resource: applyResource(obj), category: category, cause: cause, transient: retryableApplyError(cause)}
 }
 
 func applyAdvice(cause error) (category, message string) {
@@ -763,6 +776,84 @@ func applyAdvice(cause error) (category, message string) {
 	default:
 		return "Unknown", "Gateway resource application blocked; check controller access and API availability."
 	}
+}
+
+// equalGatewayDeploymentSpec ignores ONLY documented Kubernetes API defaults
+// absent from the rendered template. Compare all remaining fields, including
+// image, sysctls, capabilities, volumes and probes, before deciding to update.
+func equalGatewayDeploymentSpec(live, rendered appsv1.DeploymentSpec) bool {
+	current := live.DeepCopy()
+	desired := rendered.DeepCopy()
+	if desired.RevisionHistoryLimit == nil && current.RevisionHistoryLimit != nil && *current.RevisionHistoryLimit == 10 {
+		current.RevisionHistoryLimit = nil
+	}
+	if desired.ProgressDeadlineSeconds == nil && current.ProgressDeadlineSeconds != nil && *current.ProgressDeadlineSeconds == 600 {
+		current.ProgressDeadlineSeconds = nil
+	}
+	if desired.Template.Spec.RestartPolicy == "" && current.Template.Spec.RestartPolicy == corev1.RestartPolicyAlways {
+		current.Template.Spec.RestartPolicy = ""
+	}
+	if desired.Template.Spec.SchedulerName == "" && current.Template.Spec.SchedulerName == corev1.DefaultSchedulerName {
+		current.Template.Spec.SchedulerName = ""
+	}
+	if desired.Template.Spec.TerminationGracePeriodSeconds == nil && current.Template.Spec.TerminationGracePeriodSeconds != nil && *current.Template.Spec.TerminationGracePeriodSeconds == 30 {
+		current.Template.Spec.TerminationGracePeriodSeconds = nil
+	}
+	if desired.Template.Spec.EnableServiceLinks == nil && current.Template.Spec.EnableServiceLinks != nil && *current.Template.Spec.EnableServiceLinks {
+		current.Template.Spec.EnableServiceLinks = nil
+	}
+	if desired.Template.Spec.ServiceAccountName == "" && current.Template.Spec.ServiceAccountName == "default" {
+		current.Template.Spec.ServiceAccountName = ""
+	}
+	for i := range current.Template.Spec.Containers {
+		if i >= len(desired.Template.Spec.Containers) {
+			break
+		}
+		old, want := &current.Template.Spec.Containers[i], desired.Template.Spec.Containers[i]
+		if want.TerminationMessagePath == "" && old.TerminationMessagePath == "/dev/termination-log" {
+			old.TerminationMessagePath = ""
+		}
+		if want.TerminationMessagePolicy == "" && old.TerminationMessagePolicy == corev1.TerminationMessageReadFile {
+			old.TerminationMessagePolicy = ""
+		}
+		if want.ImagePullPolicy == "" && old.ImagePullPolicy == corev1.PullIfNotPresent {
+			old.ImagePullPolicy = ""
+		}
+		// The fake client and API serializers can represent an empty resource
+		// map as nil. Only an empty map is equivalent; non-empty resource
+		// requests/limits remain exact and must trigger a template update.
+		if len(want.Resources.Requests) == 0 && len(old.Resources.Requests) == 0 {
+			old.Resources.Requests = want.Resources.Requests
+		}
+		if len(want.Resources.Limits) == 0 && len(old.Resources.Limits) == 0 {
+			old.Resources.Limits = want.Resources.Limits
+		}
+		if want.ReadinessProbe != nil && old.ReadinessProbe != nil {
+			if want.ReadinessProbe.TimeoutSeconds == 0 && old.ReadinessProbe.TimeoutSeconds == 1 {
+				old.ReadinessProbe.TimeoutSeconds = 0
+			}
+			if want.ReadinessProbe.PeriodSeconds == 0 && old.ReadinessProbe.PeriodSeconds == 10 {
+				old.ReadinessProbe.PeriodSeconds = 0
+			}
+			if want.ReadinessProbe.SuccessThreshold == 0 && old.ReadinessProbe.SuccessThreshold == 1 {
+				old.ReadinessProbe.SuccessThreshold = 0
+			}
+			if want.ReadinessProbe.FailureThreshold == 0 && old.ReadinessProbe.FailureThreshold == 3 {
+				old.ReadinessProbe.FailureThreshold = 0
+			}
+		}
+	}
+	for i := range current.Template.Spec.Volumes {
+		if i >= len(desired.Template.Spec.Volumes) {
+			break
+		}
+		old, want := &current.Template.Spec.Volumes[i], desired.Template.Spec.Volumes[i]
+		if old.ConfigMap != nil && want.ConfigMap != nil && want.ConfigMap.DefaultMode == nil &&
+			old.ConfigMap.DefaultMode != nil && *old.ConfigMap.DefaultMode == 0644 {
+			old.ConfigMap.DefaultMode = nil
+		}
+	}
+	return reflect.DeepEqual(*current, *desired)
 }
 
 func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, obj client.Object) error {
@@ -803,10 +894,12 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, ob
 		old.Spec = desired.Spec
 	case *appsv1.Deployment:
 		old := existing.(*appsv1.Deployment)
-		if reflect.DeepEqual(old.Spec, desired.Spec) {
+		if equalGatewayDeploymentSpec(old.Spec, desired.Spec) {
 			return nil
 		}
-		old.Spec = desired.Spec
+		// Only actual rendered-template/spec differences require an UPDATE;
+		// the API reapplies documented defaults to the desired spec on write.
+		old.Spec = *desired.Spec.DeepCopy()
 	}
 	if err := r.Update(ctx, existing); err != nil {
 		return classifyApplyError(obj, "update", err)

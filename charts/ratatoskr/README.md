@@ -78,8 +78,16 @@ ability to modify its ServiceAccount. In agent mode only, it may GET
 ConfigMaps to compare controller-desired gateway configuration to the
 per-Pod applied hash; do not store secrets in ConfigMaps. Workload Pods do
 not receive node hostPath mounts. OpenVPN upstream containers need NET_ADMIN,
-MKNOD and `/dev/net/tun`; gateway containers need NET_ADMIN, plus BPF/PERFMON
-when eBPF is selected. The controller/webhook run nonroot with no added
+MKNOD and `/dev/net/tun`; the **controller-rendered gateway container is
+privileged** so it can set IPv4 forwarding in its Pod network namespace even
+when ordinary containers receive read-only `/proc/sys`. Privilege is not a
+bounded NET_ADMIN/BPF capability grant. The Gateway Pod requests no unsafe
+sysctl and needs no kubelet `allowedUnsafeSysctls`; it does not share host
+network/PID/IPC namespaces or mount hostPath volumes. A namespace enforcing
+Pod Security Baseline or Restricted rejects this Gateway Pod; use a dedicated,
+administrator-controlled namespace that explicitly permits privileged Gateway
+Pods. The upstream, agent, controller, webhook and selected workload security
+contexts are unchanged. The controller/webhook run nonroot with no added
 capabilities and read-only root filesystems.
 
 The webhook bootstraps its serving certificate in a memory-backed private
