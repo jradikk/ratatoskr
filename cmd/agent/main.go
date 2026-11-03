@@ -104,7 +104,7 @@ func run(ctx context.Context) error {
 	programming := observability.NewAgentProgramming()
 	reconciler := &agent.Reconciler{Ready: ready, Client: k, WatchClient: k, CRI: cri.NewRuntimeServiceClient(conn), Tokens: &agent.KubernetesTokenIssuer{Client: k8s}, Node: node, OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), Datapath: os.Getenv("DATAPATH"), EBPFBackend: func() (datapath.Backend, error) { return ebpf.New() }, Log: logger, Own: own, Programming: programming}
 	if err := reconciler.Bootstrap(ctx); err != nil {
-		return fmt.Errorf("verify host-network agent bootstrap: %w", err)
+		return fmt.Errorf("verify isolated agent namespace bootstrap: %w", err)
 	}
 	metrics, metricsListener, err := agentMetricsServer(programming)
 	if err != nil {
