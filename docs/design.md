@@ -31,8 +31,9 @@ to plaintext. The gateway uses the shared backend interface, with the current
 eBPF gateway implementation delegating to the iproute gateway backend. Both
 modes require a Linux kernel at least 5.10 and the specific kernel facilities
 used by their backend; a version check alone does not certify those facilities.
-There is no Windows, IPv6 egress, FQDN policy, ingress-gateway or multi-cluster
-implementation. An IPv6 guard rejects non-link-local client IPv6; unsupported
+There is no Windows, IPv6 egress, ingress-gateway or multi-cluster
+implementation. Agent-mode FQDN rules derive IPv4 routing destinations from
+observed DNS answers; see [domain policies](domain-policies.md). An IPv6 guard rejects non-link-local client IPv6; unsupported
 addressing is not quietly allowed around IPv4 policy.
 
 ## Control plane and workload admission
@@ -192,10 +193,13 @@ of guessing. Effective inner MTU accounts for IPv4/UDP/GENEVE/Ethernet,
 optional WireGuard and measured upstream MTU; below 576 fails, below 1280
 warns. Status only reports measured healthy endpoint MTU.
 
-Gateway and agent expose narrow process-lifetime programming counters/errors/
-duration on separate loopback-only metrics listeners (`127.0.0.1:9902` in the
-Gateway Pod netns, `127.0.0.1:9903` in the agent Pod netns). These are not
-per-workload metrics or a network-accessible scrape Service. Health and
+Gateway and agent expose process-lifetime programming counters/errors/duration,
+and gateways expose health, link traffic, WireGuard and tracked TCP/UDP connection
+samples. Metrics are enabled by default on separately configurable Pod listeners
+and exposed through selector-restricted ingress, Services and optional Prometheus
+monitors. These are aggregate samples, not per-workload flow attribution.
+See the [monitoring guide](monitoring.md) for deployment and dashboard import.
+Health and
 readiness have separate endpoints. Unit and disposable-netns packet tests,
 bounded synthetic fixtures and platform-specific live tests exercise distinct
 claims. They must not be conflated with a cross-CNI, cross-mesh, cross-runtime
