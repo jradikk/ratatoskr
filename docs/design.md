@@ -72,6 +72,19 @@ recreation. Agent restart can adopt a matching UP marker/config after backend
 verification; an endpoint change reprograms the same selected Pod, but new
 connections are the relevant acceptance proof, not established-flow continuity.
 
+### Independent VPN profiles
+
+The OpenVPN upstream may specify `upstream.profiles` instead of the legacy
+`upstream.secretRef`. Each unique name identifies one independently credentialed
+controller-owned Deployment with one replica and exactly one Secret mount.
+`spec.replicas` remains the legacy single-profile replica count; profiled mode
+requires it to be one. All profile Pods share the Gateway's client-routing
+ConfigMap, gateway ID and selected Pod allowlist, but the upstream OpenVPN
+connections and exit identities are independent. One shared Gateway Service
+selects all current owned PodIPs; sticky client endpoint selection remains
+Pod-UID based. Removing a profile retires only that controlled Deployment and
+withdraws its endpoint. Existing connections may break on reassignment.
+
 ## Trust boundary for node namespace entry
 
 The agent runs with an ordinary Pod network namespace, hostPID, NET_ADMIN and

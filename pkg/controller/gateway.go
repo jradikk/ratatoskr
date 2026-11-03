@@ -58,11 +58,12 @@ const (
 
 type Options struct {
 	OperatorNamespace, GatewayImage, OpenVPNImage, ImagePullPolicy, Driver, Datapath, ClusterDomain, ServiceCIDRs, PodCIDRs, ExtraCIDRs, GatewayUpstreamDNSIP, GatewayUpstreamProbeURL string
+	GatewayMetricsEnabled, GatewayMetricsNamespaceSelector, GatewayMetricsPodSelector                                                                                                  string
 }
 
 func OptionsFromEnv() Options {
 	return Options{
-		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"),
+		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"), GatewayMetricsEnabled: os.Getenv("GATEWAY_METRICS_ENABLED"), GatewayMetricsNamespaceSelector: os.Getenv("GATEWAY_METRICS_NAMESPACE_SELECTOR"), GatewayMetricsPodSelector: os.Getenv("GATEWAY_METRICS_POD_SELECTOR"),
 	}
 }
 
@@ -376,6 +377,14 @@ func (r *GatewayReconciler) managedGatewayPod(ctx context.Context, gw *api.Egres
 		if dep.Name == name {
 			allowed = true
 			break
+		}
+	}
+	if len(gw.Spec.Upstream.Profiles) != 0 {
+		profile := pod.Labels[profileLabel]
+		if profile == "" || dep.Name != profileDeploymentName(gw.Name, profile) ||
+			dep.Labels[profileLabel] != profile || rs.Labels[profileLabel] != profile ||
+			dep.Spec.Selector == nil || dep.Spec.Selector.MatchLabels[profileLabel] != profile {
+			return false, nil
 		}
 	}
 	if dep.UID != depRef.UID || !allowed || !metav1.IsControlledBy(&dep, gw) {

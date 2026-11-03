@@ -67,6 +67,46 @@ a controlled rollout to reprogram their routes. The controller surfaces a
 place. Use EgressGateway status and conditions, not Service VIP health, to
 judge endpoint readiness.
 
+## Independent upstream profiles
+
+A Gateway can name up to eight independently credentialed OpenVPN exits instead
+of using legacy `upstream.secretRef`. Each profile has one controller-owned
+Deployment and one upstream Pod; each Pod mounts **only its own** Secret, while
+the Gateway shares an owner-controlled client-routing ConfigMap. Profiles must
+have distinct lowercase DNS-label names, valid Secret names in the Gateway
+namespace, and `spec.replicas: 1` (one Pod per profile). Do not set both
+`upstream.profiles` and `upstream.secretRef`. A profile removal retires only the
+Deployment owned by that Gateway UID; the selected endpoint may move, which
+can break established connections when exit identities differ.
+
+```yaml
+apiVersion: ratatoskr.skaldhall.io/v1alpha1
+kind: EgressGateway
+metadata:
+  name: exits
+  namespace: ratatoskr-system
+spec:
+  replicas: 1
+  upstream:
+    type: openvpn
+    profiles:
+      - name: berlin
+        secretRef:
+          name: vpn-berlin
+      - name: oslo
+        secretRef:
+          name: vpn-oslo
+  allowedNamespaces:
+    namespaceSelector:
+      matchLabels:
+        egress: enabled
+```
+
+Do not put provider credentials in this object. Gateway status lists the
+independently healthy PodIP endpoints and their applied-config hashes; it does
+not disclose Secret contents. This is per-Pod endpoint affinity, not a promise
+of per-flow load balancing or identical external exit IPs.
+
 ## Security and operations
 
 The agent runs as root with hostPID and a separate Pod network namespace

@@ -38,6 +38,30 @@ func ackFixtures(t *testing.T) (*api.EgressGateway, datapath.ClientConfig, strin
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "vpn-pod", Namespace: gw.Namespace, UID: types.UID("pod-uid")}, Status: corev1.PodStatus{PodIP: cfg.Endpoint.String()}}
 	return gw, cfg, raw, hash, cm, pod
 }
+func TestProfileGatewayPodAcknowledgementUsesSelectedUIDAndSharedConfig(t *testing.T) {
+	gw, cfg, _, hash, cm, pod := ackFixtures(t)
+	gw.Spec.Upstream.Profiles = []api.UpstreamProfile{{Name: "berlin", SecretRef: api.SecretReference{Name: "secret-berlin"}}}
+	gw.Status.Endpoints[0].AppliedClientConfigHash = hash
+	k := fake.NewClientBuilder().WithScheme(func() *runtime.Scheme {
+		s := runtime.NewScheme()
+		_ = corev1.AddToScheme(s)
+		_ = api.AddToScheme(s)
+		return s
+	}()).WithObjects(cm, pod).Build()
+	r := &Reconciler{Client: k}
+	uid, ack, e := selectedAck(gw, cfg)
+	if e != nil || uid != "pod-uid" || ack != hash {
+		t.Fatalf("profile status ack mismatch %q %q %v", uid, ack, e)
+	}
+	if err := r.appliedGateway(context.Background(), gw, cfg, uid, ack); err != nil {
+		t.Fatal(err)
+	}
+	gw.Status.Endpoints[0].PodUID = "foreign"
+	if err := r.appliedGateway(context.Background(), gw, cfg, "foreign", ack); err == nil {
+		t.Fatal("wrong profile Pod UID accepted")
+	}
+}
+
 func TestExactRawAppliedConfig(t *testing.T) {
 	_, cfg, raw, hash, _, _ := ackFixtures(t)
 	if err := checkAppliedRaw(raw, hash, cfg, cfg.Endpoint); err != nil {
