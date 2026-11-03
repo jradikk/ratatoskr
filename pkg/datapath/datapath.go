@@ -155,6 +155,29 @@ func (c ClientConfig) Validate() error {
 			return fmt.Errorf("policy exclusions must be IPv4 CIDRs")
 		}
 	}
+	if len(c.DomainState) > 4096 {
+		return fmt.Errorf("domain bindings exceed 4096 entries")
+	}
+	seenBindings := make(map[struct {
+		rule    int
+		address netip.Addr
+	}]bool)
+	for _, binding := range c.DomainState {
+		if binding.Rule < 0 || binding.Rule >= 64 || !binding.Address.Is4() || binding.Address.IsUnspecified() || binding.Address.IsMulticast() || binding.Address.IsLoopback() || binding.Address.IsLinkLocalUnicast() || binding.ExpiresAt <= 0 {
+			return fmt.Errorf("invalid DNS-derived domain binding")
+		}
+		if c.Policy.Mode != "include" && c.Policy.Mode != "exclude" || binding.Retained != (c.Policy.Mode == "include") {
+			return fmt.Errorf("domain binding retention must match policy mode")
+		}
+		key := struct {
+			rule    int
+			address netip.Addr
+		}{binding.Rule, binding.Address}
+		if seenBindings[key] {
+			return fmt.Errorf("duplicate DNS-derived domain binding")
+		}
+		seenBindings[key] = true
+	}
 	matches := 0
 	for _, r := range c.Policy.Rules {
 		for _, p := range r.CIDRs {
