@@ -19,6 +19,10 @@ agent:
 operatorNamespace: ""
 clusterDomain: cluster.local
 dns:
+  # Optional literal unicast IPv4 for cluster DNS (Service VIP or reachable
+  # NodeLocal resolver). Empty reads the controller Pod's ClusterFirst
+  # nameserver; no kube-dns Service name/namespace is assumed.
+  clusterIP: ""
   # External DNS questions from dns.mode=gateway go through upstream0 only.
   # Replace when a VPN provider requires a different accessible resolver.
   upstreamIP: "1.1.1.1"

@@ -44,6 +44,7 @@
     "dns": {
       "type": "object",
       "properties": {
+        "clusterIP": {"type": "string", "maxLength": 45},
         "upstreamIP": {"type": "string"},
         "upstreamProbeURL": {"type": "string", "maxLength": 2048}
       }

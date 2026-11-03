@@ -41,7 +41,7 @@ func fixture(t *testing.T) (*GatewayReconciler, *api.EgressGateway) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "apps", Labels: map[string]string{"team": "red"}}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "vpn", Namespace: "operator"}, Data: map[string][]byte{"client.ovpn": []byte("client\n")}}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(gw, &corev1.Pod{}).WithObjects(gw, ns, secret).Build()
-	return &GatewayReconciler{Client: c, Scheme: scheme, Options: Options{OperatorNamespace: "operator", GatewayImage: "gateway:local", OpenVPNImage: "openvpn:local", Datapath: "iproute", ServiceCIDRs: "10.43.0.0/16", PodCIDRs: "10.42.0.0/16"}}, gw
+	return &GatewayReconciler{Client: c, Scheme: scheme, Options: Options{OperatorNamespace: "operator", GatewayImage: "gateway:local", OpenVPNImage: "openvpn:local", Datapath: "iproute", ServiceCIDRs: "10.43.0.0/16", PodCIDRs: "10.42.0.0/16", ClusterDNSIP: "10.43.0.10"}}, gw
 }
 func TestManagedWireGuardPodIdentity(t *testing.T) {
 	r, gw := fixture(t)

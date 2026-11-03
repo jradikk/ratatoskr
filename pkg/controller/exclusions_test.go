@@ -28,13 +28,14 @@ func TestExclusionDiscoveryFromClusterAPIs(t *testing.T) {
 	ctx := context.Background()
 	r.Options.ServiceCIDRs = ""
 	r.Options.PodCIDRs = ""
+	r.Options.ClusterDNSIP = "10.90.0.10"
 	r.Options.ExtraCIDRs = "192.0.2.0/24"
 	gw.Spec.Exclusions.ExtraCIDRs = []string{"198.51.100.0/24"}
 	objects := []interface{}{
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}, Spec: corev1.NodeSpec{PodCIDRs: []string{"10.20.0.0/24", "fd00::/64"}}, Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "172.16.1.2"}}}},
 		&networkingv1.ServiceCIDR{ObjectMeta: metav1.ObjectMeta{Name: "kubernetes"}, Spec: networkingv1.ServiceCIDRSpec{CIDRs: []string{"10.90.0.0/16", "fd01::/108"}}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default"}, Spec: corev1.ServiceSpec{ClusterIP: "10.90.0.1"}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"}, Spec: corev1.ServiceSpec{ClusterIP: "10.90.0.10"}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}}, Spec: corev1.ServiceSpec{ClusterIP: "10.90.0.10"}},
 		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "api-1", Namespace: "default", Labels: map[string]string{discoveryv1.LabelServiceName: "kubernetes"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"172.16.1.10"}}}},
 		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: "dns-1", Namespace: "kube-system", Labels: map[string]string{discoveryv1.LabelServiceName: "kube-dns"}}, AddressType: discoveryv1.AddressTypeIPv4, Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.20.0.53"}}}},
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-pod", Namespace: "operator", Labels: map[string]string{ownerUIDLabel: string(gw.UID)}}, Status: corev1.PodStatus{PodIP: "10.20.0.5"}},

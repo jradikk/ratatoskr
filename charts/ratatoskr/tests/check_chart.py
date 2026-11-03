@@ -253,7 +253,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                 ["spec"]["template"]["spec"]["containers"][0]["env"]}
     for name in ("OPERATOR_NAMESPACE", "GATEWAY_IMAGE", "OPENVPN_IMAGE",
                  "IMAGE_PULL_POLICY", "DRIVER", "DATAPATH", "CLUSTER_DOMAIN",
-                 "SERVICE_CIDRS", "POD_CIDRS", "GATEWAY_UPSTREAM_DNS_IP", "GATEWAY_UPSTREAM_PROBE_URL"):
+                 "SERVICE_CIDRS", "POD_CIDRS", "CLUSTER_DNS_IP", "GATEWAY_UPSTREAM_DNS_IP", "GATEWAY_UPSTREAM_PROBE_URL"):
         assert name in ctrl_env, name
     assert ctrl_env["OPENVPN_IMAGE"]["value"] == (
         "ghcr.io/jradikk/ratatoskr-upstream-openvpn:dev" if dev else
@@ -261,6 +261,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
     assert ctrl_env["DRIVER"]["value"] == driver
     assert ctrl_env["DATAPATH"]["value"] == datapath
     assert ctrl_env["GATEWAY_UPSTREAM_PROBE_URL"]["value"] == ""
+    assert ctrl_env["CLUSTER_DNS_IP"]["value"] == ""
     for spec in (webhook["containers"][0], webhook["initContainers"][0]):
         env = {e["name"]: e for e in spec["env"]}
         assert env["OPERATOR_NAMESPACE"]["value"] == NAMESPACE
@@ -517,6 +518,10 @@ if __name__ == "__main__":
     probe_env = {e["name"]: e["value"] for e in private_probe["Deployment", "ratatoskr-controller"]
                  ["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert probe_env["GATEWAY_UPSTREAM_PROBE_URL"] == "http://198.19.0.1:8080/exit"
+    cluster_dns = render("--set", "dns.clusterIP=169.254.20.10")
+    cluster_env = {e["name"]: e["value"] for e in cluster_dns["Deployment", "ratatoskr-controller"]
+                   ["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert cluster_env["CLUSTER_DNS_IP"] == "169.254.20.10"
     ha_args = ("--set", "controller.replicas=3", "--set", "webhook.replicas=2",
                "--set", "controller.leaderElection.enabled=true")
     helm("lint", str(CHART), "--strict", *ha_args)

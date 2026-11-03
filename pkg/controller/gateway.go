@@ -58,12 +58,12 @@ const (
 
 type Options struct {
 	OperatorNamespace, GatewayImage, OpenVPNImage, ImagePullPolicy, Driver, Datapath, ClusterDomain, ServiceCIDRs, PodCIDRs, ExtraCIDRs, GatewayUpstreamDNSIP, GatewayUpstreamProbeURL string
-	GatewayMetricsEnabled, GatewayMetricsNamespaceSelector, GatewayMetricsPodSelector                                                                                                  string
+	GatewayMetricsEnabled, GatewayMetricsNamespaceSelector, GatewayMetricsPodSelector, ClusterDNSIP                                                                                    string
 }
 
 func OptionsFromEnv() Options {
 	return Options{
-		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"), GatewayMetricsEnabled: os.Getenv("GATEWAY_METRICS_ENABLED"), GatewayMetricsNamespaceSelector: os.Getenv("GATEWAY_METRICS_NAMESPACE_SELECTOR"), GatewayMetricsPodSelector: os.Getenv("GATEWAY_METRICS_POD_SELECTOR"),
+		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"), GatewayMetricsEnabled: os.Getenv("GATEWAY_METRICS_ENABLED"), GatewayMetricsNamespaceSelector: os.Getenv("GATEWAY_METRICS_NAMESPACE_SELECTOR"), GatewayMetricsPodSelector: os.Getenv("GATEWAY_METRICS_POD_SELECTOR"), ClusterDNSIP: os.Getenv("CLUSTER_DNS_IP"),
 	}
 }
 
@@ -74,6 +74,9 @@ type GatewayReconciler struct {
 	Recorder   events.EventRecorder
 	Options    Options
 	HTTPClient *http.Client
+	// ReadResolver is injectable for deterministic cluster-DNS discovery tests;
+	// production reads the controller Pod's kubelet-provided resolv.conf.
+	ReadResolver func() ([]byte, error)
 }
 
 // EndpointID remains stable for the lifetime of the pod and changes on recreation.
@@ -311,7 +314,7 @@ func dnsAdvice(err error) (category, message string) {
 	}
 	switch failure.code {
 	case "ClusterDNSIPv4Missing":
-		return failure.code, "Cluster DNS lacks a usable IPv4 Service address; inspect kube-system/kube-dns before enabling gateway DNS."
+		return failure.code, "Cluster DNS lacks usable IPv4; set Helm dns.clusterIP or a reachable controller Pod ClusterFirst nameserver before enabling gateway DNS."
 	case "GatewayServiceIPv4Missing":
 		return failure.code, "Gateway DNS Service has no usable IPv4 ClusterIP; inspect the Gateway-owned DNS Service."
 	case "GatewayServiceReadDenied":

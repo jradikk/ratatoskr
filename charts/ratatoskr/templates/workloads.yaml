@@ -65,6 +65,8 @@ spec:
               value: {{ join "," .Values.exclusions.serviceCIDRs | quote }}
             - name: POD_CIDRS
               value: {{ join "," .Values.exclusions.podCIDRs | quote }}
+            - name: CLUSTER_DNS_IP
+              value: {{ .Values.dns.clusterIP | quote }}
             - name: GATEWAY_UPSTREAM_DNS_IP
               value: {{ .Values.dns.upstreamIP | quote }}
             - name: GATEWAY_UPSTREAM_PROBE_URL

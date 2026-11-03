@@ -174,7 +174,7 @@ func TestGatewayDNSOwnedServiceWithInvalidIPv4Closes(t *testing.T) {
 
 func TestGatewayDNSAdviceFixedCategories(t *testing.T) {
 	for _, tc := range []struct{ code, want string }{
-		{"ClusterDNSIPv4Missing", "kube-system/kube-dns"},
+		{"ClusterDNSIPv4Missing", "dns.clusterIP"},
 		{"GatewayServiceIPv4Missing", "ClusterIP"},
 		{"GatewayServiceReadDenied", "services get"},
 		{"GatewayServiceReadFailed", "API availability"},

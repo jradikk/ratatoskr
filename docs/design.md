@@ -184,8 +184,11 @@ the current RBAC design ([ADR-0013](adr/0013-wireguard-registration-identity.md)
 `dns.mode: cluster` keeps workload DNS unchanged and directs DNS over the
 cluster path, which is not a DNS privacy guarantee. `dns.mode: gateway`
 rewrites selected Pod DNS to a dedicated gateway DNS Service; cluster zones
-and reverse lookups use cluster DNS, other requests traverse the bound
-upstream path. Admission requires a healthy gateway DNS endpoint. Effective
+and reverse lookups use a literal `dns.clusterIP` override or the controller
+Pod's ClusterFirst `/etc/resolv.conf` nameserver. No fixed kube-dns Service
+name/namespace is required; matching labeled DNS Services and EndpointSlices
+are also direct exclusions. Other requests traverse the bound upstream path.
+Admission requires a healthy gateway DNS endpoint. Effective
 IPv4 exclusions combine configured Pod/Service/extra CIDRs, Node addresses,
 ServiceCIDR discovery where available, Kubernetes API and DNS endpoints, and
 link-local space; unknown required cluster ranges block the Gateway instead

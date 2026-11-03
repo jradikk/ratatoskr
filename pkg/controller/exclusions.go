@@ -5,6 +5,7 @@ import (
 	goerrors "errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"sort"
 	"strings"
 
@@ -54,6 +55,10 @@ func exclusionAdvice(err error) (code, message string) {
 		return failure.code, "ServiceCIDR API contains invalid CIDRs; correct networking.k8s.io ServiceCIDR data."
 	case "EndpointAddressInvalid":
 		return failure.code, "Discovered Pod, Service or EndpointSlice IPv4 address invalid; correct cluster network objects."
+	case "ClusterDNSInvalid":
+		return failure.code, "Configured dns.clusterIP is not usable IPv4; set Helm dns.clusterIP to the cluster DNS Service or reachable NodeLocal IPv4 address."
+	case "ClusterDNSUnknown":
+		return failure.code, "Cluster DNS IPv4 unavailable; configure Helm dns.clusterIP or ensure controller Pod ClusterFirst DNS nameserver is reachable."
 	case "ExclusionsTooMany":
 		return failure.code, "Too many effective exclusions; reduce configured extra CIDRs or discovered ranges."
 	case "NodesReadDenied":
@@ -63,9 +68,9 @@ func exclusionAdvice(err error) (code, message string) {
 	case "PodsReadDenied":
 		return failure.code, "Cannot list owned Gateway Pods for exclusions; grant the controller pods list permission."
 	case "ServiceReadDenied":
-		return failure.code, "Cannot GET Kubernetes API or kube-dns Services; grant the controller services get permission."
+		return failure.code, "Cannot GET Kubernetes API Service or list labeled DNS Services; grant controller services get/list permission."
 	case "EndpointSlicesReadDenied":
-		return failure.code, "Cannot list Kubernetes API or kube-dns EndpointSlices; grant the controller discovery.k8s.io endpointslices list permission."
+		return failure.code, "Cannot list Kubernetes API or discovered DNS EndpointSlices; grant controller discovery.k8s.io endpointslices list permission."
 	case "NodesReadFailed":
 		return failure.code, "Cannot list Nodes for exclusions; check API availability and controller nodes access."
 	case "ServiceCIDRsReadFailed":
@@ -73,9 +78,9 @@ func exclusionAdvice(err error) (code, message string) {
 	case "PodsReadFailed":
 		return failure.code, "Cannot list owned Gateway Pods for exclusions; check API availability and controller pods access."
 	case "ServiceReadFailed":
-		return failure.code, "Cannot GET Kubernetes API or kube-dns Services; check API availability and controller services access."
+		return failure.code, "Cannot GET Kubernetes API Service or list labeled DNS Services; check API availability and controller services access."
 	case "EndpointSlicesReadFailed":
-		return failure.code, "Cannot list Kubernetes API or kube-dns EndpointSlices; check API availability and controller endpointslices access."
+		return failure.code, "Cannot list Kubernetes API or discovered DNS EndpointSlices; check API availability and controller endpointslices access."
 	default:
 		return "Unknown", "Exclusion discovery blocked; check controller access to cluster network resources."
 	}
@@ -144,6 +149,74 @@ func exclusionReadError(resource string, err error) error {
 		return exclusionError(resource+"ReadDenied", err)
 	}
 	return exclusionError(resource+"ReadFailed", err)
+}
+
+// addServiceAndSlices preserves direct access to discovered Service VIPs and
+// endpoint IPs. API read errors remain typed without exporting API response text.
+func (e *exclusions) addServiceAndSlices(ctx context.Context, r *GatewayReconciler, svc *corev1.Service, source string) error {
+	for _, value := range append([]string{svc.Spec.ClusterIP}, svc.Spec.ClusterIPs...) {
+		if value == "" || value == corev1.ClusterIPNone {
+			continue
+		}
+		ip, err := netip.ParseAddr(value)
+		if err != nil {
+			return exclusionError("EndpointAddressInvalid", err)
+		}
+		if ip.Is4() {
+			if err := e.addIP(value, source); err != nil {
+				return exclusionError("EndpointAddressInvalid", err)
+			}
+		}
+	}
+	var slices discoveryv1.EndpointSliceList
+	if err := r.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name}); err != nil {
+		return exclusionReadError("EndpointSlices", err)
+	}
+	for _, slice := range slices.Items {
+		if slice.AddressType != discoveryv1.AddressTypeIPv4 {
+			continue
+		}
+		for _, endpoint := range slice.Endpoints {
+			for _, value := range endpoint.Addresses {
+				if err := e.addIP(value, source); err != nil {
+					return exclusionError("EndpointAddressInvalid", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// clusterDNSAddress uses the operator's explicit service/node-local resolver
+// override when provided; otherwise it reads the controller Pod's ClusterFirst
+// resolver configuration. Never assume a DNS Service name or namespace.
+func (r *GatewayReconciler) clusterDNSAddress() (netip.Addr, error) {
+	if r.Options.ClusterDNSIP != "" {
+		ip, err := netip.ParseAddr(r.Options.ClusterDNSIP)
+		if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() {
+			return netip.Addr{}, exclusionError("ClusterDNSInvalid", err)
+		}
+		return ip, nil
+	}
+	read := r.ReadResolver
+	if read == nil {
+		read = func() ([]byte, error) { return os.ReadFile("/etc/resolv.conf") }
+	}
+	raw, err := read()
+	if err != nil || len(raw) > 16<<10 {
+		return netip.Addr{}, exclusionError("ClusterDNSUnknown", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
+		if len(fields) != 2 || fields[0] != "nameserver" {
+			continue
+		}
+		ip, parseErr := netip.ParseAddr(fields[1])
+		if parseErr == nil && ip.Is4() && !ip.IsUnspecified() && !ip.IsMulticast() && !ip.IsLoopback() {
+			return ip, nil
+		}
+	}
+	return netip.Addr{}, exclusionError("ClusterDNSUnknown", nil)
 }
 
 // collectExclusions uses a direct APIReader for the optional ServiceCIDR API;
@@ -263,63 +336,44 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			}
 		}
 	}
-	for _, svc := range []types.NamespacedName{{Namespace: "default", Name: "kubernetes"}, {Namespace: "kube-system", Name: "kube-dns"}} {
-		var service corev1.Service
-		if err := r.Get(ctx, svc, &service); err != nil {
-			if errors.IsNotFound(err) {
-				continue
-			}
+	// The Kubernetes API Service name is fixed by Kubernetes. Cluster DNS is
+	// intentionally not: CoreDNS can live in another namespace/name, and a
+	// kubelet-configured NodeLocal resolver may not have a Service at all.
+	var apiService corev1.Service
+	apiKey := types.NamespacedName{Namespace: "default", Name: "kubernetes"}
+	if err := r.Get(ctx, apiKey, &apiService); err != nil {
+		if !errors.IsNotFound(err) {
 			return nil, "", exclusionReadError("Service", err)
 		}
-		source := "apiserver"
-		if svc.Name == "kube-dns" {
-			source = "dns"
-		}
-		for _, ip := range append([]string{service.Spec.ClusterIP}, service.Spec.ClusterIPs...) {
-			if ip == "" || ip == corev1.ClusterIPNone {
-				continue
-			}
-			addr, e := netip.ParseAddr(ip)
-			if e != nil {
-				return nil, "", exclusionError("EndpointAddressInvalid", e)
-			}
-			if addr.Is4() {
-				if e = found.addIP(ip, source); e != nil {
-					return nil, "", exclusionError("EndpointAddressInvalid", e)
-				}
-			}
-		}
-		var slices discoveryv1.EndpointSliceList
-		if err := r.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name}); err != nil {
-			return nil, "", exclusionReadError("EndpointSlices", err)
-		}
-		for _, slice := range slices.Items {
-			if slice.AddressType != discoveryv1.AddressTypeIPv4 {
-				continue
-			}
-			for _, ep := range slice.Endpoints {
-				for _, ip := range ep.Addresses {
-					if err := found.addIP(ip, source); err != nil {
-						return nil, "", exclusionError("EndpointAddressInvalid", err)
-					}
-				}
-			}
-		}
-
+	} else if err := found.addServiceAndSlices(ctx, r, &apiService, "apiserver"); err != nil {
+		return nil, "", err
 	}
-	dnsIP := ""
-	var dns corev1.Service
-	if err := r.Get(ctx, types.NamespacedName{Namespace: "kube-system", Name: "kube-dns"}, &dns); err == nil {
-		ip, e := netip.ParseAddr(dns.Spec.ClusterIP)
-		if e == nil && ip.Is4() && !ip.IsUnspecified() {
-			dnsIP = ip.String()
-		}
-	} else if !errors.IsNotFound(err) {
+	resolver, err := r.clusterDNSAddress()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := found.addIP(resolver.String(), "dns"); err != nil {
+		return nil, "", exclusionError("EndpointAddressInvalid", err)
+	}
+	// Discover DNS Services by common kube-dns/CoreDNS labels, without relying
+	// on their namespace or name. Do not pick an unrelated candidate as the
+	// resolver: kubelet's actual controller Pod resolver/explicit override wins.
+	var services corev1.ServiceList
+	if err := r.List(ctx, &services); err != nil {
 		return nil, "", exclusionReadError("Service", err)
+	}
+	for i := range services.Items {
+		svc := &services.Items[i]
+		if svc.Labels["k8s-app"] != "kube-dns" && svc.Labels["app.kubernetes.io/name"] != "coredns" && svc.Labels["app.kubernetes.io/name"] != "kube-dns" {
+			continue
+		}
+		if err := found.addServiceAndSlices(ctx, r, svc, "dns"); err != nil {
+			return nil, "", err
+		}
 	}
 	result, err := found.result()
 	if err != nil {
 		return nil, "", exclusionError("ExclusionsTooMany", err)
 	}
-	return result, dnsIP, nil
+	return result, resolver.String(), nil
 }
