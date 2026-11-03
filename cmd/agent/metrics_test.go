@@ -13,9 +13,10 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/observability"
 )
 
-func TestAgentMetricsServerLoopbackOnlyAndShutdown(t *testing.T) {
-	if agentMetricsAddr != "127.0.0.1:9903" {
-		t.Fatalf("private agent metrics address changed: %q", agentMetricsAddr)
+func TestAgentMetricsServerPodIPAndShutdown(t *testing.T) {
+	t.Setenv("METRICS_BIND_ADDRESS", "")
+	if agentMetricsAddr != "0.0.0.0:9903" {
+		t.Fatalf("agent Pod-IP metrics address changed: %q", agentMetricsAddr)
 	}
 	programming := observability.NewAgentProgramming()
 	server, listener, err := agentMetricsServer(programming)
@@ -23,14 +24,14 @@ func TestAgentMetricsServerLoopbackOnlyAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Close()
-	if addr, ok := listener.Addr().(*net.TCPAddr); !ok || !addr.IP.IsLoopback() || addr.Port != 9903 {
+	if addr, ok := listener.Addr().(*net.TCPAddr); !ok || !addr.IP.IsUnspecified() || addr.Port != 9903 {
 		t.Fatalf("metrics listener is not fixed loopback tcp4: %s", listener.Addr())
 	}
 	finished := make(chan error, 1)
 	go func() { finished <- server.Serve(listener) }()
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	defer client.CloseIdleConnections()
-	response, err := client.Get("http://" + agentMetricsAddr + "/metrics")
+	response, err := client.Get("http://127.0.0.1:9903/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +40,7 @@ func TestAgentMetricsServerLoopbackOnlyAndShutdown(t *testing.T) {
 	if err != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), "ratatoskr_agent_programming_attempts_total") {
 		t.Fatalf("private metrics endpoint unavailable: status=%d err=%v", response.StatusCode, err)
 	}
-	response, err = client.Get("http://" + agentMetricsAddr + "/healthz")
+	response, err = client.Get("http://127.0.0.1:9903/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}

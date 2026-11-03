@@ -11,6 +11,7 @@ import (
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/controller"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -40,7 +41,12 @@ func main() {
 	utilruntime.Must(discoveryv1.AddToScheme(scheme))
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	utilruntime.Must(api.AddToScheme(scheme))
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: server.Options{BindAddress: "0"}, LeaderElection: *leader, LeaderElectionID: "ratatoskr-controller.skaldhall.io", Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Secret{}}}}})
+	metricsAddress, err := observability.ManagerMetricsBindAddress(os.Getenv("METRICS_ENABLED"), os.Getenv("METRICS_BIND_ADDRESS"), "0.0.0.0:8080")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "controller failed:", err)
+		os.Exit(1)
+	}
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: server.Options{BindAddress: metricsAddress}, LeaderElection: *leader, LeaderElectionID: "ratatoskr-controller.skaldhall.io", Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Secret{}}}}})
 	if err == nil {
 		r := &controller.GatewayReconciler{Client: mgr.GetClient(), Scheme: scheme, APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder("egressgateway-controller"), Options: controller.OptionsFromEnv()}
 		err = r.SetupWithManager(mgr)

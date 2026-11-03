@@ -33,9 +33,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Metrics stay on loopback inside the agent Pod's own network namespace.
-// No Service, listener on the Pod IP, or RBAC is added for scraping.
-const agentMetricsAddr = "127.0.0.1:9903"
+// Agent metrics bind its Pod IP by default; a scrape ingress policy must
+// restrict sources independently of the health/readiness listener.
+const agentMetricsAddr = "0.0.0.0:9903"
 
 // Health uses the chart-selected port inside the agent Pod's network namespace.
 func agentHealthAddress() (string, error) {
@@ -51,12 +51,16 @@ func agentHealthAddress() (string, error) {
 }
 
 func agentMetricsServer(programming *observability.AgentProgramming) (*http.Server, net.Listener, error) {
+	address, err := observability.MetricsBindAddress(os.Getenv("METRICS_BIND_ADDRESS"), agentMetricsAddr)
+	if err != nil {
+		return nil, nil, err
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", observability.AgentHandler(programming))
-	server := &http.Server{Addr: agentMetricsAddr, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
+	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
 	listener, err := net.Listen("tcp4", server.Addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen private agent metrics: %w", err)
+		return nil, nil, fmt.Errorf("listen agent metrics: %w", err)
 	}
 	return server, listener, nil
 }
@@ -106,22 +110,28 @@ func run(ctx context.Context) error {
 	if err := reconciler.Bootstrap(ctx); err != nil {
 		return fmt.Errorf("verify isolated agent namespace bootstrap: %w", err)
 	}
-	metrics, metricsListener, err := agentMetricsServer(programming)
+	metricsEnabled, err := observability.MetricsEnabled(os.Getenv("METRICS_ENABLED"))
 	if err != nil {
-		return err // no metrics listener means no Ready agent process
+		return err
 	}
-	go func() {
-		if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("private agent metrics server failed", "error", err)
+	if metricsEnabled {
+		metrics, metricsListener, err := agentMetricsServer(programming)
+		if err != nil {
+			return err
 		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := metrics.Shutdown(shutdownCtx); err != nil {
-			logger.Error("agent metrics shutdown failed", "error", err)
-		}
-	}()
+		go func() {
+			if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("agent metrics server failed", "error", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := metrics.Shutdown(shutdownCtx); err != nil {
+				logger.Error("agent metrics shutdown failed", "error", err)
+			}
+		}()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

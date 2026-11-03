@@ -36,9 +36,9 @@ import (
 	mdns "github.com/miekg/dns"
 )
 
-// gatewayMetricsAddr is private to the gateway pod's network namespace.
-// A future Service/scraper must explicitly review authentication and policy.
-const gatewayMetricsAddr = "127.0.0.1:9902"
+// The gateway scrape listener binds its Pod IP by default. Gateway ingress
+// NetworkPolicy must restrict scrape sources; /info and /healthz remain on 9900.
+const gatewayMetricsAddr = "0.0.0.0:9902"
 
 // A private loopback endpoint in the shared pod network namespace is the only
 // source of truth for VPN health and exit IP. The gateway publishes only cached
@@ -329,9 +329,8 @@ func run(ctx context.Context, configPath string) error {
 	})
 	mux.HandleFunc("/info", gatewayInfoHandler(&current))
 	server.Handler = mux
-	// The health API remains on the pod network for probes/controller. Metrics
-	// are deliberately bound to loopback only; do not add a public Service or
-	// NetworkPolicy ingress without an explicit scrape-authentication design.
+	// Metrics are independently configurable. The controller-rendered gateway
+	// ingress policy must allow only explicitly approved monitoring sources.
 	gatewaySnapshot := func() (bool, int) {
 		s := current.Load().(state)
 		return s.ready, s.effectiveMTU
@@ -341,25 +340,35 @@ func run(ctx context.Context, configPath string) error {
 	if cfg.Encryption == "wireguard" {
 		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice)
 	}
-	metrics := &http.Server{Addr: gatewayMetricsAddr, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
-	metricsListener, err := net.Listen("tcp4", metrics.Addr)
-	if err != nil {
-		return fmt.Errorf("listen private gateway metrics: %w", err)
-	}
 	serverErrors := make(chan error, 2)
-	go func() {
-		if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			select {
-			case serverErrors <- fmt.Errorf("private gateway metrics: %w", err):
-			default:
-			}
+	metricsEnabled, err := observability.MetricsEnabled(os.Getenv("METRICS_ENABLED"))
+	if err != nil {
+		return err
+	}
+	if metricsEnabled {
+		metricsAddress, err := observability.MetricsBindAddress(os.Getenv("METRICS_BIND_ADDRESS"), gatewayMetricsAddr)
+		if err != nil {
+			return err
 		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = metrics.Shutdown(shutdownCtx)
-	}()
+		metrics := &http.Server{Addr: metricsAddress, Handler: metricsHandler, ReadHeaderTimeout: 3 * time.Second}
+		metricsListener, err := net.Listen("tcp4", metrics.Addr)
+		if err != nil {
+			return fmt.Errorf("listen gateway metrics: %w", err)
+		}
+		go func() {
+			if err := metrics.Serve(metricsListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				select {
+				case serverErrors <- fmt.Errorf("gateway metrics: %w", err):
+				default:
+				}
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = metrics.Shutdown(shutdownCtx)
+		}()
+	}
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen gateway health API: %w", err)
