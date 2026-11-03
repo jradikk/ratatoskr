@@ -212,9 +212,32 @@ spec:
                     maxLength: 1024
                     minLength: 1
                     type: string
+                  profiles:
+                    description: Each independent upstream profile owns one gateway Pod and Secret.
+                    maxItems: 8
+                    items:
+                      type: object
+                      required:
+                      - name
+                      - secretRef
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                          maxLength: 32
+                          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                        secretRef:
+                          type: object
+                          required:
+                          - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                              maxLength: 253
+                    type: array
                   secretRef:
-                    description: Name of a Secret containing the upstream configuration.
-                      No profile contents belong in this API.
+                    description: Legacy single-profile Secret in this Gateway namespace.
                     properties:
                       name:
                         description: Secret in the gateway's namespace.
@@ -235,7 +258,6 @@ spec:
                     - custom
                     type: string
                 required:
-                - secretRef
                 - type
                 type: object
                 x-kubernetes-validations:

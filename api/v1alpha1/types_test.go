@@ -96,3 +96,26 @@ func TestSchemeAndResources(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileJSONAndDeepCopy(t *testing.T) {
+	gateway := &EgressGateway{Spec: EgressGatewaySpec{Upstream: UpstreamSpec{Type: "openvpn", Profiles: []UpstreamProfile{{Name: "berlin", SecretRef: SecretReference{Name: "berlin-secret"}}, {Name: "oslo", SecretRef: SecretReference{Name: "oslo-secret"}}}}}}
+	raw, err := json.Marshal(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"secretRef":{}`) || !strings.Contains(string(raw), `"profiles"`) {
+		t.Fatalf("legacy secretRef unexpectedly serialized or profiles absent: %s", raw)
+	}
+	decoded := &EgressGateway{}
+	if err := json.Unmarshal(raw, decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Spec.Upstream.Profiles, gateway.Spec.Upstream.Profiles) {
+		t.Fatal("profile round-trip changed")
+	}
+	copy := gateway.DeepCopy()
+	copy.Spec.Upstream.Profiles[0].SecretRef.Name = "new-secret"
+	if gateway.Spec.Upstream.Profiles[0].SecretRef.Name != "berlin-secret" {
+		t.Fatal("profile deep-copy alias")
+	}
+}
