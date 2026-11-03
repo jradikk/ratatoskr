@@ -459,6 +459,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 		operation = observability.AgentCleanup
 	}
 	if err = r.observeProgram(operation, func() error {
+		if domainPolicy != nil {
+			return r.domainOperations().program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode)
+		}
 		return Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode)
 	}); err != nil {
 		if rt := r.domainRuntime(string(pod.UID)); rt != nil {

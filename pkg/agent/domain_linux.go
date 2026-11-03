@@ -16,6 +16,7 @@ import (
 	"time"
 
 	mdns "github.com/miekg/dns"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +34,8 @@ import (
 // domainOperations keeps kernel-only effects injectable for offline race/failure
 // tests. Production defaults always use verified netns entry and marked sockets.
 type domainOperations struct {
+	marker         func() error
+	clearMarker    func() error
 	measure        func(*datapath.ClientConfig) error
 	mark           func(int) error
 	own            func(context.Context) error
@@ -51,13 +54,57 @@ type domainOperations struct {
 	interval       time.Duration
 }
 
+// Domain programming deliberately withholds the marker. The DNS capture and
+// optimistic persisted state must be established before wait-init can proceed.
+func programDomain(ctx context.Context, target *os.File, cfg *datapath.ClientConfig, gatewayMTU int, _ string, _ bool, factory BackendFactory, _ string) error {
+	return InNamespace(target, func() error {
+		if err := verifyTargetPodIPv4(cfg.PodIP); err != nil {
+			return err
+		}
+		if err := guardWorkload(); err != nil {
+			return err
+		}
+		if err := clearReadyMarker(); err != nil {
+			return err
+		}
+		backend, err := factory()
+		if err != nil {
+			return err
+		}
+		defer backend.Close()
+		measured := *cfg
+		measured.MTU = gatewayMTU
+		if err = completeClientMTU(&measured); err != nil {
+			return err
+		}
+		if measured.MTU != cfg.MTU {
+			return errors.New("domain client MTU changed during application")
+		}
+		return backend.ApplyClient(ctx, *cfg)
+	})
+}
+
 func (r *Reconciler) domainOperations() domainOperations {
 	if r.domainOps != nil {
 		return *r.domainOps
 	}
-	return domainOperations{measure: completeClientMTU, mark: func(fd int) error {
+	return domainOperations{marker: func() error {
+		link, err := netlink.LinkByName(Marker)
+		if err == nil {
+			return netlink.LinkSetUp(link)
+		}
+		var missing netlink.LinkNotFoundError
+		if !errors.As(err, &missing) {
+			return err
+		}
+		dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: Marker}}
+		if err = netlink.LinkAdd(dummy); err != nil {
+			return err
+		}
+		return netlink.LinkSetUp(dummy)
+	}, clearMarker: clearReadyMarker, measure: completeClientMTU, mark: func(fd int) error {
 		return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, int(iproute.DNSControlMark))
-	}, own: r.VerifyOwnPod, enter: InNamespace, verifyTarget: verifyTargetPodIPv4, recheck: recheckSandbox, sandbox: Sandbox, program: Program, quarantine: quarantineUnknownAuthorization, redirect: iproute.InstallDNSRedirect, verifyRedirect: iproute.VerifyDNSRedirect, removeRedirect: iproute.RemoveDNSRedirect, listenPacket: net.ListenPacket, listen: net.Listen, dial: func(ctx context.Context, network, address string, control func(string, string, syscall.RawConn) error) (net.Conn, error) {
+	}, own: r.VerifyOwnPod, enter: InNamespace, verifyTarget: verifyTargetPodIPv4, recheck: recheckSandbox, sandbox: Sandbox, program: programDomain, quarantine: quarantineUnknownAuthorization, redirect: iproute.InstallDNSRedirect, verifyRedirect: iproute.VerifyDNSRedirect, removeRedirect: iproute.RemoveDNSRedirect, listenPacket: net.ListenPacket, listen: net.Listen, dial: func(ctx context.Context, network, address string, control func(string, string, syscall.RawConn) error) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second, Control: control}).DialContext(ctx, network, address)
 	}, interval: time.Second}
 }
@@ -269,6 +316,9 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 			if err = r.patchDomainReady(ctx, pod, cfg, mode); err != nil {
 				return r.poisonDomain(old, target, pod, err)
 			}
+			if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
+				return r.poisonDomain(old, target, pod, err)
+			}
 			return nil
 		}
 		return r.poisonDomain(old, target, pod, errors.New("DNS interception missing"))
@@ -359,6 +409,9 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		return r.poisonDomain(rt, target, pod, err)
 	}
 	if err = r.patchDomainReady(ctx, pod, cfg, mode); err != nil {
+		return r.poisonDomain(rt, target, pod, err)
+	}
+	if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
 		return r.poisonDomain(rt, target, pod, err)
 	}
 	go r.syncDomain(ctx, rt) // #nosec G118 -- process-lived worker inherits ctx; bounded fresh contexts are only for fail-closed compensation.
@@ -492,6 +545,9 @@ func (r *Reconciler) applyDomain(ctx context.Context, rt *domainRuntime, u fqdn.
 		return r.poisonDomain(rt, target, &pod, err)
 	}
 	if err = r.patchDomainReady(ctx, &pod, next, backendMode(r.Datapath)); err != nil {
+		return r.poisonDomain(rt, target, &pod, err)
+	}
+	if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
 		return r.poisonDomain(rt, target, &pod, err)
 	}
 	return nil
