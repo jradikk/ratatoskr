@@ -331,6 +331,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 			if domainPolicy == nil {
 				return revoke(errors.New("domain policy requires authenticated agent"))
 			}
+			if rt := r.domainRuntime(string(pod.UID)); rt != nil && !rt.retired.Load() {
+				resolver, e := r.domainResolver(ctx, &gw)
+				if e != nil || rt.policyUID != cfg.DomainPolicyUID || rt.generation != cfg.DomainPolicyGeneration || rt.resolver != resolver || rt.gatewayUID != string(gw.UID) {
+					return r.poisonDomain(rt, rt.netns, pod, errors.New("domain policy or resolver changed; rollout required"))
+				}
+			}
 			if err = restoreDomainConfig(pod, &cfg, *domainPolicy, mode); err != nil {
 				return revoke(err)
 			}
