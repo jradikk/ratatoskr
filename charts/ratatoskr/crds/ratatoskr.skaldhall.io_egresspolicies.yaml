@@ -75,8 +75,8 @@ spec:
                 items:
                   properties:
                     cidrs:
-                      description: Empty CIDRs matches any destination (subject to
-                        ports and exclusions).
+                      description: Empty CIDRs matches any destination only when
+                        domains are also empty; unresolved domain-only rules match nothing.
                       items:
                         maxLength: 64
                         type: string
@@ -85,6 +85,34 @@ spec:
                       x-kubernetes-validations:
                       - message: each destination must be a valid CIDR
                         rule: self.all(c, isCIDR(c))
+                    domains:
+                      description: Canonical DNS selectors; CIDRs and domains are
+                        OR alternatives. Only agent driver with gateway DNS mode
+                        may use domain rules. Unresolved domains match nothing.
+                      items:
+                        properties:
+                          matchName:
+                            description: Exact lowercase ASCII DNS name without
+                              a trailing dot or IP literal.
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          matchPattern:
+                            description: Leading *. wildcard with at least two
+                              suffix labels; matches descendants, not the apex.
+                            maxLength: 253
+                            pattern: ^\*\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of matchName or matchPattern is required
+                          rule: has(self.matchName) != has(self.matchPattern)
+                        - message: DNS labels must be at most 63 characters
+                          rule: '!has(self.matchName) || self.matchName.split(''.'').all(label, size(label) <= 63)'
+                        - message: wildcard suffix labels must be at most 63 characters
+                          rule: '!has(self.matchPattern) || self.matchPattern.substring(2).split(''.'').all(label, size(label) <= 63)'
+                      maxItems: 64
+                      type: array
                     ports:
                       items:
                         properties:
