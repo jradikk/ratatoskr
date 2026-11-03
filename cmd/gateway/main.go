@@ -336,9 +336,21 @@ func run(ctx context.Context, configPath string) error {
 		return s.ready, s.effectiveMTU
 	}
 	traffic := observability.NewGatewayLinkTraffic(cfg.Encryption == "wireguard", netlink.LinkByName)
-	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic)
+	connections := observability.NewGatewayConnections(func() ([]netip.Addr, []netip.Addr, error) {
+		// Only an applied, ready snapshot may define the selected-client scope.
+		published := current.Load().(state)
+		if !published.ready || published.appliedClientConfigHash == "" {
+			return nil, nil, errors.New("gateway client scope not ready")
+		}
+		applied, hash, err := readGatewayConfigSnapshot(configPath)
+		if err != nil || hash != published.appliedClientConfigHash || current.Load().(state) != published {
+			return nil, nil, errors.New("gateway client scope does not match applied config")
+		}
+		return observability.KernelConnectionScope(applied.Clients)
+	}, observability.KernelConntrackFlows)
+	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic, connections)
 	if cfg.Encryption == "wireguard" {
-		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice)
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice, connections)
 	}
 	serverErrors := make(chan error, 2)
 	metricsEnabled, err := observability.MetricsEnabled(os.Getenv("METRICS_ENABLED"))
