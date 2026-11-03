@@ -272,19 +272,40 @@ func TestGatewayMetricsDisableRemovesOnlyOwnedService(t *testing.T) {
 	}
 }
 
-func TestGatewayMetricsEnabledRequiresExplicitBoundedSelectors(t *testing.T) {
+func TestGatewayMetricsDefaultAllowsAnySourceAndCustomSelectors(t *testing.T) {
 	r, gw := gatewayWithProfiles(t)
 	r.Options.GatewayMetricsEnabled = "true"
+	for _, tc := range []struct {
+		ns, pod string
+		bounded bool
+	}{
+		{`{}`, `{}`, false},
+		{`{}`, `{"matchLabels":{"app":"prometheus"}}`, true},
+		{`{"matchLabels":{"team":"monitoring"}}`, `{}`, true},
+		{`{"matchLabels":{"team":"monitoring"}}`, `{"matchLabels":{"app":"prometheus"}}`, true},
+	} {
+		r.Options.GatewayMetricsNamespaceSelector, r.Options.GatewayMetricsPodSelector = tc.ns, tc.pod
+		objects, err := r.render(gw, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy := objects[len(objects)-1].(*networkingv1.NetworkPolicy)
+		rule := policy.Spec.Ingress[len(policy.Spec.Ingress)-1]
+		if len(rule.Ports) != 1 || rule.Ports[0].Port.IntVal != 9902 || (len(rule.From) != 0) != tc.bounded {
+			t.Fatalf("gateway metrics source scope mismatch: %+v", rule)
+		}
+		if tc.bounded && (rule.From[0].NamespaceSelector == nil || rule.From[0].PodSelector == nil) {
+			t.Fatalf("partial selector must cover all namespaces or pods explicitly: %+v", rule)
+		}
+	}
 	for _, tc := range []struct{ ns, pod string }{
 		{"", `{"matchLabels":{"app":"prometheus"}}`},
-		{`{}`, `{"matchLabels":{"app":"prometheus"}}`},
 		{`{"matchLabels":{"team":"monitoring"}}`, ""},
-		{`{"matchLabels":{"team":"monitoring"}}`, `{}`},
 		{`{"matchLabels":{"team":"monitoring"}}`, `{"matchExpressions":[{"key":"app","operator":"Invalid","values":["prometheus"]}]}`},
 	} {
 		r.Options.GatewayMetricsNamespaceSelector, r.Options.GatewayMetricsPodSelector = tc.ns, tc.pod
 		if _, err := r.render(gw, nil); err == nil {
-			t.Fatal("unsafe empty/invalid metrics selector accepted")
+			t.Fatal("missing/invalid metrics selector accepted")
 		}
 	}
 }

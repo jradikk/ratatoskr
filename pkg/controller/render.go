@@ -36,18 +36,16 @@ func (r *GatewayReconciler) gatewayMetricsIngress() (*networkingv1.NetworkPolicy
 		return nil, false, nil
 	}
 	decode := func(raw string) (*metav1.LabelSelector, error) {
-		// An empty or {} selector admits every Pod in every namespace. Never
-		// turn a missing controller env value into unauthenticated metrics
-		// ingress, even if a chart normally supplies both selectors.
+		// The chart sends explicit JSON {} for an unrestricted selector. Missing
+		// env remains an error instead of silently broadening older releases.
 		if raw == "" {
-			return nil, fmt.Errorf("configured metrics ingress selectors must be nonempty")
+			return nil, fmt.Errorf("configured metrics ingress selector missing")
 		}
 		var selector metav1.LabelSelector
 		dec := json.NewDecoder(strings.NewReader(raw))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&selector); err != nil || dec.Decode(new(any)) != io.EOF ||
-			len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
-			return nil, fmt.Errorf("invalid or empty configured metrics ingress selector")
+		if err := dec.Decode(&selector); err != nil || dec.Decode(new(any)) != io.EOF {
+			return nil, fmt.Errorf("invalid configured metrics ingress selector")
 		}
 		if _, err := metav1.LabelSelectorAsSelector(&selector); err != nil {
 			return nil, fmt.Errorf("invalid configured metrics ingress selector")
@@ -304,7 +302,13 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	if metricsEnabled {
 		metrics := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-metrics", Namespace: gw.Namespace, Labels: selector, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: selector, Ports: []corev1.ServicePort{{Name: "metrics", Port: 9902, TargetPort: intstr.FromInt32(9902), Protocol: corev1.ProtocolTCP}}}}
 		objects = append(objects, metrics)
-		np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: []networkingv1.NetworkPolicyPeer{*metricsPeer}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9902)}}})
+		// No From clause permits any source, including external source IPs;
+		// optional nonempty selectors retain namespace/Pod restrictions.
+		var from []networkingv1.NetworkPolicyPeer
+		if len(metricsPeer.NamespaceSelector.MatchLabels) > 0 || len(metricsPeer.NamespaceSelector.MatchExpressions) > 0 || len(metricsPeer.PodSelector.MatchLabels) > 0 || len(metricsPeer.PodSelector.MatchExpressions) > 0 {
+			from = []networkingv1.NetworkPolicyPeer{*metricsPeer}
+		}
+		np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: from, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9902)}}})
 	}
 	if gw.Spec.DNS.Mode == "gateway" {
 		dns := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-dns", Namespace: gw.Namespace, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, PublishNotReadyAddresses: true, Selector: selector, Ports: []corev1.ServicePort{{Name: "dns-udp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolUDP}, {Name: "dns-tcp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolTCP}}}}

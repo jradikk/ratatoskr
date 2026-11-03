@@ -18,11 +18,11 @@ spec:
         - protocol: TCP
           port: 8081
     {{- if .Values.metrics.enabled }}
-    - from:
-        - namespaceSelector:
-            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
-          podSelector:
-            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+    - {{- if or .Values.metrics.ingress.namespaceSelector .Values.metrics.ingress.podSelector }}
+      from:
+        - namespaceSelector: {{ toJson .Values.metrics.ingress.namespaceSelector }}
+          podSelector: {{ toJson .Values.metrics.ingress.podSelector }}
+      {{- end }}
       ports:
         - protocol: TCP
           port: 8080
@@ -47,11 +47,11 @@ spec:
         - protocol: TCP
           port: 8081
     {{- if .Values.metrics.enabled }}
-    - from:
-        - namespaceSelector:
-            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
-          podSelector:
-            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+    - {{- if or .Values.metrics.ingress.namespaceSelector .Values.metrics.ingress.podSelector }}
+      from:
+        - namespaceSelector: {{ toJson .Values.metrics.ingress.namespaceSelector }}
+          podSelector: {{ toJson .Values.metrics.ingress.podSelector }}
+      {{- end }}
       ports:
         - protocol: TCP
           port: 9904
@@ -77,11 +77,11 @@ spec:
         - protocol: TCP
           port: {{ .Values.agent.healthPort }}
     {{- if .Values.metrics.enabled }}
-    - from:
-        - namespaceSelector:
-            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
-          podSelector:
-            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+    - {{- if or .Values.metrics.ingress.namespaceSelector .Values.metrics.ingress.podSelector }}
+      from:
+        - namespaceSelector: {{ toJson .Values.metrics.ingress.namespaceSelector }}
+          podSelector: {{ toJson .Values.metrics.ingress.podSelector }}
+      {{- end }}
       ports:
         - protocol: TCP
           port: 9903

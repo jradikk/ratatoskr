@@ -103,24 +103,30 @@ needs no sidecar.
    it, Gateway Pods exist and expose the named `metrics` port, and
    `metrics.enabled=true`. A Gateway Service alone does not satisfy PodMonitor
    discovery.
-3. Confirm the Prometheus Pod and namespace labels match **both**
-   `metrics.ingress` selectors. The policies admit the metrics ports only from
-   that intersection. If the collector uses different labels, adjust the
-   values file and upgrade rather than turning off NetworkPolicy.
+3. If scrape restrictions were configured, confirm Prometheus Pod and
+   namespace labels match the configured `metrics.ingress` selectors. Adjust
+   the values file if collector labels differ; disabling all NetworkPolicies
+   is not necessary.
 4. Check Prometheus Targets and scrape errors first. A blank dashboard can
    mean no authorized targets, a wrong datasource, or missing target relabels;
    it does not establish zero traffic or zero peers.
 
 ## Scrape security
 
-The metrics NetworkPolicy ingress rule requires *both* namespace and Pod
-selectors. Default namespace label `kubernetes.io/metadata.name=monitoring`
-and Pod label `app.kubernetes.io/name=prometheus` should be changed to your
-collector labels. Empty selectors fail template validation. There is **no
-egress isolation**, preserving Kubernetes API/CRI/DNS/gateway connectivity.
-`networkPolicy.enabled=false` suppresses chart policies, so provide your own
-scrape restriction. The CNI must enforce standard NetworkPolicy; never expose
-these unauthenticated endpoints publicly.
+With `metrics.enabled=true` (default), metrics ingress admits **any source**
+on the metrics ports, including non-Pod sources reachable through your network.
+Operator HTTP Services are ClusterIP; a ClusterIP is not authentication or
+an ingress access-control policy. Health/admission/Gateway transport rules
+are unchanged by the metrics selector defaults. To restrict scraping, set
+`metrics.ingress.namespaceSelector` and/or `podSelector`: a namespace selector
+alone permits all Pods in matching namespaces; a Pod selector alone permits
+matching Pods across all namespaces; both selectors match jointly. Empty
+`{}`+`{}` means unrestricted. Supply actual collector labels after inspecting
+your Prometheus Pods and namespaces. The configured metrics ports only are
+restricted; there is **no egress isolation**, preserving Kubernetes API/CRI/DNS
+and gateway connectivity. `networkPolicy.enabled=false` suppresses chart
+policies, so provide your own restrictions. Your CNI must enforce the standard
+NetworkPolicy API. Do not expose unauthenticated metrics endpoints publicly.
 
 ## Discovery and dashboard
 

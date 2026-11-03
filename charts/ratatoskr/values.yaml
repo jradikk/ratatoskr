@@ -51,19 +51,16 @@ webhook:
 networkPolicy:
   enabled: true
 
-# Metrics are unauthenticated HTTP; configure NetworkPolicy scrape selectors
-# for your Prometheus namespace/pods before enabling monitors.
+# Metrics are unauthenticated HTTP. Default ingress permits any source on
+# metrics ports; set selectors below to restrict collectors where needed.
 metrics:
   enabled: true
-  # Only matching Namespace AND collector Pod labels may scrape metrics;
-  # adjust both selectors to the installed Prometheus deployment.
+  # {} + {} allows all sources. Restrict either selector independently:
+  # namespace only permits all Pods in selected namespaces; pod only permits
+  # matching Pods across all namespaces. Both configured match jointly.
   ingress:
-    namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: monitoring
-    podSelector:
-      matchLabels:
-        app.kubernetes.io/name: prometheus
+    namespaceSelector: {}
+    podSelector: {}
   # Requires monitoring.coreos.com/v1 ServiceMonitor CRD when enabled.
   serviceMonitor:
     enabled: false

@@ -142,7 +142,7 @@ replicas use the same TLS Secret. Only one Helm release per cluster is
 supported because admission configurations and ClusterRoles have fixed names.
 Metrics Services and optional Prometheus Operator monitors are described in
 [the monitoring guide](../../docs/monitoring.md). Metrics HTTP is unauthenticated;
-restrict scrape access before collection.
+the default metrics ingress permits any source reachable to these ports.
 
 **Ingress policies:** With `networkPolicy.enabled=true`, the chart selects
 controller, webhook, and (only in agent mode) agent Pods by component labels and
@@ -172,8 +172,10 @@ compatibility is a separate validation; chart lint is not traffic proof.
 ## Metrics and dashboard
 
 Metrics default to enabled on controller :8080, webhook :9904, agent :9903
-and dynamically managed gateway Pods :9902. Ingress is restricted using
-`metrics.ingress` namespace and Pod selectors; tune them for your collector.
+and dynamically managed gateway Pods :9902. Metrics ingress defaults to **any
+source** on these ports; optional `metrics.ingress` namespace and Pod selectors
+can restrict scraping. Metrics HTTP is unauthenticated, so secure reachability
+with cluster policy as needed.
 Set `metrics.enabled=false` to disable listeners and operator metrics Services.
 Prometheus Operator CRDs are optional: `metrics.serviceMonitor.enabled`
 selects operator Services; `metrics.podMonitor.enabled` discovers Gateway Pods

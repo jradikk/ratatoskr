@@ -343,8 +343,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                 monitor_port = {"controller": 8080, "webhook": 9904, "agent": 9903}[component]
                 scrape = policy["ingress"][1]
                 assert scrape["ports"] == [{"protocol": "TCP", "port": monitor_port}]
-                assert scrape["from"] == [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
-                                           "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}}}]
+                assert "from" not in scrape  # metrics default permits all sources
         assert not any("gateway" in name for kind, name in docs if kind == "NetworkPolicy")
     else:
         assert not any(kind == "NetworkPolicy" for kind, _ in docs)
@@ -363,10 +362,8 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         assert env["METRICS_BIND_ADDRESS"] == (("0.0.0.0:8080" if component == "controller" else "0.0.0.0:9904") if metrics else "0")
     assert ctrl_env["GATEWAY_METRICS_ENABLED"]["value"] == str(metrics).lower()
     import json
-    assert json.loads(ctrl_env["GATEWAY_METRICS_NAMESPACE_SELECTOR"]["value"]) == {
-        "matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}
-    assert json.loads(ctrl_env["GATEWAY_METRICS_POD_SELECTOR"]["value"]) == {
-        "matchLabels": {"app.kubernetes.io/name": "prometheus"}}
+    assert json.loads(ctrl_env["GATEWAY_METRICS_NAMESPACE_SELECTOR"]["value"]) == {}
+    assert json.loads(ctrl_env["GATEWAY_METRICS_POD_SELECTOR"]["value"]) == {}
     if service_monitor:
         mon = docs["ServiceMonitor", "ratatoskr-components"]["spec"]
         assert mon["namespaceSelector"] == {"matchNames": [NAMESPACE]}
@@ -464,7 +461,7 @@ if __name__ == "__main__":
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              "--set", "metrics." + name + ".enabled=true", succeeds=False)
     helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
-         "--set", "metrics.ingress.namespaceSelector.matchLabels=null", succeeds=False)
+         "--set", "metrics.ingress.namespaceSelector=null", succeeds=False)
     check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
                  "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
                  "--set", "metrics.serviceMonitor.enabled=true",
@@ -480,6 +477,16 @@ if __name__ == "__main__":
         scrape_rule = custom["NetworkPolicy", "ratatoskr-" + component + "-ingress"]["spec"]["ingress"][1]
         assert scrape_rule["from"][0]["namespaceSelector"]["matchLabels"]["team"] == "observability"
         assert scrape_rule["from"][0]["podSelector"]["matchLabels"]["app"] == "metrics"
+    ns_only = render("--set", "metrics.ingress.namespaceSelector.matchLabels.team=observability")
+    pod_only = render("--set", "metrics.ingress.podSelector.matchLabels.app=metrics")
+    for component in ("controller", "webhook", "agent"):
+        key = ("NetworkPolicy", "ratatoskr-" + component + "-ingress")
+        ns_source = ns_only[key]["spec"]["ingress"][1]["from"][0]
+        pod_source = pod_only[key]["spec"]["ingress"][1]["from"][0]
+        assert ns_source == {"namespaceSelector": {"matchLabels": {"team": "observability"}},
+                             "podSelector": {}}
+        assert pod_source == {"namespaceSelector": {},
+                              "podSelector": {"matchLabels": {"app": "metrics"}}}
     import hashlib
     import json
     dashboard_json = json.loads((CHART / "dashboards/ratatoskr-overview.json").read_text())
