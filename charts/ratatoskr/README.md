@@ -54,7 +54,7 @@ policy selection are enforced by admission. The controller and webhook serve
 | `clusterDomain` | `cluster.local` | Kubernetes DNS domain for webhook certificates and gateway DNS. |
 | `dns.upstreamIP` | `1.1.1.1` | Gateway-mode upstream resolver, accessible over the VPN. |
 | `dns.upstreamProbeURL` | empty | Optional operator-only tunnel-bound literal IPv4 HTTP(S) exit probe; leave empty for the plugin default. No credentials in URL. |
-| `exclusions.serviceCIDRs`, `exclusions.podCIDRs`, `exclusions.extraCIDRs` | `[]` | Direct-network ranges; confirm cluster Pod/Service ranges before steering traffic. |
+| `exclusions.serviceCIDRs`, `exclusions.podCIDRs`, `exclusions.extraCIDRs` | `[]` | Direct-network ranges; confirm cluster Pod/Service ranges before steering traffic. If discovery cannot establish them, Gateway Ready=False and the `ExclusionDiscoveryFailed` condition/Event identifies the safe remediation category. Missing Pod CIDRs require `exclusions.podCIDRs` or Node.spec.podCIDRs; missing Service CIDRs require `exclusions.serviceCIDRs` or the ServiceCIDR API. ReadDenied means check controller permissions; ReadFailed means check API availability. Raw API errors and CIDR values are not published. |
 | `controller.replicas`, `webhook.replicas` | `1`, `1` | Controller replicas >1 require `controller.leaderElection.enabled=true`. |
 | `networkPolicy.enabled` | `true` | Install component-specific ingress-only policies: controller 8081, webhook 9443/8081, agent `agent.healthPort` in agent mode. |
 

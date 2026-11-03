@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,12 +27,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -235,14 +238,45 @@ func (r *GatewayReconciler) status(ctx context.Context, gw *api.EgressGateway, r
 		gw.Status.Phase = "Pending"
 	}
 	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: "Ready", Status: condition(ready), Reason: reason, Message: message, ObservedGeneration: gw.Generation})
-	var current api.EgressGateway
-	if err := r.Get(ctx, client.ObjectKeyFromObject(gw), &current); err != nil {
-		return err
+	// Retry an actual optimistic-lock conflict using a fresh object, never a
+	// cached/stale ResourceVersion. The desired status belongs only to the
+	// gateway UID, generation and spec from which this reconcile computed it.
+	desired := gw.Status.DeepCopy()
+	key := client.ObjectKeyFromObject(gw)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
 	}
-	if reflect.DeepEqual(current.Status, gw.Status) {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var current api.EgressGateway
+		if err := reader.Get(ctx, key, &current); err != nil {
+			return err
+		}
+		if current.UID != gw.UID || current.Generation != gw.Generation ||
+			current.DeletionTimestamp != nil || !reflect.DeepEqual(current.Spec, gw.Spec) {
+			return apierrors.NewConflict(api.SchemeGroupVersion.WithResource("egressgateways").GroupResource(), gw.Name,
+				fmt.Errorf("gateway identity, generation or spec changed; recompute reconciliation"))
+		}
+		if reflect.DeepEqual(current.Status, *desired) {
+			*gw = current // downstream applied-ack logic needs persisted identity/status
+			return nil
+		}
+		merged := desired.DeepCopy()
+		// Preserve unrelated conditions introduced by another status writer while
+		// retrying. This reconciliation owns the condition types it supplied;
+		// it must not erase a new independent condition on conflict.
+		for _, condition := range current.Status.Conditions {
+			if meta.FindStatusCondition(merged.Conditions, condition.Type) == nil {
+				merged.Conditions = append(merged.Conditions, condition)
+			}
+		}
+		current.Status = *merged
+		if err := r.Status().Update(ctx, &current); err != nil {
+			return err
+		}
+		*gw = current
 		return nil
-	}
-	return r.Status().Update(ctx, gw)
+	})
 }
 func condition(b bool) metav1.ConditionStatus {
 	if b {
@@ -266,14 +300,21 @@ func gatewayFailureReason(reason string) string {
 	}
 }
 
-func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, _ error) (ctrl.Result, error) {
+func (r *GatewayReconciler) failure(ctx context.Context, gw *api.EgressGateway, reason string, cause error) (ctrl.Result, error) {
 	reason = gatewayFailureReason(reason)
 	message := "Gateway reconciliation blocked at " + reason + "; inspect controller and owned resources."
-	// Log only the fixed category: provider/API errors can contain private data.
-	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason)
+	category := ""
+	switch reason {
+	case "ExclusionDiscoveryFailed":
+		category, message = exclusionAdvice(cause)
+	case "ApplyFailed":
+		category, message = applyAdvice(cause)
+	}
+	// Log only fixed categories/advice: provider/API errors can contain private data.
+	log.FromContext(ctx).Info("gateway reconcile blocked", "reason", reason, "exclusionCategory", category, "advice", message)
 	previous := meta.FindStatusCondition(gw.Status.Conditions, "Ready")
 	transition := previous == nil || previous.Status != metav1.ConditionFalse ||
-		previous.Reason != reason || previous.ObservedGeneration != gw.Generation
+		previous.Reason != reason || previous.Message != message || previous.ObservedGeneration != gw.Generation
 	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{Type: reason, Status: metav1.ConditionTrue, Reason: reason, Message: message, ObservedGeneration: gw.Generation})
 	if e := r.status(ctx, gw, false, reason, message); e != nil {
 		return ctrl.Result{}, e
@@ -655,18 +696,90 @@ func (r *GatewayReconciler) info(ctx context.Context, ip string) (gatewayInfo, e
 	err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&info)
 	return info, err
 }
+
+// applyFailure retains the internal API error for classification while every
+// public category/message comes from a fixed vocabulary. No API response,
+// resource payload, CIDR, token or credential becomes status/Event/log text.
+type applyFailure struct {
+	resource, category string
+	cause              error
+}
+
+func (e *applyFailure) Error() string { return "Gateway " + e.resource + " apply " + e.category }
+func (e *applyFailure) Unwrap() error { return e.cause }
+
+func applyResource(obj client.Object) string {
+	switch obj.(type) {
+	case *corev1.ConfigMap:
+		return "ConfigMap"
+	case *corev1.Service:
+		return "Service"
+	case *networkingv1.NetworkPolicy:
+		return "NetworkPolicy"
+	case *appsv1.Deployment:
+		return "Deployment"
+	default:
+		return "resource"
+	}
+}
+
+func classifyApplyError(obj client.Object, operation string, cause error) error {
+	category := "ReadFailed"
+	switch {
+	case apierrors.IsForbidden(cause) || apierrors.IsUnauthorized(cause):
+		category = "ReadDenied"
+	case apierrors.IsConflict(cause) || apierrors.IsAlreadyExists(cause):
+		category = "Conflict"
+	case apierrors.IsInvalid(cause) || apierrors.IsBadRequest(cause):
+		category = "Invalid"
+	case operation == "create" || operation == "update":
+		category = "WriteFailed"
+	}
+	return &applyFailure{resource: applyResource(obj), category: category, cause: cause}
+}
+
+func applyAdvice(cause error) (category, message string) {
+	var issue *applyFailure
+	if !errors.As(cause, &issue) {
+		return "Unknown", "Gateway resource application blocked; check controller access and API availability."
+	}
+	kind := issue.resource
+	if kind != "ConfigMap" && kind != "Service" && kind != "NetworkPolicy" && kind != "Deployment" {
+		kind = "resource"
+	}
+	switch issue.category {
+	case "ReadDenied":
+		return kind + "ReadDenied", "Cannot read Gateway-owned " + kind + "; check controller get permission."
+	case "ReadFailed":
+		return kind + "ReadFailed", "Cannot read Gateway-owned " + kind + "; check API availability and controller access."
+	case "WriteFailed":
+		return kind + "WriteFailed", "Cannot write Gateway-owned " + kind + "; check API availability and controller create/update permission."
+	case "Conflict":
+		return kind + "Conflict", "Gateway-owned " + kind + " changed concurrently; retry reconciliation and check competing writers."
+	case "Invalid":
+		return kind + "Invalid", "Gateway-owned " + kind + " rejected as invalid or immutable; inspect rendered fields and existing owned resource."
+	case "OwnershipConflict":
+		return kind + "OwnershipConflict", "A Gateway " + kind + " name is occupied by another owner; remove or rename the conflicting resource."
+	default:
+		return "Unknown", "Gateway resource application blocked; check controller access and API availability."
+	}
+}
+
 func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, obj client.Object) error {
 	key := client.ObjectKeyFromObject(obj)
 	existing := obj.DeepCopyObject().(client.Object)
 	err := r.Get(ctx, key, existing)
 	if client.IgnoreNotFound(err) != nil {
-		return err
+		return classifyApplyError(obj, "read", err)
 	}
 	if err != nil {
-		return r.Create(ctx, obj)
+		if err := r.Create(ctx, obj); err != nil {
+			return classifyApplyError(obj, "create", err)
+		}
+		return nil
 	}
 	if !metav1.IsControlledBy(existing, gw) {
-		return fmt.Errorf("resource %s is not owned by gateway", key)
+		return &applyFailure{resource: applyResource(obj), category: "OwnershipConflict"}
 	}
 	switch desired := obj.(type) {
 	case *corev1.ConfigMap:
@@ -695,7 +808,10 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, ob
 		}
 		old.Spec = desired.Spec
 	}
-	return r.Update(ctx, existing)
+	if err := r.Update(ctx, existing); err != nil {
+		return classifyApplyError(obj, "update", err)
+	}
+	return nil
 }
 
 func (r *GatewayReconciler) mapAll(ctx context.Context, _ client.Object) []reconcile.Request {

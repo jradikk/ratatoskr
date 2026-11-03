@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -17,6 +18,68 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// exclusionFailure identifies a fixed public remediation category. The cause
+// stays internal: API/provider errors may contain credentials or private URLs.
+type exclusionFailure struct {
+	code  string
+	cause error
+}
+
+func (e *exclusionFailure) Error() string { return e.code }
+func (e *exclusionFailure) Unwrap() error { return e.cause }
+func exclusionError(code string, cause error) error {
+	return &exclusionFailure{code: code, cause: cause}
+}
+
+// exclusionAdvice is deliberately authored text: never format the wrapped
+// error, Node name, CIDR, Secret or an API response into public status/Events.
+func exclusionAdvice(err error) (code, message string) {
+	var failure *exclusionFailure
+	if !goerrors.As(err, &failure) {
+		return "Unknown", "Exclusion discovery blocked; check controller access to cluster network resources."
+	}
+	switch failure.code {
+	case "PodCIDRsMissing":
+		return failure.code, "Pod CIDRs unknown; set Helm exclusions.podCIDRs or populate Node.spec.podCIDRs."
+	case "NodePodCIDRMissing":
+		return failure.code, "A Node lacks an IPv4 PodCIDR; set Helm exclusions.podCIDRs or populate Node.spec.podCIDRs."
+	case "ServiceCIDRsMissing":
+		return failure.code, "Service CIDRs unknown; set Helm exclusions.serviceCIDRs or enable networking.k8s.io ServiceCIDR discovery."
+	case "ConfiguredCIDRInvalid":
+		return failure.code, "Invalid configured CIDR; check Helm exclusions.podCIDRs, exclusions.serviceCIDRs, exclusions.extraCIDRs and Gateway spec.exclusions.extraCIDRs."
+	case "NodeCIDRInvalid":
+		return failure.code, "Node PodCIDR or address invalid; correct Node.spec.podCIDRs or Node.status.addresses."
+	case "ServiceCIDRInvalid":
+		return failure.code, "ServiceCIDR API contains invalid CIDRs; correct networking.k8s.io ServiceCIDR data."
+	case "EndpointAddressInvalid":
+		return failure.code, "Discovered Pod, Service or EndpointSlice IPv4 address invalid; correct cluster network objects."
+	case "ExclusionsTooMany":
+		return failure.code, "Too many effective exclusions; reduce configured extra CIDRs or discovered ranges."
+	case "NodesReadDenied":
+		return failure.code, "Cannot list Nodes for exclusions; grant the controller nodes list permission."
+	case "ServiceCIDRsReadDenied":
+		return failure.code, "Cannot list ServiceCIDRs for exclusions; grant the controller networking.k8s.io servicecidrs list permission."
+	case "PodsReadDenied":
+		return failure.code, "Cannot list owned Gateway Pods for exclusions; grant the controller pods list permission."
+	case "ServiceReadDenied":
+		return failure.code, "Cannot GET Kubernetes API or kube-dns Services; grant the controller services get permission."
+	case "EndpointSlicesReadDenied":
+		return failure.code, "Cannot list Kubernetes API or kube-dns EndpointSlices; grant the controller discovery.k8s.io endpointslices list permission."
+	case "NodesReadFailed":
+		return failure.code, "Cannot list Nodes for exclusions; check API availability and controller nodes access."
+	case "ServiceCIDRsReadFailed":
+		return failure.code, "Cannot list ServiceCIDRs for exclusions; check API availability or set Helm exclusions.serviceCIDRs if this API is not served."
+	case "PodsReadFailed":
+		return failure.code, "Cannot list owned Gateway Pods for exclusions; check API availability and controller pods access."
+	case "ServiceReadFailed":
+		return failure.code, "Cannot GET Kubernetes API or kube-dns Services; check API availability and controller services access."
+	case "EndpointSlicesReadFailed":
+		return failure.code, "Cannot list Kubernetes API or kube-dns EndpointSlices; check API availability and controller endpointslices access."
+	default:
+		return "Unknown", "Exclusion discovery blocked; check controller access to cluster network resources."
+	}
+}
 
 // exclusions tracks provenance without emitting duplicate CIDRs. A more specific
 // address may coexist with a cluster prefix so status retains its source.
@@ -74,33 +137,42 @@ func (e *exclusions) result() ([]api.EffectiveExclusion, error) {
 	return out, nil
 }
 
+func exclusionReadError(resource string, err error) error {
+	// Callers pass fixed resource names only. The wrapped API error never enters
+	// status, logs or Events, but remains inspectable by internal callers.
+	if errors.IsForbidden(err) || errors.IsUnauthorized(err) {
+		return exclusionError(resource+"ReadDenied", err)
+	}
+	return exclusionError(resource+"ReadFailed", err)
+}
+
 // collectExclusions uses a direct APIReader for the optional ServiceCIDR API;
 // clusters without that API fall back to configured SERVICE_CIDRS. Other
 // discovery errors fail closed rather than being mistaken for absence.
 func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.EgressGateway) ([]api.EffectiveExclusion, string, error) {
 	var found exclusions
 	if err := found.addCIDR("169.254.0.0/16", "linkLocal"); err != nil {
-		return nil, "", err
+		return nil, "", exclusionError("ConfiguredCIDRInvalid", err)
 	}
 	podConfigured, err := found.configured(r.Options.PodCIDRs, "podCIDR")
 	if err != nil {
-		return nil, "", err
+		return nil, "", exclusionError("ConfiguredCIDRInvalid", err)
 	}
 	serviceConfigured, err := found.configured(r.Options.ServiceCIDRs, "serviceCIDR")
 	if err != nil {
-		return nil, "", err
+		return nil, "", exclusionError("ConfiguredCIDRInvalid", err)
 	}
 	if _, err := found.configured(r.Options.ExtraCIDRs, "extra"); err != nil {
-		return nil, "", err
+		return nil, "", exclusionError("ConfiguredCIDRInvalid", err)
 	}
 	for _, cidr := range gw.Spec.Exclusions.ExtraCIDRs {
 		if err := found.addCIDR(cidr, "extra"); err != nil {
-			return nil, "", err
+			return nil, "", exclusionError("ConfiguredCIDRInvalid", err)
 		}
 	}
 	var nodes corev1.NodeList
 	if err := r.List(ctx, &nodes); err != nil {
-		return nil, "", fmt.Errorf("list Nodes: %w", err)
+		return nil, "", exclusionReadError("Nodes", err)
 	}
 	podDetected := false
 	for _, node := range nodes.Items {
@@ -112,19 +184,19 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 		for _, cidr := range cidrs {
 			parsed, parseErr := netip.ParsePrefix(cidr)
 			if parseErr != nil {
-				return nil, "", fmt.Errorf("invalid Node PodCIDR")
+				return nil, "", exclusionError("NodeCIDRInvalid", parseErr)
 			}
 			if !parsed.Addr().Is4() {
 				continue
 			}
 			if err := found.addCIDR(cidr, "podCIDR"); err != nil {
-				return nil, "", err
+				return nil, "", exclusionError("NodeCIDRInvalid", err)
 			}
 			podDetected = true
 			nodeHasIPv4PodCIDR = true
 		}
 		if !nodeHasIPv4PodCIDR && !podConfigured {
-			return nil, "", fmt.Errorf("node %s has no IPv4 PodCIDR and POD_CIDRS is not configured", node.Name)
+			return nil, "", exclusionError("NodePodCIDRMissing", nil)
 		}
 		for _, addr := range node.Status.Addresses {
 			if addr.Type != corev1.NodeInternalIP && addr.Type != corev1.NodeExternalIP {
@@ -132,17 +204,17 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			}
 			ip, e := netip.ParseAddr(addr.Address)
 			if e != nil {
-				return nil, "", fmt.Errorf("invalid Node IPv4 address")
+				return nil, "", exclusionError("NodeCIDRInvalid", e)
 			}
 			if ip.Is4() {
 				if err := found.addIP(addr.Address, "node"); err != nil {
-					return nil, "", err
+					return nil, "", exclusionError("NodeCIDRInvalid", err)
 				}
 			}
 		}
 	}
 	if !podConfigured && !podDetected {
-		return nil, "", fmt.Errorf("PodCIDRs unknown: configure POD_CIDRS or expose Node.spec.podCIDRs")
+		return nil, "", exclusionError("PodCIDRsMissing", nil)
 	}
 	reader := r.APIReader
 	if reader == nil {
@@ -151,7 +223,7 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 	var ranges networkingv1.ServiceCIDRList
 	err = reader.List(ctx, &ranges)
 	if err != nil && !meta.IsNoMatchError(err) && !errors.IsNotFound(err) {
-		return nil, "", fmt.Errorf("list ServiceCIDRs: %w", err)
+		return nil, "", exclusionReadError("ServiceCIDRs", err)
 	}
 	detected := false
 	if err == nil {
@@ -159,11 +231,11 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			for _, cidr := range sr.Spec.CIDRs {
 				p, e := netip.ParsePrefix(cidr)
 				if e != nil {
-					return nil, "", fmt.Errorf("invalid ServiceCIDR API prefix")
+					return nil, "", exclusionError("ServiceCIDRInvalid", e)
 				}
 				if p.Addr().Is4() {
 					if e = found.addCIDR(cidr, "serviceCIDR"); e != nil {
-						return nil, "", e
+						return nil, "", exclusionError("ServiceCIDRInvalid", e)
 					}
 					detected = true
 				}
@@ -171,23 +243,23 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 		}
 	}
 	if !serviceConfigured && !detected {
-		return nil, "", fmt.Errorf("ServiceCIDRs unknown: configure SERVICE_CIDRS or expose networking.k8s.io ServiceCIDRs")
+		return nil, "", exclusionError("ServiceCIDRsMissing", nil)
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(gw.Namespace), client.MatchingLabels{ownerUIDLabel: string(gw.UID)}); err != nil {
-		return nil, "", fmt.Errorf("list gateway Pods: %w", err)
+		return nil, "", exclusionReadError("Pods", err)
 	}
 	for _, p := range pods.Items {
 		if p.Status.PodIP != "" {
 			if err := found.addIP(p.Status.PodIP, "extra"); err != nil {
-				return nil, "", err
+				return nil, "", exclusionError("EndpointAddressInvalid", err)
 			}
 		}
 	}
 	for _, ep := range gw.Status.Endpoints {
 		if ep.PodIP != "" {
 			if err := found.addIP(ep.PodIP, "extra"); err != nil {
-				return nil, "", err
+				return nil, "", exclusionError("EndpointAddressInvalid", err)
 			}
 		}
 	}
@@ -197,7 +269,7 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			if errors.IsNotFound(err) {
 				continue
 			}
-			return nil, "", fmt.Errorf("get discovery Service %s: %w", svc, err)
+			return nil, "", exclusionReadError("Service", err)
 		}
 		source := "apiserver"
 		if svc.Name == "kube-dns" {
@@ -209,17 +281,17 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			}
 			addr, e := netip.ParseAddr(ip)
 			if e != nil {
-				return nil, "", fmt.Errorf("invalid %s Service ClusterIP", source)
+				return nil, "", exclusionError("EndpointAddressInvalid", e)
 			}
 			if addr.Is4() {
 				if e = found.addIP(ip, source); e != nil {
-					return nil, "", e
+					return nil, "", exclusionError("EndpointAddressInvalid", e)
 				}
 			}
 		}
 		var slices discoveryv1.EndpointSliceList
 		if err := r.List(ctx, &slices, client.InNamespace(svc.Namespace), client.MatchingLabels{discoveryv1.LabelServiceName: svc.Name}); err != nil {
-			return nil, "", fmt.Errorf("list %s EndpointSlices: %w", source, err)
+			return nil, "", exclusionReadError("EndpointSlices", err)
 		}
 		for _, slice := range slices.Items {
 			if slice.AddressType != discoveryv1.AddressTypeIPv4 {
@@ -228,7 +300,7 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			for _, ep := range slice.Endpoints {
 				for _, ip := range ep.Addresses {
 					if err := found.addIP(ip, source); err != nil {
-						return nil, "", err
+						return nil, "", exclusionError("EndpointAddressInvalid", err)
 					}
 				}
 			}
@@ -243,8 +315,11 @@ func (r *GatewayReconciler) collectExclusions(ctx context.Context, gw *api.Egres
 			dnsIP = ip.String()
 		}
 	} else if !errors.IsNotFound(err) {
-		return nil, "", fmt.Errorf("get cluster DNS Service: %w", err)
+		return nil, "", exclusionReadError("Service", err)
 	}
 	result, err := found.result()
-	return result, dnsIP, err
+	if err != nil {
+		return nil, "", exclusionError("ExclusionsTooMany", err)
+	}
+	return result, dnsIP, nil
 }
