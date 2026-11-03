@@ -94,6 +94,13 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 		if err != nil {
 			return c, err
 		}
+		if hasDomainRules(pol.Spec) {
+			if pol.UID == "" || pol.Generation <= 0 || gw.Spec.DNS.Mode != "gateway" {
+				return c, errors.New("domain routing requires a persisted policy and gateway DNS")
+			}
+			c.DomainPolicyUID = string(pol.UID)
+			c.DomainPolicyGeneration = pol.Generation
+		}
 		c.Identity.Policy = pol.Name
 	}
 	// Only controller-reported healthy PodIP endpoints participate. Never use a
@@ -156,4 +163,13 @@ func HashForMode(c datapath.ClientConfig, mode string) string {
 	}
 	sum := sha256.Sum256([]byte(backendMode(mode) + ":" + Hash(c)))
 	return hex.EncodeToString(sum[:])
+}
+
+func hasDomainRules(spec api.EgressPolicySpec) bool {
+	for _, rule := range spec.Rules {
+		if len(rule.Domains) > 0 {
+			return true
+		}
+	}
+	return false
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -196,6 +197,12 @@ type Reconciler struct {
 	Ready                   *atomic.Bool
 	Own                     OwnPod
 	Programming             *observability.AgentProgramming
+	// domainMu only protects registry maps; perUID domainLocks serialize API/CRI/
+	// programming with DNS callbacks. Proxy.mu -> perUID is the sole lock order.
+	domainMu    sync.Mutex
+	domains     map[string]*domainRuntime
+	domainLocks map[string]*sync.Mutex
+	domainOps   *domainOperations
 }
 
 // observeProgram wraps only a completed namespace datapath/marker operation;
@@ -223,13 +230,40 @@ func (r *Reconciler) pendingGateway(ctx context.Context, pod *corev1.Pod, target
 	return r.setPodPending(ctx, pod)
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
+func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result error) {
+	if pod == nil {
+		return errors.New("workload Pod required")
+	}
+	lock := r.domainLock(string(pod.UID))
+	lock.Lock()
+	defer lock.Unlock()
+	defer func() {
+		if result != nil {
+			if rt := r.domainRuntime(string(pod.UID)); rt != nil && !rt.retired.Load() {
+				result = r.poisonDomain(rt, rt.netns, pod, result)
+			}
+		}
+	}()
+	defer func() {
+		// A departed/replaced API Pod must not leave a process-local DNS listener
+		// serving a pinned orphan namespace indefinitely.
+		if rt := r.domainRuntime(string(pod.UID)); rt != nil && pod.DeletionTimestamp != nil {
+			r.retireDomain(string(pod.UID))
+		}
+	}()
+	if err := r.refreshDomainPod(ctx, pod); err != nil {
+		if rt := r.domainRuntime(string(pod.UID)); rt != nil {
+			return r.poisonDomain(rt, rt.netns, pod, err)
+		}
+		return err
+	}
 	if pod.Spec.NodeName != r.Node || pod.Spec.HostNetwork || pod.UID == "" || pod.Status.PodIP == "" {
 		return nil
 	}
 	existing := pod.Annotations[HashAnnotation]
 	selected := pod.Labels[GatewayLabel] != "" && pod.DeletionTimestamp == nil
 	if !selected && existing == "" {
+		r.retireDomain(string(pod.UID))
 		return nil
 	}
 	mode := backendMode(r.Datapath)
@@ -238,6 +272,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		return err
 	}
 	var cfg datapath.ClientConfig
+	var domainPolicy *api.EgressPolicy
 	var gw api.EgressGateway
 	gatewayKey := types.NamespacedName{}
 	removing := !selected
@@ -283,6 +318,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		if err != nil {
 			return revoke(err)
 		}
+		if rt := r.domainRuntime(string(pod.UID)); rt != nil && rt.poisoned {
+			return errors.New("domain workload quarantined; recreate Pod")
+		}
+		if cfg.DomainPolicyUID != "" {
+			for i := range policies.Items {
+				if string(policies.Items[i].UID) == cfg.DomainPolicyUID && policies.Items[i].Generation == cfg.DomainPolicyGeneration {
+					domainPolicy = &policies.Items[i]
+					break
+				}
+			}
+			if domainPolicy == nil {
+				return revoke(errors.New("domain policy requires authenticated agent"))
+			}
+			if err = restoreDomainConfig(pod, &cfg, *domainPolicy, mode); err != nil {
+				return revoke(err)
+			}
+		}
 	} else {
 		// A previously persisted non-secret config permits removing ONLY owned
 		// rules in the same still-live sandbox, never guessed resources.
@@ -326,9 +378,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	}
 	if !removing {
 		if !cfg.Endpoint.IsValid() {
+			r.retireDomain(string(pod.UID))
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
+			r.retireDomain(string(pod.UID))
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 	}
@@ -396,6 +450,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	}
 	if !removing {
 		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
+			r.retireDomain(string(pod.UID))
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 	}
@@ -406,12 +461,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 	if err = r.observeProgram(operation, func() error {
 		return Program(ctx, target, &cfg, gatewayMTU, existing, removing, factory, mode)
 	}); err != nil {
+		if rt := r.domainRuntime(string(pod.UID)); rt != nil {
+			return r.poisonDomain(rt, target, pod, err)
+		}
 		if errors.Is(err, errUnsupportedIPv6) {
 			return errors.Join(fmt.Errorf("program selected datapath: %w", err), r.setPodError(ctx, pod))
 		}
 		return fmt.Errorf("program selected datapath: %w", err)
 	}
 	if removing {
+		if rt := r.domainRuntime(string(pod.UID)); rt != nil {
+			if err = r.domainOperations().enter(target, func() error { return r.domainOperations().removeRedirect(rt.resolver) }); err != nil {
+				return r.poisonDomain(rt, target, pod, err)
+			}
+			r.retireDomain(string(pod.UID))
+		}
 		original := pod.DeepCopy()
 		pod.Annotations = copyAnnotations(pod.Annotations)
 		delete(pod.Annotations, HashAnnotation)
@@ -420,6 +484,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) error {
 		delete(pod.Annotations, ReadyAnnotation)
 		return r.Client.Patch(ctx, pod, client.MergeFrom(original))
 	}
+	if domainPolicy != nil {
+		if err = r.startDomain(ctx, pod, &gw, domainPolicy, cfg, target, sandboxProof, mode); err != nil {
+			if r.domainRuntime(string(pod.UID)) == nil {
+				if fenceErr := r.domainOperations().quarantine(target, cfg.PodIP); fenceErr != nil {
+					return errors.New("domain startup quarantine failed")
+				}
+				_ = r.setPodPending(ctx, pod)
+			}
+			return err
+		}
+		return nil
+	}
+	if rt := r.domainRuntime(string(pod.UID)); rt != nil {
+		if err = r.domainOperations().enter(target, func() error { return r.domainOperations().removeRedirect(rt.resolver) }); err != nil {
+			return r.poisonDomain(rt, target, pod, err)
+		}
+	}
+	r.retireDomain(string(pod.UID))
 	hash := HashForMode(cfg, mode)
 	if existing == hash && pod.Annotations[ReadyAnnotation] == "true" {
 		return nil
@@ -444,6 +526,7 @@ func copyAnnotations(in map[string]string) map[string]string {
 // Run watches node Pods and gateway status; periodic full resync recovers missed
 // events. The client makes live API reads rather than using a stale informer.
 func (r *Reconciler) Run(ctx context.Context) error {
+	defer r.closeDomains()
 	if r.WatchClient == nil {
 		return errors.New("watch client required")
 	}
