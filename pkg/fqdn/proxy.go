@@ -261,7 +261,7 @@ func (p *Proxy) ServeDNS(w mdns.ResponseWriter, req *mdns.Msg) {
 	if err == nil && answer != nil && answer.Truncated && protocol == "udp" {
 		answer, err = p.opts.Exchange(ctx, req.Copy(), p.opts.Resolver, "tcp")
 	}
-	if err != nil || answer == nil || answer.Truncated {
+	if err != nil || !validTransaction(req, answer, p.opts.Limits.MaxRecords) {
 		p.reject(w, req, mdns.RcodeServerFailure)
 		return
 	}
@@ -322,7 +322,7 @@ func (p *Proxy) ServeDNS(w mdns.ResponseWriter, req *mdns.Msg) {
 			return
 		}
 	}
-	response := answer.Copy()
+	response := filterMatchedAnswer(req, answer)
 	// Cap delivered TTL by BOTH the A/CNAME lifetime and elapsed apply latency.
 	ttlCap := p.opts.Limits.MaxTTL
 	for _, record := range addresses {
@@ -330,8 +330,20 @@ func (p *Proxy) ServeDNS(w mdns.ResponseWriter, req *mdns.Msg) {
 			ttlCap = record.ttl
 		}
 	}
-	elapsed := p.opts.Clock().Sub(now)
+	responseNow := p.opts.Clock()
+	elapsed := responseNow.Sub(now)
 	ttlCap -= elapsed
+	// Persisted Unix-second deadlines round DOWN. Cap DNS TTL to that actual
+	// deadline too, not only the unrounded duration, so an exclude bypass cannot
+	// expire before the cache lifetime promised to the workload resolver.
+	for _, rule := range matching {
+		for _, record := range addresses {
+			remaining := time.Unix(candidate[rule][record.addr].ExpiresAt, 0).Sub(responseNow)
+			if remaining < ttlCap {
+				ttlCap = remaining
+			}
+		}
+	}
 	if len(addresses) > 0 && ttlCap < time.Second {
 		p.reject(w, req, mdns.RcodeServerFailure)
 		return

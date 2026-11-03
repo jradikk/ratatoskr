@@ -479,3 +479,53 @@ func TestMatchedCNAMEWithoutReachableARejectsBeforeFollowupLeak(t *testing.T) {
 	p := mustProxy(t, o)
 	answerCode(t, p, question("example.test.", mdns.TypeA), mdns.RcodeServerFailure)
 }
+
+func TestFractionalUnixExpiryCannotOutliveDeliveredTTL(t *testing.T) {
+	now := time.Unix(1000, 900000000)
+	o := opts("exclude", &now, func(context.Context, Update) error { return nil })
+	o.Exchange = func(_ context.Context, r *mdns.Msg, _ string, _ string) (*mdns.Msg, error) {
+		return response(r, "example.test. 10 IN A 203.0.113.8"), nil
+	}
+	p := mustProxy(t, o)
+	w := &writer{}
+	p.ServeDNS(w, question("example.test.", mdns.TypeA))
+	if len(w.messages) != 1 || w.messages[0].Rcode != mdns.RcodeSuccess {
+		t.Fatal("unexpected fractional-lifetime response")
+	}
+	ttl := w.messages[0].Answer[0].Header().Ttl
+	expiry := p.Snapshot().State[0].ExpiresAt
+	if now.Add(time.Duration(ttl) * time.Second).After(time.Unix(expiry, 0)) {
+		t.Fatal("DNS promised cache lifetime exceeds applied binding expiry")
+	}
+}
+func TestMatchedResponseStripsUnprogrammedResolverCacheRecords(t *testing.T) {
+	now := time.Unix(1000, 0)
+	o := opts("include", &now, func(context.Context, Update) error { return nil })
+	o.Exchange = func(_ context.Context, r *mdns.Msg, _ string, _ string) (*mdns.Msg, error) {
+		m := response(r, "example.test. 60 IN A 203.0.113.8", "unrelated.test. 60 IN A 203.0.113.99")
+		rr, _ := mdns.NewRR("example.test. 60 IN A 203.0.113.98")
+		m.Extra = []mdns.RR{rr}
+		m.Ns = []mdns.RR{rr}
+		return m, nil
+	}
+	p := mustProxy(t, o)
+	w := &writer{}
+	p.ServeDNS(w, question("example.test.", mdns.TypeA))
+	m := w.messages[0]
+	if len(m.Answer) != 1 || len(m.Ns) != 0 || len(m.Extra) != 0 || len(p.Snapshot().State) != 1 {
+		t.Fatal("unprogrammed cached address escaped matched DNS barrier")
+	}
+}
+func TestUnmatchedAndAAAATransactionMismatchReject(t *testing.T) {
+	for _, typ := range []uint16{mdns.TypeA, mdns.TypeAAAA} {
+		now := time.Unix(1000, 0)
+		o := opts("include", &now, func(context.Context, Update) error { return nil })
+		o.Exchange = func(_ context.Context, r *mdns.Msg, _ string, _ string) (*mdns.Msg, error) {
+			m := response(r)
+			m.Id++
+			return m, nil
+		}
+		p := mustProxy(t, o)
+		answerCode(t, p, question("unmatched.test.", typ), mdns.RcodeServerFailure)
+	}
+}

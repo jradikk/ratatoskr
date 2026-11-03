@@ -2,6 +2,7 @@ package fqdn
 
 import (
 	"net/netip"
+	"strings"
 	"time"
 
 	mdns "github.com/miekg/dns"
@@ -19,11 +20,22 @@ type cname struct {
 // learnable only traverses Answer records reachable from the exact question.
 // Additional/Authority addresses are never routing authority. Mixed classes,
 // loops, ambiguous aliases and malformed addresses fail the entire transaction.
-func learnable(req, answer *mdns.Msg, maxRecords, maxChain int, maxTTL time.Duration) ([]addressTTL, error) {
-	if !answer.Response || answer.Id != req.Id || answer.Opcode != req.Opcode || len(answer.Question) != 1 || answer.Question[0].Qtype != req.Question[0].Qtype || answer.Question[0].Qclass != req.Question[0].Qclass || !MatchName(answer.Question[0].Name, req.Question[0].Name) {
-		return nil, ErrInvalid
+func validTransaction(req, answer *mdns.Msg, maxRecords int) bool {
+	if req == nil || answer == nil || !answer.Response || answer.Id != req.Id || answer.Opcode != req.Opcode || len(req.Question) != 1 || len(answer.Question) != 1 || answer.Question[0].Qtype != req.Question[0].Qtype || answer.Question[0].Qclass != req.Question[0].Qclass || !strings.EqualFold(answer.Question[0].Name, req.Question[0].Name) || answer.Truncated || len(answer.Answer)+len(answer.Ns)+len(answer.Extra) > maxRecords {
+		return false
 	}
-	if answer.Truncated || len(answer.Answer)+len(answer.Ns)+len(answer.Extra) > maxRecords {
+	for _, section := range [][]mdns.RR{answer.Answer, answer.Ns, answer.Extra} {
+		for _, rr := range section {
+			if rr == nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func learnable(req, answer *mdns.Msg, maxRecords, maxChain int, maxTTL time.Duration) ([]addressTTL, error) {
+	if !validTransaction(req, answer, maxRecords) {
 		return nil, ErrInvalid
 	}
 	if answer.Rcode != mdns.RcodeSuccess {
@@ -105,4 +117,49 @@ func learnable(req, answer *mdns.Msg, maxRecords, maxChain int, maxTTL time.Dura
 		return out, nil
 	}
 	return nil, ErrInvalid
+}
+
+// filterMatchedAnswer prevents downstream stub/resolver caches from accepting
+// routing-irrelevant A/CNAME records that were not included in the apply barrier.
+func filterMatchedAnswer(req, answer *mdns.Msg) *mdns.Msg {
+	out := answer.Copy()
+	out.Ns = nil
+	out.Extra = nil
+	if answer.Rcode != mdns.RcodeSuccess {
+		out.Answer = nil
+		return out
+	}
+	reached := map[string]bool{}
+	current, _ := NormalizeName(req.Question[0].Name)
+	for !reached[current] {
+		reached[current] = true
+		next := ""
+		for _, rr := range answer.Answer {
+			alias, ok := rr.(*mdns.CNAME)
+			if !ok {
+				continue
+			}
+			name, _ := NormalizeName(alias.Hdr.Name)
+			if name == current {
+				next, _ = NormalizeName(alias.Target)
+				break
+			}
+		}
+		if next == "" {
+			break
+		}
+		current = next
+	}
+	out.Answer = nil
+	for _, rr := range answer.Answer {
+		name, _ := NormalizeName(rr.Header().Name)
+		if !reached[name] {
+			continue
+		}
+		switch rr.(type) {
+		case *mdns.A, *mdns.CNAME:
+			out.Answer = append(out.Answer, mdns.Copy(rr))
+		}
+	}
+	return out
 }

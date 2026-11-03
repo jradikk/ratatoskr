@@ -55,7 +55,9 @@ lifetime uses a conservative union when multiple names resolve to the same IP.
 
 Only A records in Answer reachable from the exact question through a bounded,
 noncyclic CNAME chain grant rules. Unrelated Additional/Authority addresses never
-grant routing. Duplicate A/CNAME TTLs use their minimum; ambiguous aliases,
+grant routing and are stripped from matched replies so downstream caches cannot
+learn unprogrammed addresses. Matched replies contain only the question-reachable
+A/CNAME chain; transaction identity is validated even for nonmatching passthrough. Duplicate A/CNAME TTLs use their minimum; ambiguous aliases,
 malformed transaction identity/classes/addresses, TTL0 and capacity excess fail
 closed. Returned TTL is capped to A/CNAME lifetime, configured maximum and
 application latency. UDP truncation retries once via TCP at the same resolver;
