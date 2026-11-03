@@ -62,6 +62,9 @@ application Pod template. Namespace authorization still applies to the pool.
 
 ## Balancing and updates
 
+- Gateway replicas and profiles prefer different nodes using soft Pod anti-affinity.
+  They can share a node when capacity or node constraints leave no alternative;
+  existing Pods are not automatically moved just because a new node appears.
 - Balancing is **per application Pod**, not per HTTP request or connection.
 - A Pod keeps its chosen healthy endpoint while the endpoint set stays stable.
 - Removing or failing an endpoint moves affected application Pods to a healthy

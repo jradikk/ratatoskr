@@ -206,6 +206,17 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		)
 		gateway.Ports = append(gateway.Ports, corev1.ContainerPort{Name: "wg-transport", ContainerPort: int32(datapath.WireGuardPortDefault), Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "registration", ContainerPort: 9443, Protocol: corev1.ProtocolTCP})
 	}
+	// Spread every replica/profile of this gateway across nodes when possible.
+	// A soft preference keeps single-node or capacity-constrained clusters usable.
+	pod.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+			Weight: 100,
+			PodAffinityTerm: corev1.PodAffinityTerm{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: selector},
+				TopologyKey:   "kubernetes.io/hostname",
+			},
+		}},
+	}}
 	for k, v := range gw.Spec.NodeSelector {
 		if pod.NodeSelector == nil {
 			pod.NodeSelector = map[string]string{}
