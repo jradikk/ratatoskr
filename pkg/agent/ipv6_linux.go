@@ -6,11 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/netip"
 
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -18,12 +16,11 @@ import (
 const ipv6GuardTable = "ratatoskr_agent_ipv6"
 const quarantineTable = "ratatoskr_agent_quarantine"
 
-var errUnsupportedIPv6 = errors.New("workload acquired unsupported IPv6; IPv4 quarantined, recreate pod")
-
-// The IPv6 guard is present for the entire lifetime of a selected workload,
-// not merely after detecting IPv6. This closes the interval between a CNI
-// assigning a global IPv6 address and the agent's next reconcile. IPv4 is
-// quarantined if unexpected IPv6 is observed; recovery requires pod recreation.
+// The IPv6 guard is installed before IPv4 datapath programming and stays
+// active for the selected workload's lifetime. Global/ULA IPv6 addresses may
+// coexist on eth0, but every IPv6 INPUT/OUTPUT/FORWARD packet remains denied.
+// Persistent IPv4 quarantine is reserved for authorization loss and other
+// explicit unsafe state, never inferred solely from a dual-stack address.
 func ensureOutputDrop(tableName string, family nftables.TableFamily) error {
 	conn := &nftables.Conn{}
 	tables, err := conn.ListTables()
@@ -101,44 +98,19 @@ func quarantined() (bool, error) {
 	return false, nil
 }
 
-func globalIPv6(addrs []netlink.Addr) bool {
-	for _, a := range addrs {
-		if a.IP == nil {
-			continue
-		}
-		ip, ok := netip.AddrFromSlice(a.IP)
-		if ok && ip.Is6() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified() {
-			return true
-		}
-	}
-	return false
-}
-
-// inspectAndGuard is called only on a locked thread inside the verified pod
-// network namespace, both before metadata reads and just before marker creation.
+// inspectAndGuard runs on the locked selected Pod namespace thread before
+// active IPv4 programming and marker adoption. Never remove a quarantine
+// installed for a separate authorization failure merely because IPv6 is safe.
 func inspectAndGuard() error {
 	if err := ensureOutputDrop(ipv6GuardTable, nftables.TableFamilyIPv6); err != nil {
 		return err
-	}
-	link, err := netlink.LinkByName("eth0")
-	if err != nil {
-		return fmt.Errorf("inspect workload eth0: %w", err)
-	}
-	addrs, err := netlink.AddrList(link, unix.AF_INET6)
-	if err != nil {
-		return err
-	}
-	if globalIPv6(addrs) {
-		if err := ensureOutputDrop(quarantineTable, nftables.TableFamilyIPv4); err != nil {
-			return fmt.Errorf("dual-stack quarantine failed: %w", err)
-		}
 	}
 	blocked, err := quarantined()
 	if err != nil {
 		return err
 	}
 	if blocked {
-		return errUnsupportedIPv6
+		return errors.New("selected workload IPv4 remains quarantined; recreate Pod")
 	}
 	return nil
 }

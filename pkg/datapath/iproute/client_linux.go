@@ -225,31 +225,6 @@ func (b *Backend) clientFirewall(c datapath.ClientConfig) error {
 }
 func native32(n uint32) []byte { b := make([]byte, 4); binary.NativeEndian.PutUint32(b, n); return b }
 
-// Reject IPv6-capable pod interfaces rather than silently leaving IPv6 on
-// eth0 unsteered. IPv6 steering is outside the v1 datapath contract.
-func (b *Backend) rejectDualStack() error {
-	link, err := b.h.LinkByName("eth0")
-	if isMissing(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect client eth0: %w", err)
-	}
-	addrs, err := b.h.AddrList(link, unix.AF_INET6)
-	if err != nil {
-		return fmt.Errorf("inspect client IPv6 addresses: %w", err)
-	}
-	for _, a := range addrs {
-		if a.IP == nil {
-			continue
-		}
-		if v, ok := netip.AddrFromSlice(a.IP); ok && v.Is6() && !v.IsLinkLocalUnicast() && !v.IsUnspecified() {
-			return fmt.Errorf("IPv6 address %s on eth0 is unsupported: IPv4-only steering would leak IPv6 traffic", v)
-		}
-	}
-	return nil
-}
-
 // isIPv4Default recognizes both the implicit nil destination and the explicit
 // 0.0.0.0/0 returned by netlink RouteListFiltered. Only IPv4 default routes
 // may be withdrawn when an endpoint is lost.
@@ -271,9 +246,6 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	}
 	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if err := b.rejectDualStack(); err != nil {
-		return fmt.Errorf("check client IPv4-only safety: %w", err)
 	}
 	if c.Encryption == "wireguard" {
 		// Install plaintext deny before any WG-tunneled GENEVE route exists.

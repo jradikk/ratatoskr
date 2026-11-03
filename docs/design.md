@@ -31,10 +31,12 @@ to plaintext. The gateway uses the shared backend interface, with the current
 eBPF gateway implementation delegating to the iproute gateway backend. Both
 modes require a Linux kernel at least 5.10 and the specific kernel facilities
 used by their backend; a version check alone does not certify those facilities.
-There is no Windows, IPv6 egress, ingress-gateway or multi-cluster
+There is no Windows, IPv6 VPN egress, ingress-gateway or multi-cluster
 implementation. Agent-mode FQDN rules derive IPv4 routing destinations from
-observed DNS answers; see [domain policies](domain-policies.md). An IPv6 guard rejects non-link-local client IPv6; unsupported
-addressing is not quietly allowed around IPv4 policy.
+observed DNS answers; see [domain policies](domain-policies.md). Dual-stack
+workloads retain IPv4 routing, but every IPv6 packet is dropped in the selected
+namespace by raw-priority INPUT/OUTPUT/FORWARD guards. IPv6 addresses alone do
+not make the Pod unready or quarantine IPv4.
 
 ## Control plane and workload admission
 
@@ -132,8 +134,8 @@ only marked traffic through the client table; exclusions and direct cluster
 traffic use main. Metadata `169.254.169.254/32` is prohibited by default, even
 though other link-local destinations are excluded; explicit
 `allowCloudMetadata: true` allows only the documented direct bypass. An
-nftables IPv6 output guard and persistent IPv4 quarantine fence unsupported
-workload IPv6 or lost authorization. The eBPF option selects plaintext client
+nftables IPv6 all-hook guard blocks IPv6 packets without quarantining IPv4.
+Persistent IPv4/IPv6 quarantine remains for lost authorization. The eBPF option selects plaintext client
 traffic with a clsact/tc egress program and external GENEVE, with a fail-closed
 update guard; it cannot manage WireGuard.
 

@@ -457,7 +457,7 @@ func TestPrivilegedSelectiveRulesAndMetadata(t *testing.T) {
 	})
 }
 
-func TestPrivilegedRejectDualStackClient(t *testing.T) {
+func TestPrivilegedDualStackClientKeepsIPv4Routing(t *testing.T) {
 	isolated(t, func(b *Backend) {
 		eth := dummy(t, b, "eth0", "10.42.1.8/24")
 		v6, err := netlink.ParseAddr("2001:db8::8/64")
@@ -468,16 +468,14 @@ func TestPrivilegedRejectDualStackClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := datapath.ClientConfig{PodIP: netip.MustParseAddr("10.42.1.8"), GatewayID: 7, MTU: 1400}
-		if err := b.ApplyClient(context.Background(), c); err == nil {
-			t.Fatal("dual-stack pod would bypass IPv4-only steering")
+		if err := b.ApplyClient(context.Background(), c); err != nil {
+			t.Fatalf("IPv4 client rejected because eth0 also has IPv6: %v", err)
 		}
 		rules, err := b.ownedClientRules()
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || len(rules) == 0 {
+			t.Fatalf("IPv4 routing rules not installed for dual-stack Pod: %v %v", rules, err)
 		}
-		if len(rules) != 0 {
-			t.Fatal("dual-stack rejection must precede routing changes")
-		}
+
 	})
 }
 

@@ -118,18 +118,6 @@ func (b *Backend) ApplyClient(ctx context.Context, c datapath.ClientConfig) erro
 	if c.Encryption == "wireguard" {
 		return fmt.Errorf("ebpf client does not support WireGuard; refusing plaintext fallback")
 	}
-	addrs, err := b.h.AddrList(eth, unix.AF_INET6)
-	if err != nil {
-		return err
-	}
-	for _, a := range addrs {
-		if a.IP == nil {
-			continue
-		}
-		if v, ok := netip.AddrFromSlice(a.IP); ok && v.Is6() && !v.IsLinkLocalUnicast() && !v.IsUnspecified() {
-			return fmt.Errorf("ebpf IPv4-only mode refuses eth0 IPv6 address %s", v)
-		}
-	}
 	// A restarted agent cannot silently leave an iproute catch-all active.
 	existingRules, err := b.h.RuleList(unix.AF_INET)
 	if err != nil {

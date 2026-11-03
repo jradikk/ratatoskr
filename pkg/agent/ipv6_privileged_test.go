@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestPrivilegedLateIPv6QuarantinesNamespace(t *testing.T) {
+func TestPrivilegedDualStackKeepsIPv4WithoutQuarantine(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root and CAP_SYS_ADMIN/NET_ADMIN")
 	}
@@ -63,17 +63,17 @@ func TestPrivilegedLateIPv6QuarantinesNamespace(t *testing.T) {
 	if err := netlink.AddrAdd(eth, addr); err != nil {
 		t.Fatal(err)
 	}
-	if err := inspectAndGuard(); !errors.Is(err, errUnsupportedIPv6) {
-		t.Fatalf("late IPv6 not quarantined: %v", err)
+	if err := inspectAndGuard(); err != nil {
+		t.Fatalf("dual-stack IPv4 was refused: %v", err)
 	}
 	blocked, err := quarantined()
-	if err != nil || !blocked {
-		t.Fatalf("IPv4 quarantine not installed: %t %v", blocked, err)
+	if err != nil || blocked {
+		t.Fatalf("dual-stack address installed IPv4 quarantine: %t %v", blocked, err)
 	}
 	if err := netlink.AddrDel(eth, addr); err != nil {
 		t.Fatal(err)
 	}
-	if err := inspectAndGuard(); !errors.Is(err, errUnsupportedIPv6) {
-		t.Fatalf("quarantine cleared without pod recreation: %v", err)
+	if err := inspectAndGuard(); err != nil {
+		t.Fatalf("removing IPv6 address changed IPv4 guard state: %v", err)
 	}
 }

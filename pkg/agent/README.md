@@ -55,8 +55,10 @@ pidfd namespace ownership proof.
 Linux 5.10 or newer must provide `pidfd_open`, `openat2`, nsfs `NS_GET_NSTYPE`
 and permitted direct `setns` of the confined CRI nsfs FD. Runtime/seccomp policies
 that deny required calls fail closed; the agent does not automatically add
-privileges or relax confinement. IPv6 workloads are refused or fenced rather
-than allowed to escape an IPv4-only datapath.
+privileges or relax confinement. Dual-stack Pods retain IPv4 steering while
+raw-priority IPv6 INPUT/OUTPUT/FORWARD drop hooks block every IPv6 packet.
+IPv6 addresses alone do not quarantine IPv4; authorization-loss quarantine
+still blocks both families and requires Pod recreation.
 
 The agent watches node Pods and gateway status with a 30-second full resync for
 missed events. Healthy endpoints are chosen using Pod-UID affinity. No available

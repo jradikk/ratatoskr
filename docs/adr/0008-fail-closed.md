@@ -18,9 +18,12 @@ fallible updates and drops selected traffic without a usable endpoint. Init
 programming and agent wait-init block application startup until the selected
 path is ready. Gateway forwarding has a default-drop nft kill switch and
 unreachable fallback in table 100; locally marked upstream recovery probes
-remain possible while forwarding is closed. Agent authorization loss or
-unsupported workload IPv6 invokes persistent namespace quarantine rather than
-trusting potentially forged Pod annotations. `failMode: open` is not supported.
+remain possible while forwarding is closed. Dual-stack selected Pods retain
+IPv4 steering while raw-priority IPv6 INPUT/OUTPUT/FORWARD guards drop IPv6
+packets. Agent authorization loss invokes persistent IPv4/IPv6 namespace
+quarantine rather than trusting potentially forged Pod annotations. Merely
+assigning a global IPv6 address never installs an IPv4 quarantine.
+`failMode: open` is not supported.
 
 ## Alternatives considered
 

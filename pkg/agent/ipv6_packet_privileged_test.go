@@ -16,11 +16,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// An agent-managed selected namespace retains IPv6 deny hooks even when CNI
-// assigns a global IPv6 address after the pod became healthy. Detection then
-// quarantines IPv4, including an already-established IPv4 route. Only two
-// disposable netns/veth links are used; no host sysctl or real Pod is changed.
-func TestPrivilegedLateIPv6PacketQuarantine(t *testing.T) {
+// A selected namespace retains IPv6 deny hooks even when CNI assigns a
+// global IPv6 address after IPv4 programming. IPv4 remains available and the
+// readiness marker stays UP. Disposable netns/veth only; no host or CNI edits.
+func TestPrivilegedLateIPv6PacketsRemainIPv6OnlyBlocked(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root CAP_SYS_ADMIN/NET_ADMIN")
 	}
@@ -215,8 +214,8 @@ func TestPrivilegedLateIPv6PacketQuarantine(t *testing.T) {
 	if err = inspectAndGuard(); err != nil {
 		t.Fatal(err)
 	}
-	// Model a previously healthy selected Pod: a late dual-stack address must
-	// remove its readiness marker as well as block both packet families.
+	// Model an already healthy selected Pod before the late IPv6 assignment.
+	// IPv6 must be blocked without withdrawing IPv4 or its readiness marker.
 	marker := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: Marker}}
 	if err = netlink.LinkAdd(marker); err != nil {
 		t.Fatal(err)
@@ -244,24 +243,25 @@ func TestPrivilegedLateIPv6PacketQuarantine(t *testing.T) {
 		t.Fatal(err)
 	}
 	address(eth, "2001:db8::8/64")
-	if err = guardWorkload(); !errors.Is(err, errUnsupportedIPv6) {
-		t.Fatalf("late IPv6 did not quarantine IPv4: %v", err)
+	if err = guardWorkload(); err != nil {
+		t.Fatalf("dual-stack address incorrectly blocked IPv4: %v", err)
 	}
-	if _, err = netlink.LinkByName(Marker); err == nil {
-		t.Fatal("late IPv6 retained selected readiness marker")
+	readyMarker, err := netlink.LinkByName(Marker)
+	if err != nil || !markerReady(readyMarker) {
+		t.Fatalf("dual-stack address withdrew healthy IPv4 readiness: %v", err)
 	}
 	blocked, err := quarantined()
-	if err != nil || !blocked {
-		t.Fatalf("IPv4 quarantine missing: %t %v", blocked, err)
+	if err != nil || blocked {
+		t.Fatalf("dual-stack address installed IPv4 quarantine: %t %v", blocked, err)
 	}
-	if err = send("udp4", "10.42.1.9:8080"); err != nil && !errors.Is(err, unix.EPERM) {
-		t.Fatal(err)
+	if err = send("udp4", "10.42.1.9:8080"); err != nil {
+		t.Fatalf("dual-stack address broke IPv4 direct route: %v", err)
 	}
 	if err = netns.Set(sibling); err != nil {
 		t.Fatal(err)
 	}
-	if visible(unix.ETH_P_IP, net.ParseIP("10.42.1.9"), 150*time.Millisecond) {
-		t.Fatal("IPv4 bypassed late dual-stack quarantine")
+	if !visible(unix.ETH_P_IP, net.ParseIP("10.42.1.9"), time.Second) {
+		t.Fatal("IPv4 packet absent after global IPv6 assignment")
 	}
 	if err = send("udp6", "[2001:db8::9]:8080"); err != nil && !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EADDRNOTAVAIL) && !errors.Is(err, unix.ENETUNREACH) {
 		t.Fatal(err)
@@ -278,7 +278,7 @@ func TestPrivilegedLateIPv6PacketQuarantine(t *testing.T) {
 	if err = netlink.AddrDel(eth, v6); err != nil {
 		t.Fatal(err)
 	}
-	if err = inspectAndGuard(); !errors.Is(err, errUnsupportedIPv6) {
-		t.Fatal("IPv4 quarantine cleared without Pod recreation")
+	if err = inspectAndGuard(); err != nil {
+		t.Fatalf("IPv4 path changed after removing IPv6 address: %v", err)
 	}
 }

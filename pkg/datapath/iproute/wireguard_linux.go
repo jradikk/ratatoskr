@@ -139,9 +139,6 @@ func (b *Backend) PrepareClientWireGuard(ctx context.Context, c datapath.ClientC
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := b.rejectDualStack(); err != nil {
-		return "", err
-	}
 	public, err := wireguard.Ensure(b.h, datapath.WireGuardDevice, c.WireGuardPort, datapath.WireGuardMark)
 	if err != nil {
 		return "", err

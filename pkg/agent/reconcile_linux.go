@@ -473,9 +473,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 		if rt := r.domainRuntime(string(pod.UID)); rt != nil {
 			return r.poisonDomain(rt, target, pod, err)
 		}
-		if errors.Is(err, errUnsupportedIPv6) {
-			return errors.Join(fmt.Errorf("program selected datapath: %w", err), r.setPodError(ctx, pod))
-		}
 		return fmt.Errorf("program selected datapath: %w", err)
 	}
 	if removing {
