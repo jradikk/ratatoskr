@@ -547,9 +547,12 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		}
 		watchCtx, cancel := context.WithCancel(ctx)
 		pods, err := r.WatchClient.Watch(watchCtx, &corev1.PodList{}, client.MatchingFields{"spec.nodeName": r.Node})
-		var gateways watch.Interface
+		var gateways, policies watch.Interface
 		if err == nil {
 			gateways, err = r.WatchClient.Watch(watchCtx, &api.EgressGatewayList{})
+		}
+		if err == nil {
+			policies, err = r.WatchClient.Watch(watchCtx, &api.EgressPolicyList{})
 		}
 		if err != nil {
 			r.Log.Error("node API watch unavailable; retrying", "error", err)
@@ -569,6 +572,10 @@ func (r *Reconciler) Run(ctx context.Context) error {
 				if !ok {
 					r.Log.Warn("pod watch closed; reconnecting")
 				}
+			case _, ok := <-policies.ResultChan():
+				if !ok {
+					r.Log.Warn("policy watch closed; reconnecting")
+				}
 			case _, ok := <-gateways.ResultChan():
 				if !ok {
 					r.Log.Warn("gateway watch closed; reconnecting")
@@ -586,6 +593,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		}
 		if gateways != nil {
 			gateways.Stop()
+		}
+		if policies != nil {
+			policies.Stop()
 		}
 		if ctx.Err() != nil {
 			return nil
