@@ -85,17 +85,19 @@ type ClientConfig struct {
 	GatewayID uint32     `json:"gatewayID"`
 	// An invalid/absent Endpoint means no healthy gateway: keep only the
 	// unreachable route rather than allowing a lookup to fall through to main.
-	Endpoint           netip.Addr      `json:"endpoint,omitempty"`
-	AllowCloudMetadata bool            `json:"allowCloudMetadata,omitempty"`
-	Exclusions         []netip.Prefix  `json:"exclusions"`
-	MTU                int             `json:"mtu"`
-	Encryption         string          `json:"encryption,omitempty"`
-	GatewayPublicKey   string          `json:"gatewayPublicKey,omitempty"`
-	RegistrationCACert string          `json:"registrationCACert,omitempty"`
-	WireGuardPort      uint16          `json:"wireGuardPort,omitempty"`
-	Identity           Identity        `json:"identity"`
-	Policy             Policy          `json:"policy"`
-	DomainState        []DomainBinding `json:"domainState,omitempty"`
+	Endpoint               netip.Addr      `json:"endpoint,omitempty"`
+	AllowCloudMetadata     bool            `json:"allowCloudMetadata,omitempty"`
+	Exclusions             []netip.Prefix  `json:"exclusions"`
+	MTU                    int             `json:"mtu"`
+	Encryption             string          `json:"encryption,omitempty"`
+	GatewayPublicKey       string          `json:"gatewayPublicKey,omitempty"`
+	RegistrationCACert     string          `json:"registrationCACert,omitempty"`
+	WireGuardPort          uint16          `json:"wireGuardPort,omitempty"`
+	Identity               Identity        `json:"identity"`
+	Policy                 Policy          `json:"policy"`
+	DomainState            []DomainBinding `json:"domainState,omitempty"`
+	DomainPolicyUID        string          `json:"domainPolicyUID,omitempty"`
+	DomainPolicyGeneration int64           `json:"domainPolicyGeneration,omitempty"`
 }
 type GatewayConfig struct {
 	PodIP           netip.Addr   `json:"podIP"`
@@ -154,6 +156,12 @@ func (c ClientConfig) Validate() error {
 		if !p.IsValid() || !p.Addr().Is4() {
 			return fmt.Errorf("policy exclusions must be IPv4 CIDRs")
 		}
+	}
+	if c.DomainPolicyGeneration < 0 || (c.DomainPolicyUID == "") != (c.DomainPolicyGeneration == 0) || len(c.DomainPolicyUID) > 128 {
+		return fmt.Errorf("DNS state requires a bounded policy UID and positive generation")
+	}
+	if len(c.DomainState) > 0 && c.DomainPolicyUID == "" {
+		return fmt.Errorf("DNS bindings require a policy identity")
 	}
 	if len(c.DomainState) > 4096 {
 		return fmt.Errorf("domain bindings exceed 4096 entries")
