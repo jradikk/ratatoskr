@@ -8,15 +8,18 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 
+	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/skaldhall/ratatoskr/api/v1alpha1"
@@ -39,6 +42,10 @@ const (
 	wgTokenMount         = "/var/run/ratatoskr/wg-token"    // #nosec G101 -- fixed mount path, not token bytes.
 )
 
+// API-generated Pod names use an opaque five-character suffix. A prefix alone
+// is insufficient to identify admission-time generated intent securely.
+var generatedSuffix = regexp.MustCompile(`^[a-z0-9]{5}$`)
+
 type Handler struct {
 	Client                              client.Client
 	Namespace, InitImage, ClusterDomain string
@@ -46,6 +53,9 @@ type Handler struct {
 	// the default gateway namespace for standalone webhook deployments.
 	AgentNamespace   string
 	Driver, Datapath string
+	// Optional test-injected logger; production uses controller-runtime's JSON
+	// logger configured by cmd/webhook. No object or raw denial body is logged.
+	Logger logr.Logger
 }
 
 func (h *Handler) driver() string {
@@ -80,7 +90,41 @@ func (h *Handler) validateModes() error {
 }
 
 func denied(err error) admission.Response { return admission.Denied(err.Error()) }
-func (h *Handler) MutatePod(ctx context.Context, req admission.Request) admission.Response {
+
+// admissionCategory is deliberately fixed and bounded: never log an error
+// message, submitted object, annotation, identity value, Secret or token.
+func admissionCategory(result admission.Response) string {
+	if result.Allowed {
+		return "allowed"
+	}
+	if result.Result == nil {
+		return "denied-other"
+	}
+	message := result.Result.Message
+	for _, category := range []string{"identity-pod", "identity-namespace", "identity-uid",
+		"identity-policy", "gateway-id", "encryption", "gateway-endpoint-identity",
+		"gateway-status", "authorized-policy", "config-rollout"} {
+		if strings.HasSuffix(message, "client config differs from authorized gateway status ("+category+")") {
+			return category
+		}
+	}
+	return "denied-other"
+}
+
+func (h *Handler) auditAdmission(ctx context.Context, req admission.Request, stage string, response admission.Response) {
+	logger := h.Logger
+	if logger.GetSink() == nil {
+		logger = ctrlLog.FromContext(ctx)
+	}
+	// Admission UID is an API-generated correlation ID; never log Pod name,
+	// namespace value, raw response/error or user-controlled labels.
+	logger.Info("ratatoskr admission decision", "stage", stage, "operation", string(req.Operation),
+		"kind", req.Kind.Kind, "requestUID", string(req.UID), "driver", h.driver(),
+		"allowed", response.Allowed, "category", admissionCategory(response))
+}
+
+func (h *Handler) MutatePod(ctx context.Context, req admission.Request) (response admission.Response) {
+	defer func() { h.auditAdmission(ctx, req, "mutate", response) }()
 	if req.Operation != admissionv1.Create {
 		return admission.Allowed("not a pod create")
 	}
@@ -272,10 +316,12 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		// The API server may assign generateName after mutation and before
 		// validation. Preserve empty-name admission intent across both passes;
 		// the agent resolves the assigned name and UID from the live Pod.
-		// A supplied name must match its prefix; never normalize a different
-		// explicit identity or an already assigned UID.
-		if pod.GenerateName != "" && pod.UID == "" &&
-			(pod.Name == "" || strings.HasPrefix(pod.Name, pod.GenerateName)) {
+		// A supplied name must match its prefix; never normalize an unrelated
+		// explicit identity. UID may already be assigned by CREATE validation,
+		// but only the node agent can bind the actual Pod UID/name after scheduling.
+		if pod.GenerateName != "" &&
+			(pod.Name == "" || (strings.HasPrefix(pod.Name, pod.GenerateName) &&
+				generatedSuffix.MatchString(strings.TrimPrefix(pod.Name, pod.GenerateName)))) {
 			cfg.Identity.Pod = ""
 		}
 		// CREATE admission has no assigned Pod UID or post-CNI IP, and Gateway
@@ -381,7 +427,8 @@ func (h *Handler) matchingPolicies(ctx context.Context, ns string, podLabels map
 	}
 	return matches, nil
 }
-func (h *Handler) Validate(ctx context.Context, req admission.Request) admission.Response {
+func (h *Handler) Validate(ctx context.Context, req admission.Request) (response admission.Response) {
+	defer func() { h.auditAdmission(ctx, req, "validate", response) }()
 	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return admission.Allowed("not create/update")
 	}
