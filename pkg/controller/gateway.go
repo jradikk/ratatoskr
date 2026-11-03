@@ -534,6 +534,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.removeStaleProfileDeployments(ctx, &gw, resources); err != nil {
 		return r.block(ctx, &gw, "ApplyFailed", err)
 	}
+	if r.Options.GatewayMetricsEnabled == "false" || r.Options.GatewayMetricsEnabled == "" {
+		if err := r.removeOwnedGatewayMetrics(ctx, &gw); err != nil {
+			return r.block(ctx, &gw, "ApplyFailed", err)
+		}
+	}
 	if gw.Spec.DNS.Mode != "gateway" {
 		var oldDNS corev1.Service
 		err := r.Get(ctx, types.NamespacedName{Name: gw.Name + "-dns", Namespace: gw.Namespace}, &oldDNS)
@@ -670,6 +675,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// removeOwnedGatewayMetrics retires only the exact Gateway-controlled metrics
+// Service when scraping is disabled. A foreign same-name Service is not ours
+// to delete; the gateway data and DNS Services are never candidates.
+func (r *GatewayReconciler) removeOwnedGatewayMetrics(ctx context.Context, gw *api.EgressGateway) error {
+	var metrics corev1.Service
+	err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name + "-metrics"}, &metrics)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return classifyApplyError(&corev1.Service{}, "read", err)
+	}
+	if !metav1.IsControlledBy(&metrics, gw) || metrics.UID == "" {
+		return nil
+	}
+	if err := r.Delete(ctx, &metrics, client.Preconditions{UID: &metrics.UID}); err != nil && !apierrors.IsNotFound(err) {
+		return classifyApplyError(&corev1.Service{}, "update", err)
+	}
+	return nil
 }
 
 func (r *GatewayReconciler) removeStaleProfileDeployments(ctx context.Context, gw *api.EgressGateway, desired []client.Object) error {

@@ -36,14 +36,18 @@ func (r *GatewayReconciler) gatewayMetricsIngress() (*networkingv1.NetworkPolicy
 		return nil, false, nil
 	}
 	decode := func(raw string) (*metav1.LabelSelector, error) {
+		// An empty or {} selector admits every Pod in every namespace. Never
+		// turn a missing controller env value into unauthenticated metrics
+		// ingress, even if a chart normally supplies both selectors.
 		if raw == "" {
-			raw = "{}"
+			return nil, fmt.Errorf("configured metrics ingress selectors must be nonempty")
 		}
 		var selector metav1.LabelSelector
 		dec := json.NewDecoder(strings.NewReader(raw))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&selector); err != nil || dec.Decode(new(any)) != io.EOF {
-			return nil, fmt.Errorf("invalid configured metrics ingress selector")
+		if err := dec.Decode(&selector); err != nil || dec.Decode(new(any)) != io.EOF ||
+			len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+			return nil, fmt.Errorf("invalid or empty configured metrics ingress selector")
 		}
 		if _, err := metav1.LabelSelectorAsSelector(&selector); err != nil {
 			return nil, fmt.Errorf("invalid configured metrics ingress selector")

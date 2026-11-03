@@ -215,6 +215,80 @@ func TestGatewayMetricsOptInRendersScopedServiceAndIngressForProfiles(t *testing
 	}
 }
 
+func TestGatewayMetricsDisableRemovesOnlyOwnedService(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(map[bool]string{false: "owned", true: "foreign"}[foreign], func(t *testing.T) {
+			r, gw := gatewayWithProfiles(t)
+			ctx := context.Background()
+			r.Options.GatewayMetricsEnabled = "true"
+			r.Options.GatewayMetricsNamespaceSelector = `{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}`
+			r.Options.GatewayMetricsPodSelector = `{"matchLabels":{"app.kubernetes.io/name":"prometheus"}}`
+			for _, name := range []string{"berlin-key", "oslo-key"} {
+				if err := r.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gw.Namespace}, Data: map[string][]byte{"client.ovpn": []byte("private")}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.Update(ctx, gw); err != nil {
+				t.Fatal(err)
+			}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}}
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatal(err)
+			}
+			metrics := &corev1.Service{}
+			key := types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name + "-metrics"}
+			if err := r.Get(ctx, key, metrics); err != nil {
+				t.Fatal(err)
+			}
+			metrics.UID = types.UID("owned-metrics-uid")
+			if foreign {
+				metrics.OwnerReferences = nil
+			}
+			if err := r.Update(ctx, metrics); err != nil {
+				t.Fatal(err)
+			}
+			r.Options.GatewayMetricsEnabled = "false"
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatal(err)
+			}
+			remaining := &corev1.Service{}
+			err := r.Get(ctx, key, remaining)
+			if foreign && err != nil {
+				t.Fatalf("foreign same-name metrics Service removed: %v", err)
+			}
+			if !foreign && err == nil {
+				t.Fatal("disabled owned metrics Service still exists")
+			}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, &corev1.Service{}); err != nil {
+				t.Fatalf("regular gateway Service removed: %v", err)
+			}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: "edge-berlin"}, &appsv1.Deployment{}); err != nil {
+				t.Fatalf("gateway Deployment removed on metrics disable: %v", err)
+			}
+		})
+	}
+}
+
+func TestGatewayMetricsEnabledRequiresExplicitBoundedSelectors(t *testing.T) {
+	r, gw := gatewayWithProfiles(t)
+	r.Options.GatewayMetricsEnabled = "true"
+	for _, tc := range []struct{ ns, pod string }{
+		{"", `{"matchLabels":{"app":"prometheus"}}`},
+		{`{}`, `{"matchLabels":{"app":"prometheus"}}`},
+		{`{"matchLabels":{"team":"monitoring"}}`, ""},
+		{`{"matchLabels":{"team":"monitoring"}}`, `{}`},
+		{`{"matchLabels":{"team":"monitoring"}}`, `{"matchExpressions":[{"key":"app","operator":"Invalid","values":["prometheus"]}]}`},
+	} {
+		r.Options.GatewayMetricsNamespaceSelector, r.Options.GatewayMetricsPodSelector = tc.ns, tc.pod
+		if _, err := r.render(gw, nil); err == nil {
+			t.Fatal("unsafe empty/invalid metrics selector accepted")
+		}
+	}
+}
+
 func TestGatewayProfilesReconcileAllSecretsAndRetireRemovedProfile(t *testing.T) {
 	r, gw := gatewayWithProfiles(t)
 	ctx := context.Background()
