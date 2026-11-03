@@ -66,7 +66,14 @@ func TestPrivilegedSeparateAgentNamespaceRestoration(t *testing.T) {
 	if err := netns.Set(agentNS); err != nil {
 		t.Fatal(err)
 	}
-	target := os.NewFile(uintptr(targetNS), "disposable-target-netns")
+	// os.File owns its descriptor and may close it from a finalizer. Duplicate
+	// the namespace handle so its lifetime cannot close a later reused FD.
+	targetFD, err := unix.FcntlInt(uintptr(targetNS), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := os.NewFile(uintptr(targetFD), "disposable-target-netns")
+	defer target.Close()
 	entered := false
 	if err := InNamespace(target, func() error {
 		entered = true
