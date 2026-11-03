@@ -61,19 +61,18 @@ metrics:
   ingress:
     namespaceSelector: {}
     podSelector: {}
-  # Requires monitoring.coreos.com/v1 ServiceMonitor CRD when enabled.
+  # auto creates the monitor when its CRD is installed; true/false override.
   serviceMonitor:
-    enabled: false
+    enabled: auto
     labels: {}
     interval: 30s
     scrapeTimeout: 10s
-  # Requires PodMonitor CRD; gateway namespaces must opt in with a label.
+  # auto discovers gateways across namespaces when the PodMonitor CRD exists.
   podMonitor:
-    enabled: false
+    enabled: auto
     labels: {}
     namespaceSelector:
-      matchLabels:
-        ratatoskr.skaldhall.io/metrics: enabled
+      any: true
     interval: 30s
     scrapeTimeout: 10s
   dashboard:

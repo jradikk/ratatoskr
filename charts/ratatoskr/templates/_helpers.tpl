@@ -22,7 +22,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- if not (has .Values.datapath (list "iproute" "ebpf")) -}}
 {{- fail (printf "datapath must be iproute or ebpf, got %q" .Values.datapath) -}}
 {{- end -}}
-{{- if and (not .Values.metrics.enabled) (or .Values.metrics.serviceMonitor.enabled .Values.metrics.podMonitor.enabled) -}}
+{{- if and (not .Values.metrics.enabled) (or (eq (toString .Values.metrics.serviceMonitor.enabled) "true") (eq (toString .Values.metrics.podMonitor.enabled) "true")) -}}
 {{- fail "metrics monitors require metrics.enabled=true" -}}
 {{- end -}}
 {{- if and .Values.metrics.dashboard.enabled (or (contains "/" .Values.metrics.dashboard.sidecarLabel) (contains " " .Values.metrics.dashboard.sidecarLabel)) -}}

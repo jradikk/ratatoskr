@@ -1,5 +1,19 @@
 # Monitoring Ratatoskr
 
+## Minimal setup
+
+```yaml
+metrics:
+  enabled: true
+```
+
+This is also the default. Metrics endpoints allow any reachable source, and
+ServiceMonitor/PodMonitor resources are created automatically when their CRDs
+are installed. No gateway namespace opt-in label is needed. Prometheus must
+still be configured to select these monitors; see troubleshooting below if your
+Prometheus installation requires particular monitor labels.
+
+
 Metrics are unauthenticated HTTP. With `metrics.enabled=true` (default),
 controller listens at :8080, webhook :9904, agent :9903 and dynamically
 managed gateway Pods :9902. Chart metrics Services select operator Pods;
@@ -50,8 +64,7 @@ metrics:
     labels:
       release: monitoring
     namespaceSelector:
-      matchLabels:
-        ratatoskr.skaldhall.io/metrics: enabled
+      any: true
     interval: 30s
     scrapeTimeout: 10s
   dashboard:
@@ -73,7 +86,7 @@ nonfunctional monitors. Opt in only the namespaces containing Gateway Pods
 that you intend to scrape (substitute the real namespace):
 
 ```sh
-kubectl label namespace <gateway-namespace> ratatoskr.skaldhall.io/metrics=enabled --overwrite
+# Gateway discovery includes all namespaces by default.
 kubectl -n ratatoskr-system get servicemonitor,podmonitor
 kubectl -n ratatoskr-system get svc ratatoskr-controller-metrics ratatoskr-webhook-metrics ratatoskr-agent-metrics
 ```
@@ -99,7 +112,7 @@ needs no sidecar.
    can use different `serviceMonitorSelector`, `podMonitorSelector` or
    corresponding namespace selectors. Compare them to the rendered monitor
    labels/namespace, not just the Helm release name.
-2. Confirm the Gateway namespace has the opt-in label, the PodMonitor selects
+2. Confirm any custom namespace selector includes the Gateway namespace, and the PodMonitor selects
    it, Gateway Pods exist and expose the named `metrics` port, and
    `metrics.enabled=true`. A Gateway Service alone does not satisfy PodMonitor
    discovery.
@@ -130,13 +143,18 @@ NetworkPolicy API. Do not expose unauthenticated metrics endpoints publicly.
 
 ## Discovery and dashboard
 
-ServiceMonitor (`metrics.serviceMonitor.enabled`) selects controller, webhook
-and agent metrics Services in the release namespace. PodMonitor
-(`metrics.podMonitor.enabled`) selects managed Gateway Pods in namespaces
-matching `metrics.podMonitor.namespaceSelector`; default namespace opt-in is
-`ratatoskr.skaldhall.io/metrics=enabled`. Each is independently opt-in and
-requires its `monitoring.coreos.com/v1` CRD. The chart fails when an enabled
-monitor CRD is absent. Their labels must match your Prometheus selector.
+With just `metrics.enabled: true`, the chart automatically creates a
+ServiceMonitor for operator Services and a PodMonitor for gateway Pods whenever
+their respective CRDs are installed. Gateway discovery includes all namespaces
+by default, selecting only Ratatoskr gateway labels. Missing CRDs skip automatic
+monitors without blocking installation. Install Prometheus Operator first, then
+upgrade Ratatoskr to create them.
+
+Advanced settings can force either monitor on (`enabled: true`, which errors if
+its CRD is missing) or off (`enabled: false`). The default is `enabled: auto`.
+Monitor labels and any custom namespace selector must agree with your Prometheus
+installation's discovery settings. The chart cannot override an existing
+Prometheus instance's restrictive ServiceMonitor/PodMonitor selectors.
 Interval defaults to 30s, scrape timeout 10s. Both monitors can coexist:
 operator Services and gateway Pods are distinct scrape targets. Explicit
 PodMonitor relabelings provide `namespace`, `pod`, `gateway`, `gateway_uid`,

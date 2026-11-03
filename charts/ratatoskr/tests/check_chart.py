@@ -370,7 +370,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         assert mon["endpoints"][0]["port"] == "metrics"
     if pod_monitor:
         mon = docs["PodMonitor", "ratatoskr-gateways"]["spec"]
-        assert mon["namespaceSelector"] == {"matchLabels": {"ratatoskr.skaldhall.io/metrics": "enabled"}}
+        assert mon["namespaceSelector"] == {"any": True}
         assert mon["podMetricsEndpoints"][0]["port"] == "metrics"
     if dashboard:
         import json
@@ -457,6 +457,20 @@ if __name__ == "__main__":
                  "--api-versions", "monitoring.coreos.com/v1/ServiceMonitor"), "agent", service_monitor=True)
     check(render("--set", "metrics.podMonitor.enabled=true",
                  "--api-versions", "monitoring.coreos.com/v1/PodMonitor"), "agent", pod_monitor=True)
+    check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
+                 "--api-versions", "monitoring.coreos.com/v1/PodMonitor"),
+          "agent", service_monitor=True, pod_monitor=True)
+    check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor"),
+          "agent", service_monitor=True)
+    check(render("--api-versions", "monitoring.coreos.com/v1/PodMonitor"),
+          "agent", pod_monitor=True)
+    check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
+                 "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
+                 "--set", "metrics.enabled=false"), "agent", metrics=False)
+    check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
+                 "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
+                 "--set", "metrics.serviceMonitor.enabled=false",
+                 "--set", "metrics.podMonitor.enabled=false"), "agent")
     for name in ("serviceMonitor", "podMonitor"):
         helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
              "--set", "metrics." + name + ".enabled=true", succeeds=False)

@@ -177,7 +177,9 @@ source** on these ports; optional `metrics.ingress` namespace and Pod selectors
 can restrict scraping. Metrics HTTP is unauthenticated, so secure reachability
 with cluster policy as needed.
 Set `metrics.enabled=false` to disable listeners and operator metrics Services.
-Prometheus Operator CRDs are optional: `metrics.serviceMonitor.enabled`
+Prometheus Operator CRDs are optional. Monitors default to `enabled: auto` and
+are created when their CRDs are installed; gateway discovery includes all
+namespaces by default. `metrics.serviceMonitor.enabled`
 selects operator Services; `metrics.podMonitor.enabled` discovers Gateway Pods
 in opted-in namespaces. Helm checks the enabled monitor CRDs. Import the
 packaged Grafana JSON from `dashboards/ratatoskr-overview.json`, or set
