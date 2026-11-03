@@ -312,6 +312,11 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 		cfg.Identity.Policy = policy.Name
 		cfg.Policy = compiled
 	}
+	if policyUsesDomains(matches) {
+		if h.driver() != "agent" || gateway.Spec.DNS.Mode != "gateway" {
+			return cfg, fmt.Errorf("domain selectors require driver=agent and gateway dns.mode=gateway")
+		}
+	}
 	if h.driver() == "agent" {
 		// The API server may assign generateName after mutation and before
 		// validation. Preserve empty-name admission intent across both passes;
@@ -395,6 +400,84 @@ func (h *Handler) clientConfig(ctx context.Context, admissionNamespace string, p
 	return cfg, nil
 }
 
+// validProfileLabel is deliberately tighter than a generic Pod name: each
+// profile is an immutable named controller child, never an arbitrary filename.
+func validProfileLabel(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, char := range value {
+		if char != '-' && (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSecretName(value string) bool {
+	if len(value) == 0 || len(value) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !validDNSLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validDNSLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 ||
+		(label[0] < 'a' || label[0] > 'z') && (label[0] < '0' || label[0] > '9') ||
+		(label[len(label)-1] < 'a' || label[len(label)-1] > 'z') && (label[len(label)-1] < '0' || label[len(label)-1] > '9') {
+		return false
+	}
+	for _, char := range label {
+		if char != '-' && (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// Profiles cannot silently broaden a legacy single upstream into multiple
+// exits. All referenced Secrets are names only within this Gateway namespace.
+func validateUpstreamProfiles(g *v1alpha1.EgressGateway) error {
+	upstream := g.Spec.Upstream
+	if len(upstream.Profiles) == 0 {
+		// Preserve legacy gateway admission: the controller reports an absent
+		// upstream Secret as NotReady/SecretUnavailable. Do not let profiles
+		// permit malformed explicitly named Secrets.
+		if upstream.SecretRef.Name != "" && !validSecretName(upstream.SecretRef.Name) {
+			return fmt.Errorf("legacy upstream Secret name is invalid")
+		}
+		return nil
+	}
+	if upstream.Type != "openvpn" || upstream.Image != "" || upstream.SecretRef.Name != "" ||
+		len(upstream.Profiles) > 8 || g.Spec.Replicas > 1 {
+		return fmt.Errorf("upstream profiles require openvpn, no legacy Secret/image and one replica")
+	}
+	seen := make(map[string]bool, len(upstream.Profiles))
+	for _, profile := range upstream.Profiles {
+		if !validProfileLabel(profile.Name) || seen[profile.Name] || !validSecretName(profile.SecretRef.Name) {
+			return fmt.Errorf("upstream profile name or Secret reference invalid or duplicated")
+		}
+		seen[profile.Name] = true
+	}
+	return nil
+}
+
+func policyUsesDomains(policies []v1alpha1.EgressPolicy) bool {
+	for _, policy := range policies {
+		for _, rule := range policy.Spec.Rules {
+			if len(rule.Domains) != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func supportedGateway(g *v1alpha1.EgressGateway) error {
 	if g.Spec.Encryption != "" && g.Spec.Encryption != "none" && g.Spec.Encryption != "wireguard" {
 		return fmt.Errorf("gateway encryption %q is unsupported", g.Spec.Encryption)
@@ -404,6 +487,9 @@ func supportedGateway(g *v1alpha1.EgressGateway) error {
 	}
 	if g.Spec.Upstream.Type != "openvpn" {
 		return fmt.Errorf("gateway upstream %q is not implemented; only openvpn is currently available", g.Spec.Upstream.Type)
+	}
+	if err := validateUpstreamProfiles(g); err != nil {
+		return err
 	}
 	if g.Spec.FailMode != "" && g.Spec.FailMode != "closed" {
 		return fmt.Errorf("gateway failMode must be closed")
@@ -502,6 +588,25 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) (response
 		}
 		if _, err := policycompiler.Compile(policy.Spec); err != nil {
 			return denied(fmt.Errorf("compile EgressPolicy %s: %w", policy.Name, err))
+		}
+		if policyUsesDomains([]v1alpha1.EgressPolicy{policy}) {
+			if h.driver() != "agent" {
+				return denied(fmt.Errorf("domain selectors require driver=agent"))
+			}
+			gatewayNS := policy.Spec.GatewayRef.Namespace
+			if gatewayNS == "" {
+				gatewayNS = h.Namespace
+			}
+			var gateway v1alpha1.EgressGateway
+			if err := h.Client.Get(ctx, types.NamespacedName{Namespace: gatewayNS, Name: policy.Spec.GatewayRef.Name}, &gateway); err != nil {
+				return denied(fmt.Errorf("domain selectors require an existing gateway with dns.mode=gateway"))
+			}
+			if gateway.Spec.DNS.Mode != "gateway" {
+				return denied(fmt.Errorf("domain selectors require gateway dns.mode=gateway"))
+			}
+			if err := supportedGateway(&gateway); err != nil {
+				return denied(err)
+			}
 		}
 		selector, err := metav1.LabelSelectorAsSelector(&policy.Spec.WorkloadSelector)
 		if err != nil {
