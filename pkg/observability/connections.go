@@ -7,9 +7,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 // ConnectionScope is a successfully applied, ready client set and the current

@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	server "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -22,7 +23,6 @@ import (
 	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 	ratatoskr "github.com/skaldhall/ratatoskr/pkg/webhook"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func run(ctx context.Context, bootstrap bool, dir string) error {
