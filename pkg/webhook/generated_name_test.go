@@ -39,6 +39,7 @@ func TestAgentGeneratedNameMutationSurvivesAssignedNameAndRejectsForgery(t *test
 				t.Fatal("generated Pod must retain namespace but no guessed name/endpoint")
 			}
 			mutated.Name = "generated-client-abcde"
+			mutated.UID = "assigned-uid-before-validation"
 			mutated.Namespace = "apps"
 			mutated.Spec.ServiceAccountName = "default"
 			if r := h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, &mutated, nil)); !r.Allowed {
@@ -63,6 +64,8 @@ func TestAgentGeneratedNameMutationSurvivesAssignedNameAndRejectsForgery(t *test
 					p.Annotations[ConfigAnnotation] = string(raw)
 				}},
 				{"non-prefix-name", func(p *corev1.Pod) { p.Name = "unrelated" }},
+				{"prefix-only-name", func(p *corev1.Pod) { p.Name = "generated-client-" }},
+				{"prefix-extra-name", func(p *corev1.Pod) { p.Name = "generated-client-abcdef" }},
 				{"different-gateway", func(p *corev1.Pod) { p.Labels[GatewayLabel] = "other" }},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +96,7 @@ func TestAgentGeneratedNameStatusChurnKeepsAdmissionIntentAndRejectsPolicyForger
 	h.Driver = "agent"
 	mutated := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, pod, nil)), pod)
 	mutated.Name = "replicaset-child-abcde"
+	mutated.UID = "already-assigned"
 	gateway.Status.Endpoints = nil
 	gateway.Status.EffectiveExclusions = []v1alpha1.EffectiveExclusion{{CIDR: "10.0.0.0/8"}}
 	h.Client = setup(t, ns, gateway).Client
