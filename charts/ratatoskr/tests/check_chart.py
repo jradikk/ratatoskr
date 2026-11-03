@@ -52,8 +52,8 @@ def check_agent(docs, socket, datapath, dev=False):
     assert ds["selector"]["matchLabels"] == ds["template"]["metadata"]["labels"]
     assert pod["serviceAccountName"] == "ratatoskr-agent"
     assert pod["automountServiceAccountToken"] is True
-    assert pod["hostPID"] is True and pod["hostNetwork"] is True
-    assert pod["dnsPolicy"] == "ClusterFirstWithHostNet"
+    assert pod["hostPID"] is True and pod["hostNetwork"] is False
+    assert pod["dnsPolicy"] == "ClusterFirst"
     assert len(pod["containers"]) == 1
     container = pod["containers"][0]
     assert container["image"] == (
@@ -61,7 +61,8 @@ def check_agent(docs, socket, datapath, dev=False):
         "ghcr.io/jradikk/ratatoskr-agent:0.1.0")
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
-    assert container["ports"] == [{"name": "health", "containerPort": 8081}]
+    assert container["ports"] == [{"name": "health", "containerPort": 19903}]
+    assert next(e["value"] for e in container["env"] if e["name"] == "HEALTH_PORT") == "19903"
     bpf_enabled = datapath == "ebpf"
     assert container["securityContext"] == {
         "runAsUser": 0, "privileged": False, "allowPrivilegeEscalation": False,
@@ -70,7 +71,7 @@ def check_agent(docs, socket, datapath, dev=False):
                          (["BPF", "PERFMON"] if bpf_enabled else [])},
     }
     env = {e["name"]: e for e in container["env"]}
-    assert set(env) == {"NODE_NAME", "POD_NAMESPACE", "POD_NAME", "POD_UID", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
+    assert set(env) == {"HEALTH_PORT", "NODE_NAME", "POD_NAMESPACE", "POD_NAME", "POD_UID", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
     assert env["DATAPATH"]["value"] == datapath
     for name, field in {"NODE_NAME": "spec.nodeName", "POD_NAMESPACE": "metadata.namespace",
                         "POD_NAME": "metadata.name", "POD_UID": "metadata.uid"}.items():

@@ -316,7 +316,7 @@ func rejectForbiddenNetns(target unix.Stat_t, forbidden ...unix.Stat_t) error {
 }
 
 func rejectHost(f *os.File) error {
-	host, err := hostStat()
+	own, host, err := anchorStats()
 	if err != nil {
 		return err
 	}
@@ -324,7 +324,7 @@ func rejectHost(f *os.File) error {
 	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
 		return err
 	}
-	return rejectForbiddenNetns(target, host)
+	return rejectForbiddenNetns(target, own, host)
 }
 
 // InNamespace pins the calling thread throughout backend creation and execution.
@@ -339,7 +339,7 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 		return e
 	}
 	defer original.Close()
-	if e = checkThreadHost(); e != nil {
+	if e = checkThreadOwn(); e != nil {
 		return e
 	}
 	if e = rejectHost(target); e != nil {
@@ -350,10 +350,10 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 	}
 	defer func() {
 		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
-			panic(errors.Join(err, fmt.Errorf("restore host namespace: %w", restore)))
+			panic(errors.Join(err, fmt.Errorf("restore agent namespace: %w", restore)))
 		}
-		if e := checkThreadHost(); e != nil {
-			panic(errors.Join(err, fmt.Errorf("restored thread differs from verified host: %w", e)))
+		if e := checkThreadOwn(); e != nil {
+			panic(errors.Join(err, fmt.Errorf("restored thread differs from verified agent namespace: %w", e)))
 		}
 	}()
 	return fn()

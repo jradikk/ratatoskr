@@ -7,11 +7,12 @@ readiness as gateway endpoints and policies change. The process entrypoint is
 
 ## Runtime contract
 
-Run one trusted instance per node. The chart uses `hostNetwork`, `hostPID`,
-`NET_ADMIN` and `SYS_ADMIN`, plus `BPF`/`PERFMON` when eBPF is selected. It mounts
-the node-local CRI socket and `/var/run/netns`; HostToContainer mount propagation
-allows newly created CNI namespace bind mounts to be observed. **Workload
-containers must not receive these privileges or mounts.**
+Run one trusted instance per node. The chart gives the agent an ordinary Pod
+network namespace (`hostNetwork: false`) and `hostPID: true`, `NET_ADMIN` and
+`SYS_ADMIN`, plus `BPF`/`PERFMON` when eBPF is selected. It mounts the node-local
+CRI socket and `/var/run/netns`; HostToContainer mount propagation allows newly
+created CNI namespace bind mounts to be observed. **Workload containers must
+not receive these privileges or mounts.**
 
 Required Downward API fieldRefs are `NODE_NAME` (`spec.nodeName`),
 `POD_NAMESPACE`, `POD_NAME`, and `POD_UID`. `CRI_SOCKET` identifies the mounted
@@ -28,15 +29,20 @@ replacement after restart, but are not accepted without fresh identity checks.
 ## Trust and fail-closed reconciliation
 
 At startup, an uncached GET verifies the agent's own exact Pod UID, node,
-ServiceAccount, non-deleting lifecycle, hostNetwork/hostPID and fieldRefs before
-pinning its current thread's netns as the host baseline. Each resync rechecks
-that API identity. This is a **kubelet/API trust assertion**, not an independent
-PID1 attestation; false control-plane/runtime metadata breaks the boundary.
+ServiceAccount, non-deleting lifecycle, separate Pod network namespace,
+`hostPID: true` and Downward API fieldRefs. It pins both its own thread netns
+for restoration and `/proc/1/ns/net` as a separately validated host-PID-1
+forbidden namespace; they must differ. Each resync rechecks the Pod identity
+and its thread against the pinned **own** namespace. This relies on the
+validated hostPID/CRI/Kubernetes trust contract, not independent PID-to-netns
+attestation. A runtime denying `/proc/1/ns/net` under existing seccomp fails
+startup closed; no additional privilege or workload-path `/proc` fallback is
+introduced.
 
 Before programming, the agent requires READY CRI namespace/name/UID/PodIP
 metadata, a live pidfd whose cgroup contains the Pod UID, exactly one confined
 nsfs network namespace path, and a unique eth0 IPv4 matching the PodIP. The
-candidate netns must differ from the pinned host baseline. Sandbox identity,
+candidate netns must differ from both pinned own and host anchors. Sandbox identity,
 path and namespace inode are rechecked around programming. The CRI-reported
 path-to-PID association remains **trusted CRI authority**, not independent
 pidfd namespace ownership proof.
@@ -85,9 +91,9 @@ to a Pod UID. Combined with CRI access and namespace privileges, this is a
 agent ServiceAccount, operator namespace, admission configuration and runtime
 socket; admission checks do not make a compromised agent safe.
 
-`/healthz` and `/readyz` listen on 8081. Readiness reports process reconciliation,
+`/healthz` and `/readyz` listen on the configured `HEALTH_PORT` (chart default 19903) in the agent Pod netns. Readiness reports process reconciliation,
 not proof that every workload/VPN request succeeds. Programming metrics bind
-only to `127.0.0.1:9903` in the node's host netns; no scraping Service is exposed.
+only to `127.0.0.1:9903` in the agent Pod netns; no scraping Service is exposed.
 They count completed client-netns operations (`usable`, `closed`, `cleanup`),
 not CRI/API/token checks. Metrics contain no identity/error labels and reset on
 process restart.

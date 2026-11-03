@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -32,10 +33,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Metrics remain local to this node's host network namespace. The agent has
-// one DaemonSet Pod per node; no Service, listener on the Pod IP, or RBAC is
-// added for scraping.
+// Metrics stay on loopback inside the agent Pod's own network namespace.
+// No Service, listener on the Pod IP, or RBAC is added for scraping.
 const agentMetricsAddr = "127.0.0.1:9903"
+
+// Health uses the chart-selected port inside the agent Pod's network namespace.
+func agentHealthAddress() (string, error) {
+	port := os.Getenv("HEALTH_PORT")
+	if port == "" {
+		port = "19903"
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("HEALTH_PORT must be an integer from 1 to 65535")
+	}
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(n)), nil
+}
 
 func agentMetricsServer(programming *observability.AgentProgramming) (*http.Server, net.Listener, error) {
 	mux := http.NewServeMux()
@@ -123,7 +136,11 @@ func run(ctx context.Context) error {
 		}
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	listener, err := net.Listen("tcp", "0.0.0.0:8081") // #nosec G102 -- node health probes require a pod-network reachable bind.
+	healthAddress, err := agentHealthAddress()
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", healthAddress) // #nosec G102 -- node health probes require a pod-network reachable bind.
 	if err != nil {
 		return err
 	}

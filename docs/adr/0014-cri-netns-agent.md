@@ -12,11 +12,15 @@ The CRI socket is a powerful node-level trust boundary.
 
 ## Decision
 
-A hostNetwork/hostPID DaemonSet mounts the node's CRI socket and host
-`/var/run/netns` with HostToContainer propagation. At startup it GETs its own
-Pod uncached and verifies exact Downward API namespace/name/UID/node identity,
-ServiceAccount, host namespaces and non-deleting status. It pins that thread's
-host netns FD as an anchor, rejecting that namespace as a workload target.
+A `hostPID: true`, **`hostNetwork: false`** DaemonSet mounts the node's CRI
+socket and host `/var/run/netns` with HostToContainer propagation. At startup
+it GETs its own Pod uncached and verifies exact Downward API
+namespace/name/UID/node identity, ServiceAccount, separate Pod netns, hostPID
+and non-deleting status. It pins the current agent thread's own netns FD for
+restoration and separately opens `/proc/1/ns/net` with hostPID as the host
+namespace **forbidden anchor**. Both FDs must be nsfs network namespace
+objects and their inodes must differ; an unavailable host anchor fails closed.
+No CRI workload namespace is derived from `/proc`.
 
 For each selected Pod, require exactly one READY CRI sandbox with matching
 namespace, name, Pod UID and PodIP. Its verbose status must supply a PID and
@@ -25,10 +29,11 @@ sandbox-ID-to-netns-path mapping; do not independently claim the PID's netns
 inode attests that path. A pidfd pins the live PID and its cgroup must contain
 the selected Pod UID. Open only a direct child of `/var/run/netns` using
 `openat2` confinement (`RESOLVE_BENEATH`, no symlinks or magic links); validate
-nsfs and `CLONE_NEWNET`, reject the host anchor and verify the target has the
-expected PodIP as its sole `eth0` IPv4. Recheck sandbox ID, state, PID, path,
-UID, PodIP and pinned FD inode before mutation. Enter and restore on a locked
-OS thread; a failed host-netns restoration is fatal, never hidden.
+nsfs and `CLONE_NEWNET`, reject both agent-own and host anchors and verify the
+target has the expected PodIP as its sole `eth0` IPv4. Recheck sandbox ID,
+state, PID, path, UID, PodIP and pinned FD inode before mutation. Enter and
+restore to the **agent Pod's own** namespace on a locked OS thread; a failed
+restoration is fatal, never hidden.
 
 There is **no** fallback that constructs `/proc/<pid>/ns/net` from the PID or
 accepts arbitrary paths. An unsupported/malformed CRI payload fails closed.

@@ -16,18 +16,18 @@ import (
 )
 
 type OwnPod struct{ Namespace, Name, UID, Node string }
-type hostAnchor struct {
-	fd   *os.File
-	stat unix.Stat_t
+type namespaceAnchors struct {
+	ownFD, hostFD     *os.File
+	ownStat, hostStat unix.Stat_t
 }
 
-var verifiedHost atomic.Pointer[hostAnchor]
+var verifiedNamespaces atomic.Pointer[namespaceAnchors]
 
 // validateOwnPod binds the claimed downward-API identity to the uncached
 // Kubernetes Pod object and verifies the environment variable sources.
 func validateOwnPod(p *corev1.Pod, id OwnPod) error {
-	if id.Namespace == "" || id.Name == "" || id.UID == "" || id.Node == "" || p == nil || p.Namespace != id.Namespace || p.Name != id.Name || string(p.UID) != id.UID || p.Spec.NodeName != id.Node || !p.Spec.HostNetwork || !p.Spec.HostPID || p.Spec.ServiceAccountName != "ratatoskr-agent" || p.DeletionTimestamp != nil {
-		return errors.New("agent Pod identity, host namespaces, service account or lifecycle mismatch")
+	if id.Namespace == "" || id.Name == "" || id.UID == "" || id.Node == "" || p == nil || p.Namespace != id.Namespace || p.Name != id.Name || string(p.UID) != id.UID || p.Spec.NodeName != id.Node || p.Spec.HostNetwork || !p.Spec.HostPID || p.Spec.ServiceAccountName != "ratatoskr-agent" || p.DeletionTimestamp != nil {
+		return errors.New("agent Pod identity, separate network namespace, hostPID, service account or lifecycle mismatch")
 	}
 	for _, container := range p.Spec.Containers {
 		if container.Name != "agent" {
@@ -69,53 +69,89 @@ func (r *Reconciler) VerifyOwnPod(ctx context.Context) error {
 	return validateOwnPod(&pod, r.Own)
 }
 
-// Bootstrap must run once after authenticating the agent Pod and before CRI
-// access. A pinned FD keeps the trusted host netns alive for this process.
+// Bootstrap authenticates the agent Pod before pinning both its own separate
+// network namespace and the host-PID-1 network namespace. With hostPID: true,
+// /proc/1/ns/net is the node's namespace; it is ONLY a forbidden anchor, never
+// a fallback for CRI workload paths. Failure to open or validate either FD
+// fails closed without changing the DaemonSet's seccomp or capabilities.
 func (r *Reconciler) Bootstrap(ctx context.Context) error {
-	if verifiedHost.Load() != nil {
-		return errors.New("host namespace already anchored")
+	if verifiedNamespaces.Load() != nil {
+		return errors.New("network namespaces already anchored")
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := r.VerifyOwnPod(ctx); err != nil {
 		return err
 	}
-	fd, err := os.Open("/proc/thread-self/ns/net")
+	own, err := os.Open("/proc/thread-self/ns/net")
 	if err != nil {
 		return fmt.Errorf("pin verified agent thread netns: %w", err)
 	}
-	var stat unix.Stat_t
-	if err = unix.Fstat(int(fd.Fd()), &stat); err != nil {
-		fd.Close()
+	defer func() {
+		if own != nil {
+			_ = own.Close()
+		}
+	}()
+	host, err := os.Open("/proc/1/ns/net")
+	if err != nil {
+		return fmt.Errorf("pin host PID1 network namespace: %w", err)
+	}
+	defer func() {
+		if host != nil {
+			_ = host.Close()
+		}
+	}()
+	anchor, err := validateAnchors(own, host)
+	if err != nil {
 		return err
 	}
-	if stat.Ino == 0 {
-		fd.Close()
-		return errors.New("invalid verified host namespace")
+	if !verifiedNamespaces.CompareAndSwap(nil, anchor) {
+		return errors.New("network namespaces already anchored")
 	}
-	anchor := &hostAnchor{fd: fd, stat: stat}
-	if !verifiedHost.CompareAndSwap(nil, anchor) {
-		fd.Close()
-		return errors.New("host namespace already anchored")
-	}
+	own, host = nil, nil // Anchors stay pinned for the process lifetime.
 	return nil
 }
-func hostStat() (unix.Stat_t, error) {
-	a := verifiedHost.Load()
-	if a == nil || a.fd == nil {
-		return unix.Stat_t{}, errors.New("verified host namespace bootstrap required")
+
+func validateAnchors(own, host *os.File) (*namespaceAnchors, error) {
+	if err := validateNetworkNamespaceFD(own); err != nil {
+		return nil, fmt.Errorf("verify own namespace: %w", err)
 	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(a.fd.Fd()), &stat); err != nil {
-		return stat, err
+	if err := validateNetworkNamespaceFD(host); err != nil {
+		return nil, fmt.Errorf("verify host namespace: %w", err)
 	}
-	if !sameNetns(stat, a.stat) {
-		return stat, errors.New("verified host namespace anchor changed")
+	anchor := &namespaceAnchors{ownFD: own, hostFD: host}
+	if err := unix.Fstat(int(own.Fd()), &anchor.ownStat); err != nil {
+		return nil, err
 	}
-	return stat, nil
+	if err := unix.Fstat(int(host.Fd()), &anchor.hostStat); err != nil {
+		return nil, err
+	}
+	if anchor.ownStat.Ino == 0 || anchor.hostStat.Ino == 0 || sameNetns(anchor.ownStat, anchor.hostStat) {
+		return nil, errors.New("agent namespace must differ from host PID1 namespace")
+	}
+	return anchor, nil
 }
-func checkThreadHost() error {
-	host, err := hostStat()
+
+func anchorStats() (unix.Stat_t, unix.Stat_t, error) {
+	a := verifiedNamespaces.Load()
+	if a == nil || a.ownFD == nil || a.hostFD == nil {
+		return unix.Stat_t{}, unix.Stat_t{}, errors.New("verified network namespace bootstrap required")
+	}
+	var own, host unix.Stat_t
+	if err := unix.Fstat(int(a.ownFD.Fd()), &own); err != nil {
+		return own, host, err
+	}
+	if err := unix.Fstat(int(a.hostFD.Fd()), &host); err != nil {
+		return own, host, err
+	}
+	if !sameNetns(own, a.ownStat) || !sameNetns(host, a.hostStat) || sameNetns(own, host) {
+		return own, host, errors.New("verified agent or host network namespace anchor changed")
+	}
+	return own, host, nil
+}
+
+func checkThreadOwn() error {
+	own, _, err := anchorStats()
 	if err != nil {
 		return err
 	}
@@ -123,10 +159,10 @@ func checkThreadHost() error {
 	if err := unix.Stat("/proc/thread-self/ns/net", &current); err != nil {
 		return err
 	}
-	if !sameNetns(current, host) {
-		return errors.New("agent thread not in verified host namespace")
+	if !sameNetns(current, own) {
+		return errors.New("agent thread not in verified own network namespace")
 	}
 	return nil
 }
 
-// Keep the FD open for the process lifetime; no unverified re-bootstrap.
+// Pinned own and host FDs are intentionally retained for the process lifetime.

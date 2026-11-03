@@ -49,6 +49,7 @@ policy selection are enforced by admission. The controller and webhook serve
 |---|---|---|
 | `driver` | `agent` | `agent` runs one node-local DaemonSet; `init` programs each opted-in Pod using a NET_ADMIN init container. |
 | `datapath` | `iproute` | `iproute` or opt-in `ebpf`; eBPF needs supported kernel/seccomp/BPF capability policy. eBPF plus WireGuard is not supported. |
+| `agent.healthPort` | `19903` | Host-network health/readiness port; must be unused on each node. |
 | `agent.criSocket` | `/run/containerd/containerd.sock` | Node CRI Unix socket; on k3s/k3d use `/run/k3s/containerd/containerd.sock`. |
 | `clusterDomain` | `cluster.local` | Kubernetes DNS domain for webhook certificates and gateway DNS. |
 | `dns.upstreamIP` | `1.1.1.1` | Gateway-mode upstream resolver, accessible over the VPN. |
@@ -68,8 +69,8 @@ judge endpoint readiness.
 
 ## Security and operations
 
-The agent runs as root with hostPID/hostNetwork, NET_ADMIN/SYS_ADMIN (plus
-BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
+The agent runs as root with hostPID and a separate Pod network namespace
+(`hostNetwork: false`), NET_ADMIN/SYS_ADMIN (plus BPF/PERFMON for eBPF), read-only node CRI socket and `/var/run/netns` mount,
 and a cluster-wide token-request permission for short-lived bound registration.
 **Treat the agent as node-root-equivalent** and restrict its placement and
 ability to modify its ServiceAccount. In agent mode only, it may GET
