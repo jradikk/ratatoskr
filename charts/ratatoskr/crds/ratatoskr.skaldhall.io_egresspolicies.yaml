@@ -75,8 +75,11 @@ spec:
                 items:
                   properties:
                     cidrs:
-                      description: Empty CIDRs matches any destination (subject to
-                        ports and exclusions).
+                      description: |-
+                        Empty CIDRs matches any destination only when Domains is also empty.
+                        A domain-only rule remains unresolved/closed until trusted DNS answers
+                        are learned by the agent; CIDRs and domains are OR alternatives and the
+                        same ports apply to both alternatives.
                       items:
                         maxLength: 64
                         type: string
@@ -85,6 +88,37 @@ spec:
                       x-kubernetes-validations:
                       - message: each destination must be a valid CIDR
                         rule: self.all(c, isCIDR(c))
+                    domains:
+                      description: |-
+                        Domains may be used only by agent driver with gateway DNS mode. DNS names
+                        are canonical lowercase ASCII with no trailing dot; a leading '*.'
+                        matches one or more subdomain labels but never the suffix apex.
+                      items:
+                        properties:
+                          matchName:
+                            description: Exact DNS name; canonical lowercase ASCII
+                              without a trailing dot.
+                            maxLength: 253
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                          matchPattern:
+                            description: Only '*.example.com' suffix wildcards, with
+                              at least two suffix labels.
+                            maxLength: 253
+                            pattern: ^\*\.[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of matchName or matchPattern is required
+                          rule: has(self.matchName) != has(self.matchPattern)
+                        - message: DNS labels must be at most 63 characters
+                          rule: '!has(self.matchName) || self.matchName.split(''.'').all(label,
+                            size(label) <= 63)'
+                        - message: wildcard suffix labels must be at most 63 characters
+                          rule: '!has(self.matchPattern) || self.matchPattern.substring(2).split(''.'').all(label,
+                            size(label) <= 63)'
+                      maxItems: 64
+                      type: array
                     ports:
                       items:
                         properties:

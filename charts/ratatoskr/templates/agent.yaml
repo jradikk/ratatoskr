@@ -33,7 +33,7 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [ratatoskr.skaldhall.io]
     resources: [egresspolicies]
-    verbs: [list]
+    verbs: [get, list, watch]
   # The agent issues short-lived audience/Pod-bound tokens to authenticate
   # encrypted peer registration. Create is cluster-wide across namespaces.
   - apiGroups: [""]
@@ -83,6 +83,10 @@ spec:
           image: {{ include "ratatoskr.image" (list . "agent") | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            - name: METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: METRICS_BIND_ADDRESS
+              value: {{ ternary ":9903" "0" .Values.metrics.enabled | quote }}
             - name: HEALTH_PORT
               value: {{ .Values.agent.healthPort | quote }}
             - name: NODE_NAME
@@ -110,6 +114,10 @@ spec:
           ports:
             - name: health
               containerPort: {{ .Values.agent.healthPort }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9903
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -154,4 +162,22 @@ spec:
           hostPath:
             path: /var/run/netns
             type: DirectoryOrCreate
+{{- if .Values.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratatoskr-agent-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent-metrics
+spec:
+  selector:
+    {{- include "ratatoskr.selectorLabels" (list . "agent") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9903
+      targetPort: metrics
+{{- end }}
 {{- end }}

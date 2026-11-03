@@ -67,6 +67,46 @@ a controlled rollout to reprogram their routes. The controller surfaces a
 place. Use EgressGateway status and conditions, not Service VIP health, to
 judge endpoint readiness.
 
+## Independent upstream profiles
+
+A Gateway can name up to eight independently credentialed OpenVPN exits instead
+of using legacy `upstream.secretRef`. Each profile has one controller-owned
+Deployment and one upstream Pod; each Pod mounts **only its own** Secret, while
+the Gateway shares an owner-controlled client-routing ConfigMap. Profiles must
+have distinct lowercase DNS-label names, valid Secret names in the Gateway
+namespace, and `spec.replicas: 1` (one Pod per profile). Do not set both
+`upstream.profiles` and `upstream.secretRef`. A profile removal retires only the
+Deployment owned by that Gateway UID; the selected endpoint may move, which
+can break established connections when exit identities differ.
+
+```yaml
+apiVersion: ratatoskr.skaldhall.io/v1alpha1
+kind: EgressGateway
+metadata:
+  name: exits
+  namespace: ratatoskr-system
+spec:
+  replicas: 1
+  upstream:
+    type: openvpn
+    profiles:
+      - name: berlin
+        secretRef:
+          name: vpn-berlin
+      - name: oslo
+        secretRef:
+          name: vpn-oslo
+  allowedNamespaces:
+    namespaceSelector:
+      matchLabels:
+        egress: enabled
+```
+
+Do not put provider credentials in this object. Gateway status lists the
+independently healthy PodIP endpoints and their applied-config hashes; it does
+not disclose Secret contents. This is per-Pod endpoint affinity, not a promise
+of per-flow load balancing or identical external exit IPs.
+
 ## Security and operations
 
 The agent runs as root with hostPID and a separate Pod network namespace
@@ -100,8 +140,9 @@ rather than removing it while admission has `failurePolicy: Fail`.
 With controller leader election enabled, a namespaced Lease is used; webhook
 replicas use the same TLS Secret. Only one Helm release per cluster is
 supported because admission configurations and ClusterRoles have fixed names.
-The controller does not expose a metrics Service; gateway metrics remain
-loopback-only within gateway Pods.
+Metrics Services and optional Prometheus Operator monitors are described in
+[the monitoring guide](../../docs/monitoring.md). Metrics HTTP is unauthenticated;
+restrict scrape access before collection.
 
 **Ingress policies:** With `networkPolicy.enabled=true`, the chart selects
 controller, webhook, and (only in agent mode) agent Pods by component labels and
@@ -127,3 +168,17 @@ election enabled. For offline checks run
 That checker lints defaults/dev overrides, parses templates and checks RBAC,
 security contexts and chart archive contents. Runtime packet-level
 compatibility is a separate validation; chart lint is not traffic proof.
+
+## Metrics and dashboard
+
+Metrics default to enabled on controller :8080, webhook :9904, agent :9903
+and dynamically managed gateway Pods :9902. Ingress is restricted using
+`metrics.ingress` namespace and Pod selectors; tune them for your collector.
+Set `metrics.enabled=false` to disable listeners and operator metrics Services.
+Prometheus Operator CRDs are optional: `metrics.serviceMonitor.enabled`
+selects operator Services; `metrics.podMonitor.enabled` discovers Gateway Pods
+in opted-in namespaces. Helm checks the enabled monitor CRDs. Import the
+packaged Grafana JSON from `dashboards/ratatoskr-overview.json`, or set
+`metrics.dashboard.enabled=true` to install a Grafana-sidecar ConfigMap.
+See [monitoring details](../../docs/monitoring.md) for access and metric
+interpretation.

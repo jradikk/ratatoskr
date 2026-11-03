@@ -69,21 +69,35 @@ type Identity struct {
 	UID       string `json:"uid"`
 	Policy    string `json:"policy,omitempty"`
 }
+
+// DomainBinding records agent-owned DNS-derived destinations by original policy
+// rule index. Include bindings remain protected after TTL expiry; exclude
+// bindings must expire back to the VPN. No domain names or credentials persist.
+type DomainBinding struct {
+	Rule      int        `json:"rule"`
+	Address   netip.Addr `json:"address"`
+	ExpiresAt int64      `json:"expiresAt"`
+	Retained  bool       `json:"retained"`
+}
+
 type ClientConfig struct {
 	PodIP     netip.Addr `json:"podIP"`
 	GatewayID uint32     `json:"gatewayID"`
 	// An invalid/absent Endpoint means no healthy gateway: keep only the
 	// unreachable route rather than allowing a lookup to fall through to main.
-	Endpoint           netip.Addr     `json:"endpoint,omitempty"`
-	AllowCloudMetadata bool           `json:"allowCloudMetadata,omitempty"`
-	Exclusions         []netip.Prefix `json:"exclusions"`
-	MTU                int            `json:"mtu"`
-	Encryption         string         `json:"encryption,omitempty"`
-	GatewayPublicKey   string         `json:"gatewayPublicKey,omitempty"`
-	RegistrationCACert string         `json:"registrationCACert,omitempty"`
-	WireGuardPort      uint16         `json:"wireGuardPort,omitempty"`
-	Identity           Identity       `json:"identity"`
-	Policy             Policy         `json:"policy"`
+	Endpoint               netip.Addr      `json:"endpoint,omitempty"`
+	AllowCloudMetadata     bool            `json:"allowCloudMetadata,omitempty"`
+	Exclusions             []netip.Prefix  `json:"exclusions"`
+	MTU                    int             `json:"mtu"`
+	Encryption             string          `json:"encryption,omitempty"`
+	GatewayPublicKey       string          `json:"gatewayPublicKey,omitempty"`
+	RegistrationCACert     string          `json:"registrationCACert,omitempty"`
+	WireGuardPort          uint16          `json:"wireGuardPort,omitempty"`
+	Identity               Identity        `json:"identity"`
+	Policy                 Policy          `json:"policy"`
+	DomainState            []DomainBinding `json:"domainState,omitempty"`
+	DomainPolicyUID        string          `json:"domainPolicyUID,omitempty"`
+	DomainPolicyGeneration int64           `json:"domainPolicyGeneration,omitempty"`
 }
 type GatewayConfig struct {
 	PodIP           netip.Addr   `json:"podIP"`
@@ -142,6 +156,35 @@ func (c ClientConfig) Validate() error {
 		if !p.IsValid() || !p.Addr().Is4() {
 			return fmt.Errorf("policy exclusions must be IPv4 CIDRs")
 		}
+	}
+	if c.DomainPolicyGeneration < 0 || (c.DomainPolicyUID == "") != (c.DomainPolicyGeneration == 0) || len(c.DomainPolicyUID) > 128 {
+		return fmt.Errorf("DNS state requires a bounded policy UID and positive generation")
+	}
+	if len(c.DomainState) > 0 && c.DomainPolicyUID == "" {
+		return fmt.Errorf("DNS bindings require a policy identity")
+	}
+	if len(c.DomainState) > 4096 {
+		return fmt.Errorf("domain bindings exceed 4096 entries")
+	}
+	seenBindings := make(map[struct {
+		rule    int
+		address netip.Addr
+	}]bool)
+	for _, binding := range c.DomainState {
+		if binding.Rule < 0 || binding.Rule >= 64 || !binding.Address.Is4() || binding.Address.IsUnspecified() || binding.Address.IsMulticast() || binding.Address.IsLoopback() || binding.Address.IsLinkLocalUnicast() || binding.ExpiresAt <= 0 {
+			return fmt.Errorf("invalid DNS-derived domain binding")
+		}
+		if c.Policy.Mode != "include" && c.Policy.Mode != "exclude" || binding.Retained != (c.Policy.Mode == "include") {
+			return fmt.Errorf("domain binding retention must match policy mode")
+		}
+		key := struct {
+			rule    int
+			address netip.Addr
+		}{binding.Rule, binding.Address}
+		if seenBindings[key] {
+			return fmt.Errorf("duplicate DNS-derived domain binding")
+		}
+		seenBindings[key] = true
 	}
 	matches := 0
 	for _, r := range c.Policy.Rules {

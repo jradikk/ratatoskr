@@ -22,6 +22,19 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- if not (has .Values.datapath (list "iproute" "ebpf")) -}}
 {{- fail (printf "datapath must be iproute or ebpf, got %q" .Values.datapath) -}}
 {{- end -}}
+{{- if and (not .Values.metrics.enabled) (or .Values.metrics.serviceMonitor.enabled .Values.metrics.podMonitor.enabled) -}}
+{{- fail "metrics monitors require metrics.enabled=true" -}}
+{{- end -}}
+{{- if and .Values.metrics.dashboard.enabled (or (contains "/" .Values.metrics.dashboard.sidecarLabel) (contains " " .Values.metrics.dashboard.sidecarLabel)) -}}
+{{- fail "metrics.dashboard.sidecarLabel must be a simple Kubernetes label name" -}}
+{{- end -}}
+{{- if .Values.metrics.enabled -}}
+{{- $ns := .Values.metrics.ingress.namespaceSelector -}}
+{{- $pod := .Values.metrics.ingress.podSelector -}}
+{{- if or (not $ns) (not $pod) (and (not $ns.matchLabels) (not $ns.matchExpressions)) (and (not $pod.matchLabels) (not $pod.matchExpressions)) -}}
+{{- fail "metrics.ingress requires nonempty namespaceSelector and podSelector when metrics are enabled" -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.operatorNamespace (ne .Values.operatorNamespace .Release.Namespace) -}}
 {{- fail "operatorNamespace must match the Helm release namespace (webhook Service and TLS bootstrap use .Release.Namespace)" -}}
 {{- end -}}

@@ -281,8 +281,8 @@ spec:
 
 `mode: include` tunnels matching traffic; `mode: exclude` tunnels traffic except
 matches. Cluster and explicit exclusions take precedence in either mode.
-Avoid overlapping policies selecting the same Pod. Rules use IP ranges and
-TCP/UDP ports, not hostnames. See the [API and routing design](docs/design.md#3-api)
+Avoid overlapping policies selecting the same Pod. Rules use IP ranges and TCP/UDP ports. Agent-mode policies can also select
+DNS names through the gateway DNS resolver; see the [domain policy guide](docs/domain-policies.md). See the [API and routing design](docs/design.md#3-api)
 for full semantics.
 
 ## Configuration at a glance
@@ -302,6 +302,18 @@ implementations are available. Only `type: openvpn` is currently deployable;
 custom upstream deployment is reserved for a future integration. The `ebpf` datapath does **not** support the optional WireGuard
 in-cluster layer; use `iproute` for that combination. Selected egress currently
 targets IPv4; IPv6 VPN routing is not supported.
+
+## Gateway pools and monitoring
+
+For VPN providers that limit connections per configuration, use
+[multiple independent profiles](docs/gateway-profiles.md) under one gateway.
+Each profile gets its own Pod and Secret; workloads are balanced across healthy
+endpoints without changing their gateway label.
+
+Metrics are enabled by default. The chart supports ServiceMonitor and PodMonitor
+resources and includes an importable Grafana dashboard. Follow the
+[monitoring guide](docs/monitoring.md) to configure Prometheus discovery, permit
+scrapes, and import `dashboards/ratatoskr-overview.json`.
 
 ## Operations
 

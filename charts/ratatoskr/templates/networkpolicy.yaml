@@ -17,6 +17,16 @@ spec:
     - ports:
         - protocol: TCP
           port: 8081
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -36,6 +46,16 @@ spec:
           port: 9443
         - protocol: TCP
           port: 8081
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 9904
+    {{- end }}
 {{- if eq .Values.driver "agent" }}
 ---
 # The node agent has an ordinary Pod network namespace; its only inbound
@@ -56,5 +76,15 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.agent.healthPort }}
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.metrics.ingress.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.metrics.ingress.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 9903
+    {{- end }}
 {{- end }}
 {{- end }}

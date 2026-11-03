@@ -3,12 +3,14 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"strings"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +20,50 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// gatewayMetricsIngress parses only typed Kubernetes LabelSelectors. They are
+// operator-configured chart values, never arbitrary kubectl selector strings.
+func (r *GatewayReconciler) gatewayMetricsIngress() (*networkingv1.NetworkPolicyPeer, bool, error) {
+	enabledValue := r.Options.GatewayMetricsEnabled
+	if enabledValue == "" { // Direct controller test callers and pre-metrics releases.
+		enabledValue = "false"
+	}
+	enabled, err := observability.MetricsEnabled(enabledValue)
+	if err != nil {
+		return nil, false, err
+	}
+	if !enabled {
+		return nil, false, nil
+	}
+	decode := func(raw string) (*metav1.LabelSelector, error) {
+		// An empty or {} selector admits every Pod in every namespace. Never
+		// turn a missing controller env value into unauthenticated metrics
+		// ingress, even if a chart normally supplies both selectors.
+		if raw == "" {
+			return nil, fmt.Errorf("configured metrics ingress selectors must be nonempty")
+		}
+		var selector metav1.LabelSelector
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&selector); err != nil || dec.Decode(new(any)) != io.EOF ||
+			len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+			return nil, fmt.Errorf("invalid or empty configured metrics ingress selector")
+		}
+		if _, err := metav1.LabelSelectorAsSelector(&selector); err != nil {
+			return nil, fmt.Errorf("invalid configured metrics ingress selector")
+		}
+		return &selector, nil
+	}
+	ns, err := decode(r.Options.GatewayMetricsNamespaceSelector)
+	if err != nil {
+		return nil, false, err
+	}
+	pod, err := decode(r.Options.GatewayMetricsPodSelector)
+	if err != nil {
+		return nil, false, err
+	}
+	return &networkingv1.NetworkPolicyPeer{NamespaceSelector: ns, PodSelector: pod}, true, nil
+}
 
 func ptrInt32(value int32) *int32                     { return &value }
 func ptrPort(value int32) *intstr.IntOrString         { v := intstr.FromInt32(value); return &v }
@@ -64,8 +110,12 @@ func upstreamProbeArgs(endpoint string) ([]string, error) {
 }
 
 func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clusterDNS ...string) ([]client.Object, error) {
-	if gw.Spec.Upstream.SecretRef.Name == "" {
-		return nil, fmt.Errorf("upstream secretRef.name required")
+	if _, err := gatewayProfileNames(gw); err != nil {
+		return nil, err
+	}
+	metricsPeer, metricsEnabled, err := r.gatewayMetricsIngress()
+	if err != nil {
+		return nil, err
 	}
 	probeArgs, err := upstreamProbeArgs(r.Options.GatewayUpstreamProbeURL)
 	if err != nil {
@@ -134,6 +184,15 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 			{Name: "gateway", Image: r.Options.GatewayImage, ImagePullPolicy: pull, Command: []string{"/ratatoskr", "-config", "/config/gateway.json"}, Env: []corev1.EnvVar{{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}}, {Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}}, {Name: "DATAPATH", Value: backendMode}}, Ports: []corev1.ContainerPort{{Name: "geneve", ContainerPort: datapath.GenevePort, Protocol: corev1.ProtocolUDP}, {Name: "health", ContainerPort: 9900}}, VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config", ReadOnly: true}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, Privileged: &gatewayPrivileged}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(9900)}}, PeriodSeconds: 5}},
 			{Name: "upstream", Image: r.Options.OpenVPNImage, ImagePullPolicy: pull, VolumeMounts: []corev1.VolumeMount{{Name: "upstream", MountPath: "/etc/ratatoskr/upstream", ReadOnly: true}, {Name: "run", MountPath: "/run/ratatoskr"}, {Name: "dev-net", MountPath: "/dev/net"}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "MKNOD"}, Drop: []corev1.Capability{"ALL"}}}},
 		}}
+	if metricsEnabled {
+		pod.Containers[0].Env = append(pod.Containers[0].Env,
+			corev1.EnvVar{Name: "METRICS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "METRICS_BIND_ADDRESS", Value: "0.0.0.0:9902"})
+		pod.Containers[0].Ports = append(pod.Containers[0].Ports,
+			corev1.ContainerPort{Name: "metrics", ContainerPort: 9902, Protocol: corev1.ProtocolTCP})
+	} else if r.Options.GatewayMetricsEnabled != "" {
+		pod.Containers[0].Env = append(pod.Containers[0].Env, corev1.EnvVar{Name: "METRICS_ENABLED", Value: "false"})
+	}
 	// The upstream plugin retains its own default probe unless the operator
 	// explicitly selects a private endpoint (never configurable by a workload).
 	pod.Containers[1].Args = probeArgs
@@ -203,8 +262,20 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		}
 		pod.Containers[0].Ports = append(pod.Containers[0].Ports, corev1.ContainerPort{Name: "dns-udp", ContainerPort: 1053, Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "dns-tcp", ContainerPort: 1053, Protocol: corev1.ProtocolTCP})
 	}
-	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
-	objects := []client.Object{cm, svc, dep}
+	objects := []client.Object{cm, svc}
+	if len(gw.Spec.Upstream.Profiles) == 0 {
+		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, Labels: selector, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
+		objects = append(objects, dep)
+	} else {
+		for _, profile := range gw.Spec.Upstream.Profiles {
+			profilePod := *pod.DeepCopy()
+			profilePod.Volumes[1].Secret.SecretName = profile.SecretRef.Name
+			identity := map[string]string{IdentityLabel: gw.Name, ownerUIDLabel: string(gw.UID), profileLabel: profile.Name}
+			one := int32(1)
+			dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: profileDeploymentName(gw.Name, profile.Name), Namespace: gw.Namespace, Labels: identity, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &one, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: identity}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: identity}, Spec: profilePod}}}
+			objects = append(objects, dep)
+		}
+	}
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, OwnerReferences: owner}, Spec: networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: selector}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}}}
 	// Kubelet readiness and controller /info use PodIP from host/network locations
 	// not expressible as portable namespace/pod selectors; keep only this TCP port open.
@@ -230,6 +301,11 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		}
 	}
 
+	if metricsEnabled {
+		metrics := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-metrics", Namespace: gw.Namespace, Labels: selector, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: selector, Ports: []corev1.ServicePort{{Name: "metrics", Port: 9902, TargetPort: intstr.FromInt32(9902), Protocol: corev1.ProtocolTCP}}}}
+		objects = append(objects, metrics)
+		np.Spec.Ingress = append(np.Spec.Ingress, networkingv1.NetworkPolicyIngressRule{From: []networkingv1.NetworkPolicyPeer{*metricsPeer}, Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocol(corev1.ProtocolTCP), Port: ptrPort(9902)}}})
+	}
 	if gw.Spec.DNS.Mode == "gateway" {
 		dns := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-dns", Namespace: gw.Namespace, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, PublishNotReadyAddresses: true, Selector: selector, Ports: []corev1.ServicePort{{Name: "dns-udp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolUDP}, {Name: "dns-tcp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolTCP}}}}
 		objects = append(objects, dns)

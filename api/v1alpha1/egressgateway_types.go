@@ -55,12 +55,26 @@ type UpstreamSpec struct {
 	// All values are part of the API, even when the corresponding plugin is not yet shipped.
 	// +kubebuilder:validation:Enum=openvpn;wireguard;amneziawg;strongswan;custom
 	Type string `json:"type"`
-	// Name of a Secret containing the upstream configuration. No profile contents belong in this API.
-	SecretRef SecretReference `json:"secretRef"`
+	// Legacy single-profile Secret in this Gateway namespace. Omit when profiles are set.
+	SecretRef SecretReference `json:"secretRef,omitempty"`
+	// Profiles create one independent gateway Pod/Deployment per Secret. Names
+	// are unique DNS labels; profiles and legacy secretRef are mutually exclusive.
+	// +kubebuilder:validation:MaxItems=8
+	Profiles []UpstreamProfile `json:"profiles,omitempty"`
 	// Image is mandatory for custom, optional override for built-in types.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=1024
 	Image string `json:"image,omitempty"`
+}
+
+// UpstreamProfile is an independent OpenVPN credential/exit profile. Secret
+// contents remain in the Gateway namespace and never appear in API status.
+type UpstreamProfile struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name      string          `json:"name"`
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 type SecretReference struct {
@@ -144,7 +158,7 @@ type GatewayEndpoint struct {
 	// ConfigMap bytes consumed by this Pod after successful datapath application.
 	// It proves the applied config without publishing the client IP list in status.
 	// +kubebuilder:validation:MaxLength=64
-	// +kubebuilder:validation:Pattern=^[a-f0-9]{64}$
+	// +kubebuilder:validation:Pattern="^[a-f0-9]{64}$"
 	AppliedClientConfigHash string `json:"appliedClientConfigHash,omitempty"`
 	UpstreamExitIP          string `json:"upstreamExitIP,omitempty"`
 	UpstreamHealthy         bool   `json:"upstreamHealthy"`

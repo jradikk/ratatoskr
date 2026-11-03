@@ -212,9 +212,39 @@ spec:
                     maxLength: 1024
                     minLength: 1
                     type: string
+                  profiles:
+                    description: |-
+                      Profiles create one independent gateway Pod/Deployment per Secret. Names
+                      are unique DNS labels; profiles and legacy secretRef are mutually exclusive.
+                    items:
+                      description: |-
+                        UpstreamProfile is an independent OpenVPN credential/exit profile. Secret
+                        contents remain in the Gateway namespace and never appear in API status.
+                      properties:
+                        name:
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        secretRef:
+                          properties:
+                            name:
+                              description: Secret in the gateway's namespace.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - secretRef
+                      type: object
+                    maxItems: 8
+                    type: array
                   secretRef:
-                    description: Name of a Secret containing the upstream configuration.
-                      No profile contents belong in this API.
+                    description: Legacy single-profile Secret in this Gateway namespace.
+                      Omit when profiles are set.
                     properties:
                       name:
                         description: Secret in the gateway's namespace.
@@ -235,7 +265,6 @@ spec:
                     - custom
                     type: string
                 required:
-                - secretRef
                 - type
                 type: object
                 x-kubernetes-validations:

@@ -27,7 +27,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["ratatoskr.skaldhall.io"]
     resources: ["egresspolicies"]
-    verbs: ["list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
     verbs: ["create"]

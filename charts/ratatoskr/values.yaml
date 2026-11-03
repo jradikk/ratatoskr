@@ -50,3 +50,36 @@ webhook:
 # API-server/kubelet source CIDRs are intentionally not guessed.
 networkPolicy:
   enabled: true
+
+# Metrics are unauthenticated HTTP; configure NetworkPolicy scrape selectors
+# for your Prometheus namespace/pods before enabling monitors.
+metrics:
+  enabled: true
+  # Only matching Namespace AND collector Pod labels may scrape metrics;
+  # adjust both selectors to the installed Prometheus deployment.
+  ingress:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: monitoring
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: prometheus
+  # Requires monitoring.coreos.com/v1 ServiceMonitor CRD when enabled.
+  serviceMonitor:
+    enabled: false
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+  # Requires PodMonitor CRD; gateway namespaces must opt in with a label.
+  podMonitor:
+    enabled: false
+    labels: {}
+    namespaceSelector:
+      matchLabels:
+        ratatoskr.skaldhall.io/metrics: enabled
+    interval: 30s
+    scrapeTimeout: 10s
+  dashboard:
+    enabled: false
+    sidecarLabel: grafana_dashboard
+    sidecarValue: "1"

@@ -49,6 +49,18 @@ class PublicDocumentationTests(unittest.TestCase):
         for name in ('build-experimental-rc.py', 'build-production-artifacts.py', 'prepare-release.py'):
             self.assertFalse((ROOT / 'hack' / name).exists())
 
+    def test_dashboard_connection_protocols_match_collector(self):
+        import json
+        dashboard = json.loads((ROOT / 'dashboards/ratatoskr-overview.json').read_text())
+        expressions = [target.get('expr', '') for panel in dashboard['panels']
+                       for target in panel.get('targets', [])]
+        connections = [expr for expr in expressions if 'ratatoskr_gateway_forwarded_connections' in expr]
+        self.assertTrue(any('protocol="TCP"' in expr for expr in connections))
+        self.assertTrue(any('protocol="UDP"' in expr for expr in connections))
+        self.assertFalse(any('protocol="tcp"' in expr or 'protocol="udp"' in expr for expr in connections))
+        self.assertEqual((ROOT / 'dashboards/ratatoskr-overview.json').read_bytes(),
+                         (ROOT / 'charts/ratatoskr/dashboards/ratatoskr-overview.json').read_bytes())
+
     def test_container_source_labels_match_repository(self):
         for name in ('Dockerfile', 'plugins/upstream/openvpn/Dockerfile'):
             self.assertIn('org.opencontainers.image.source="https://github.com/jradikk/ratatoskr"',

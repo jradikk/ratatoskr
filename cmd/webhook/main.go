@@ -15,15 +15,21 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	server "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/observability"
 	"github.com/skaldhall/ratatoskr/pkg/version"
 	ratatoskr "github.com/skaldhall/ratatoskr/pkg/webhook"
 )
 
 func run(ctx context.Context, bootstrap bool, dir string) error {
+	metricsAddress, err := observability.ManagerMetricsBindAddress(os.Getenv("METRICS_ENABLED"), os.Getenv("METRICS_BIND_ADDRESS"), "0.0.0.0:9904")
+	if err != nil {
+		return err
+	}
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("load Kubernetes config: %w", err)
@@ -45,7 +51,7 @@ func run(ctx context.Context, bootstrap bool, dir string) error {
 	if err = v1alpha1.AddToScheme(scheme); err != nil {
 		return err
 	}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", WebhookServer: server.NewServer(server.Options{Port: 9443, CertDir: dir, CertName: "tls.crt", KeyName: "tls.key"}), Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Namespace{}, &corev1.Service{}, &corev1.Pod{}}}}})
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: scheme, HealthProbeBindAddress: ":8081", Metrics: metricsserver.Options{BindAddress: metricsAddress}, WebhookServer: server.NewServer(server.Options{Port: 9443, CertDir: dir, CertName: "tls.crt", KeyName: "tls.key"}), Client: crclient.Options{Cache: &crclient.CacheOptions{DisableFor: []crclient.Object{&corev1.Namespace{}, &corev1.Service{}, &corev1.Pod{}}}}})
 	if err != nil {
 		return fmt.Errorf("configure webhook manager: %w", err)
 	}
