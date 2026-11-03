@@ -100,8 +100,9 @@ rather than removing it while admission has `failurePolicy: Fail`.
 With controller leader election enabled, a namespaced Lease is used; webhook
 replicas use the same TLS Secret. Only one Helm release per cluster is
 supported because admission configurations and ClusterRoles have fixed names.
-The controller does not expose a metrics Service; gateway metrics remain
-loopback-only within gateway Pods.
+Metrics Services and optional Prometheus Operator monitors are described in
+[the monitoring guide](../../docs/monitoring.md). Metrics HTTP is unauthenticated;
+restrict scrape access before collection.
 
 **Ingress policies:** With `networkPolicy.enabled=true`, the chart selects
 controller, webhook, and (only in agent mode) agent Pods by component labels and
@@ -127,3 +128,17 @@ election enabled. For offline checks run
 That checker lints defaults/dev overrides, parses templates and checks RBAC,
 security contexts and chart archive contents. Runtime packet-level
 compatibility is a separate validation; chart lint is not traffic proof.
+
+## Metrics and dashboard
+
+Metrics default to enabled on controller :8080, webhook :9904, agent :9903
+and dynamically managed gateway Pods :9902. Ingress is restricted using
+`metrics.ingress` namespace and Pod selectors; tune them for your collector.
+Set `metrics.enabled=false` to disable listeners and operator metrics Services.
+Prometheus Operator CRDs are optional: `metrics.serviceMonitor.enabled`
+selects operator Services; `metrics.podMonitor.enabled` discovers Gateway Pods
+in opted-in namespaces. Helm checks the enabled monitor CRDs. Import the
+packaged Grafana JSON from `dashboards/ratatoskr-overview.json`, or set
+`metrics.dashboard.enabled=true` to install a Grafana-sidecar ConfigMap.
+See [monitoring details](../../docs/monitoring.md) for access and metric
+interpretation.

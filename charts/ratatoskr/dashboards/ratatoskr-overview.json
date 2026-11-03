@@ -1,0 +1,348 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Metrics are scoped to individual scraped Pods; gauges may reset or be absent. No per-client labels. Gateway and profile filters require PodMonitor relabelings configured by the chart.",
+  "editable": true,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_upstream_healthy{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Upstream healthy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Shown only when bounded conntrack sampling is available and marked valid; missing series is unknown, not zero traffic.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_forwarded_connections{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\",protocol=\"tcp\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active forwarded TCP connections",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Shown only when bounded conntrack sampling is available and marked valid; missing series is unknown, not zero traffic.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_forwarded_connections{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\",protocol=\"udp\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active forwarded UDP connections",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Shown only when bounded conntrack sampling is available and marked valid; missing series is unknown, not zero traffic.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_forwarded_connections_sample_ok{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Forwarded connection sample valid",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_link_receive_bytes{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway link bytes received (resettable gauge)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_link_transmit_bytes{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway link bytes transmitted (resettable gauge)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "sum by (namespace,gateway,pod) (increase(ratatoskr_gateway_programming_errors_total{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway datapath errors / 5m",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le,namespace,gateway,pod) (rate(ratatoskr_gateway_programming_duration_seconds_bucket{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}[5m])))",
+          "refId": "A"
+        }
+      ],
+      "title": "Gateway programming p95 (seconds)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_wireguard_installed_peers{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Installed WireGuard peers (not healthy-peer count)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_wireguard_handshaken_peers{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Peers with a recorded handshake (not current health)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "sum by (namespace,pod) (increase(ratatoskr_agent_programming_errors_total{namespace=~\"$namespace\",pod=~\"$pod\"}[5m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Agent programming errors / 5m",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le,namespace,pod) (rate(ratatoskr_agent_programming_duration_seconds_bucket{namespace=~\"$namespace\",pod=~\"$pod\"}[5m])))",
+          "refId": "A"
+        }
+      ],
+      "title": "Agent programming p95 (seconds)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "ratatoskr",
+    "egress"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "namespace",
+        "options": [],
+        "query": {
+          "query": "label_values(ratatoskr_gateway_upstream_healthy, namespace)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "gateway",
+        "options": [],
+        "query": {
+          "query": "label_values(ratatoskr_gateway_upstream_healthy{namespace=~\"$namespace\"}, gateway)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "includeAll": true,
+        "multi": true,
+        "name": "pod",
+        "options": [],
+        "query": {
+          "query": "label_values(ratatoskr_gateway_upstream_healthy{namespace=~\"$namespace\",gateway=~\"$gateway\"}, pod)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Ratatoskr Egress Gateways",
+  "uid": "ratatoskr-egress",
+  "version": 1
+}

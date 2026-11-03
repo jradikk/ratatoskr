@@ -1,0 +1,86 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+{{- fail "metrics.serviceMonitor.enabled requires monitoring.coreos.com/v1 ServiceMonitor CRD; install Prometheus Operator or disable this monitor" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ratatoskr-components
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [controller-metrics, webhook-metrics, agent-metrics]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout | quote }}
+      honorLabels: false
+      relabelings:
+        - action: replace
+          sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+{{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.podMonitor.enabled }}
+{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PodMonitor") }}
+{{- fail "metrics.podMonitor.enabled requires monitoring.coreos.com/v1 PodMonitor CRD; install Prometheus Operator or disable this monitor" }}
+{{- end }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ratatoskr-gateways
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    {{- toYaml .Values.metrics.podMonitor.namespaceSelector | nindent 4 }}
+  selector:
+    matchExpressions:
+      - key: ratatoskr.skaldhall.io/gateway-name
+        operator: Exists
+      - key: ratatoskr.skaldhall.io/gateway-uid
+        operator: Exists
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.podMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.metrics.podMonitor.scrapeTimeout | quote }}
+      honorLabels: false
+      relabelings:
+        - action: replace
+          sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_ratatoskr_skaldhall_io_gateway_name]
+          targetLabel: gateway
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_ratatoskr_skaldhall_io_gateway_uid]
+          targetLabel: gateway_uid
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_label_ratatoskr_skaldhall_io_profile]
+          targetLabel: profile
+{{- end }}

@@ -42,7 +42,15 @@ spec:
           ports:
             - name: health
               containerPort: 8081
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 8080
+            {{- end }}
           env:
+            - name: METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: METRICS_BIND_ADDRESS
+              value: {{ ternary ":8080" "0" .Values.metrics.enabled | quote }}
             - name: OPERATOR_NAMESPACE
               value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
             - name: DRIVER
@@ -69,6 +77,12 @@ spec:
               value: {{ include "ratatoskr.image" (list . "upstream-openvpn") | quote }}
             - name: IMAGE_PULL_POLICY
               value: {{ .Values.image.pullPolicy | quote }}
+            - name: GATEWAY_METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: GATEWAY_METRICS_NAMESPACE_SELECTOR
+              value: {{ toJson .Values.metrics.ingress.namespaceSelector | quote }}
+            - name: GATEWAY_METRICS_POD_SELECTOR
+              value: {{ toJson .Values.metrics.ingress.podSelector | quote }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -104,6 +118,24 @@ spec:
       port: 8081
       targetPort: health
 ---
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratatoskr-controller-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller-metrics
+spec:
+  selector:
+    {{- include "ratatoskr.selectorLabels" (list . "controller") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -171,7 +203,15 @@ spec:
               containerPort: 9443
             - name: health
               containerPort: 8081
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: 9904
+            {{- end }}
           env:
+            - name: METRICS_ENABLED
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: METRICS_BIND_ADDRESS
+              value: {{ ternary ":9904" "0" .Values.metrics.enabled | quote }}
             - name: SERVICE_NAME
               value: ratatoskr-webhook
             - name: NAMESPACE
@@ -244,3 +284,21 @@ spec:
     - name: https
       port: 443
       targetPort: https
+{{- if .Values.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratatoskr-webhook-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook-metrics
+spec:
+  selector:
+    {{- include "ratatoskr.selectorLabels" (list . "webhook") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9904
+      targetPort: metrics
+{{- end }}

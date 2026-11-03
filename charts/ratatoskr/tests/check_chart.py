@@ -33,7 +33,7 @@ def rule(doc, resource, api_group=None):
     return matching[0]
 
 
-def check_agent(docs, socket, datapath, dev=False, health_port=19903):
+def check_agent(docs, socket, datapath, dev=False, health_port=19903, metrics=True):
     role = docs["ClusterRole", "ratatoskr-agent"]
     assert role["rules"] == [
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "patch"]},
@@ -61,7 +61,8 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903):
         "ghcr.io/jradikk/ratatoskr-agent:0.1.0")
     assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
     assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
-    assert container["ports"] == [{"name": "health", "containerPort": health_port}]
+    assert container["ports"] == ([{"name": "health", "containerPort": health_port}] +
+                                   ([{"name": "metrics", "containerPort": 9903}] if metrics else []))
     assert next(e["value"] for e in container["env"] if e["name"] == "HEALTH_PORT") == str(health_port)
     bpf_enabled = datapath == "ebpf"
     assert container["securityContext"] == {
@@ -71,7 +72,9 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903):
                          (["BPF", "PERFMON"] if bpf_enabled else [])},
     }
     env = {e["name"]: e for e in container["env"]}
-    assert set(env) == {"HEALTH_PORT", "NODE_NAME", "POD_NAMESPACE", "POD_NAME", "POD_UID", "CRI_SOCKET", "OPERATOR_NAMESPACE", "DATAPATH"}
+    assert {"METRICS_ENABLED", "METRICS_BIND_ADDRESS"} <= set(env)
+    assert env["METRICS_ENABLED"]["value"] == str(metrics).lower()
+    assert env["METRICS_BIND_ADDRESS"]["value"] == (":9903" if metrics else "0")
     assert env["DATAPATH"]["value"] == datapath
     for name, field in {"NODE_NAME": "spec.nodeName", "POD_NAMESPACE": "metadata.namespace",
                         "POD_NAME": "metadata.name", "POD_UID": "metadata.uid"}.items():
@@ -91,7 +94,8 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903):
 
 def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.sock",
           controller_replicas=1, webhook_replicas=1, leader=False, dev=False,
-          network_policy=True, health_port=19903):
+          network_policy=True, health_port=19903, metrics=True,
+          service_monitor=False, pod_monitor=False, dashboard=False):
     expected = {
         ("ConfigMap", "ratatoskr-config"),
         ("ServiceAccount", "ratatoskr-controller"),
@@ -114,6 +118,17 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         ("MutatingWebhookConfiguration", "ratatoskr-pods"),
         ("ValidatingWebhookConfiguration", "ratatoskr-validation"),
     }
+    if metrics:
+        expected |= {("Service", "ratatoskr-controller-metrics"),
+                     ("Service", "ratatoskr-webhook-metrics")}
+        if driver == "agent":
+            expected.add(("Service", "ratatoskr-agent-metrics"))
+    if service_monitor:
+        expected.add(("ServiceMonitor", "ratatoskr-components"))
+    if pod_monitor:
+        expected.add(("PodMonitor", "ratatoskr-gateways"))
+    if dashboard:
+        expected.add(("ConfigMap", "ratatoskr-dashboard"))
     if network_policy:
         expected |= {
             ("NetworkPolicy", "ratatoskr-controller-ingress"),
@@ -156,7 +171,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                         "ghcr.io/jradikk/ratatoskr-" + component + ":0.1.0")
             assert image == expected, image
     if driver == "agent":
-        check_agent(docs, socket, datapath, dev=dev, health_port=health_port)
+        check_agent(docs, socket, datapath, dev=dev, health_port=health_port, metrics=metrics)
     # Host mounts and capabilities are only granted to the node-local agent;
     # the controller/webhook never receive the node CRI or netns paths.
     for kind, name in (("Deployment", "ratatoskr-controller"),
@@ -210,11 +225,12 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         container = pod["spec"]["containers"][0]
         assert container["livenessProbe"]["httpGet"]["path"] == "/healthz"
         assert container["readinessProbe"]["httpGet"]["path"] == "/readyz"
-        assert container["ports"][-1]["containerPort"] == 8081
+        assert next(p["containerPort"] for p in container["ports"] if p["name"] == "health") == 8081
     ctrl_container = docs["Deployment", "ratatoskr-controller"]["spec"]["template"]["spec"]["containers"][0]
     assert ctrl_container.get("args") == (["--leader-elect"] if leader else None)
-    assert not any(p["name"] == "metrics" for p in ctrl_container["ports"])
+    assert {p["name"]:p["containerPort"] for p in ctrl_container["ports"]}.get("metrics") == (8080 if metrics else None)
     webhook = docs["Deployment", "ratatoskr-webhook"]["spec"]["template"]["spec"]
+    assert {p["name"]:p["containerPort"] for p in webhook["containers"][0]["ports"]}.get("metrics") == (9904 if metrics else None)
     assert webhook["initContainers"][0]["args"] == ["--bootstrap-tls", "--tls-dir=/tls/identity"]
     assert webhook["containers"][0]["args"] == ["--tls-dir=/tls/identity"]
     assert webhook["securityContext"]["fsGroup"] == 65532
@@ -320,12 +336,50 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
             assert policy["podSelector"]["matchLabels"] == {
                 key: pod[key] for key in ("app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component")}
             assert policy["policyTypes"] == ["Ingress"] and "egress" not in policy
-            assert len(policy["ingress"]) == 1 and "from" not in policy["ingress"][0]
+            assert len(policy["ingress"]) == (2 if metrics else 1) and "from" not in policy["ingress"][0]
             assert {p["port"] for p in policy["ingress"][0]["ports"]} == ports
-            assert all(p["protocol"] == "TCP" for p in policy["ingress"][0]["ports"])
+            assert all(p["protocol"] == "TCP" for rule in policy["ingress"] for p in rule["ports"])
+            if metrics:
+                monitor_port = {"controller": 8080, "webhook": 9904, "agent": 9903}[component]
+                scrape = policy["ingress"][1]
+                assert scrape["ports"] == [{"protocol": "TCP", "port": monitor_port}]
+                assert scrape["from"] == [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
+                                           "podSelector": {"matchLabels": {"app.kubernetes.io/name": "prometheus"}}}]
         assert not any("gateway" in name for kind, name in docs if kind == "NetworkPolicy")
     else:
         assert not any(kind == "NetworkPolicy" for kind, _ in docs)
+    if metrics:
+        for component, port in (("controller", 8080), ("webhook", 9904), ("agent", 9903)):
+            if component == "agent" and driver != "agent":
+                continue
+            svc = docs["Service", "ratatoskr-" + component + "-metrics"]["spec"]
+            pod = docs["DaemonSet" if component == "agent" else "Deployment", "ratatoskr-" + component]["spec"]["template"]["metadata"]["labels"]
+            assert all(pod.get(k) == v for k, v in svc["selector"].items())
+            assert svc["ports"] == [{"name": "metrics", "port": port, "targetPort": "metrics"}]
+    for component, pod in (("controller", docs["Deployment", "ratatoskr-controller"]["spec"]["template"]["spec"]),
+                           ("webhook", webhook)):
+        env = {e["name"]: e["value"] for e in pod["containers"][0]["env"] if "value" in e}
+        assert env["METRICS_ENABLED"] == str(metrics).lower()
+        assert env["METRICS_BIND_ADDRESS"] == ((":8080" if component == "controller" else ":9904") if metrics else "0")
+    assert ctrl_env["GATEWAY_METRICS_ENABLED"]["value"] == str(metrics).lower()
+    import json
+    assert json.loads(ctrl_env["GATEWAY_METRICS_NAMESPACE_SELECTOR"]["value"]) == {
+        "matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}
+    assert json.loads(ctrl_env["GATEWAY_METRICS_POD_SELECTOR"]["value"]) == {
+        "matchLabels": {"app.kubernetes.io/name": "prometheus"}}
+    if service_monitor:
+        mon = docs["ServiceMonitor", "ratatoskr-components"]["spec"]
+        assert mon["namespaceSelector"] == {"matchNames": [NAMESPACE]}
+        assert mon["endpoints"][0]["port"] == "metrics"
+    if pod_monitor:
+        mon = docs["PodMonitor", "ratatoskr-gateways"]["spec"]
+        assert mon["namespaceSelector"] == {"matchLabels": {"ratatoskr.skaldhall.io/metrics": "enabled"}}
+        assert mon["podMetricsEndpoints"][0]["port"] == "metrics"
+    if dashboard:
+        import json
+        dashboard_json = json.loads(docs["ConfigMap", "ratatoskr-dashboard"]["data"]["ratatoskr-overview.json"])
+        assert dashboard_json["uid"] == "ratatoskr-egress"
+        assert docs["ConfigMap", "ratatoskr-dashboard"]["metadata"]["labels"]["grafana_dashboard"] == "1"
 
 
 def check_package():
@@ -351,7 +405,7 @@ def check_package():
                         "ratatoskr/values.schema.json", "ratatoskr/README.md",
                         "ratatoskr/.helmignore"}
             expected |= {"ratatoskr/" + str(path.relative_to(CHART))
-                         for folder in ("templates", "crds")
+                         for folder in ("templates", "crds", "dashboards")
                          for path in (CHART / folder).glob("*") if path.is_file()}
             assert names == expected, names ^ expected
             assert len([name for name in names if name.startswith("ratatoskr/crds/")]) == 2
@@ -399,6 +453,45 @@ if __name__ == "__main__":
           "init", health_port=18091)
     check(render("--set", "agent.healthPort=18091", "--set", "networkPolicy.enabled=false"),
           "agent", health_port=18091, network_policy=False)
+    check(render("--set", "metrics.enabled=false"), "agent", metrics=False)
+    check(render("--set", "metrics.enabled=false", "--set", "driver=init"), "init", metrics=False)
+    check(render("--set", "metrics.dashboard.enabled=true"), "agent", dashboard=True)
+    check(render("--set", "metrics.serviceMonitor.enabled=true",
+                 "--api-versions", "monitoring.coreos.com/v1/ServiceMonitor"), "agent", service_monitor=True)
+    check(render("--set", "metrics.podMonitor.enabled=true",
+                 "--api-versions", "monitoring.coreos.com/v1/PodMonitor"), "agent", pod_monitor=True)
+    for name in ("serviceMonitor", "podMonitor"):
+        helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
+             "--set", "metrics." + name + ".enabled=true", succeeds=False)
+    helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
+         "--set", "metrics.ingress.namespaceSelector.matchLabels=null", succeeds=False)
+    check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
+                 "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
+                 "--set", "metrics.serviceMonitor.enabled=true",
+                 "--set", "metrics.podMonitor.enabled=true"),
+          "agent", service_monitor=True, pod_monitor=True)
+    for name in ("serviceMonitor", "podMonitor"):
+        helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
+             "--set", "metrics.enabled=false", "--set", "metrics." + name + ".enabled=true",
+             succeeds=False)
+    custom = render("--set", "metrics.ingress.namespaceSelector.matchLabels.team=observability",
+                    "--set", "metrics.ingress.podSelector.matchLabels.app=metrics")
+    for component in ("controller", "webhook", "agent"):
+        scrape_rule = custom["NetworkPolicy", "ratatoskr-" + component + "-ingress"]["spec"]["ingress"][1]
+        assert scrape_rule["from"][0]["namespaceSelector"]["matchLabels"]["team"] == "observability"
+        assert scrape_rule["from"][0]["podSelector"]["matchLabels"]["app"] == "metrics"
+    import hashlib
+    import json
+    dashboard_json = json.loads((CHART / "dashboards/ratatoskr-overview.json").read_text())
+    assert hashlib.sha256((CHART / "dashboards/ratatoskr-overview.json").read_bytes()).digest() == \
+           hashlib.sha256((ROOT / "dashboards/ratatoskr-overview.json").read_bytes()).digest()
+    assert dashboard_json["schemaVersion"] >= 39
+    assert dashboard_json["templating"]["list"][0]["type"] == "datasource"
+    assert {v["name"] for v in dashboard_json["templating"]["list"]} == \
+           {"datasource", "namespace", "gateway", "pod"}
+    assert all(p["datasource"]["uid"] == "${datasource}" for p in dashboard_json["panels"])
+    assert all(p["targets"][0]["expr"].startswith(("ratatoskr_", "sum", "histogram_quantile"))
+               for p in dashboard_json["panels"])
     private_probe = render("--set", "dns.upstreamProbeURL=http://198.19.0.1:8080/exit")
     probe_env = {e["name"]: e["value"] for e in private_probe["Deployment", "ratatoskr-controller"]
                  ["spec"]["template"]["spec"]["containers"][0]["env"]}

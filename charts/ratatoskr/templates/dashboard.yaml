@@ -1,0 +1,13 @@
+{{- if .Values.metrics.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratatoskr-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratatoskr.labels" . | nindent 4 }}
+    {{ .Values.metrics.dashboard.sidecarLabel | quote }}: {{ .Values.metrics.dashboard.sidecarValue | quote }}
+data:
+  ratatoskr-overview.json: |
+    {{- .Files.Get "dashboards/ratatoskr-overview.json" | nindent 4 }}
+{{- end }}
