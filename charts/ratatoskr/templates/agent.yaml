@@ -33,7 +33,7 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [ratatoskr.skaldhall.io]
     resources: [egresspolicies]
-    verbs: [list]
+    verbs: [get, list, watch]
   # The agent issues short-lived audience/Pod-bound tokens to authenticate
   # encrypted peer registration. Create is cluster-wide across namespaces.
   - apiGroups: [""]

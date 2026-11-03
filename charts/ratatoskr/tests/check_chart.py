@@ -41,7 +41,7 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903, metrics=Tr
         {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"]},
         {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egressgateways"],
          "verbs": ["get", "list", "watch"]},
-        {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egresspolicies"], "verbs": ["list"]},
+        {"apiGroups": ["ratatoskr.skaldhall.io"], "resources": ["egresspolicies"], "verbs": ["get", "list", "watch"]},
         {"apiGroups": [""], "resources": ["serviceaccounts/token"], "verbs": ["create"]},
     ]
     assert docs["ClusterRoleBinding", "ratatoskr-agent"]["subjects"] == [
