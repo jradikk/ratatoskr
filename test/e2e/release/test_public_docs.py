@@ -68,6 +68,19 @@ class PublicDocumentationTests(unittest.TestCase):
             self.assertIn('ternary "0.0.0.0:%s" "0"' % port, template)
             self.assertNotIn('ternary ":%s"' % port, template)
 
+    def test_domain_crd_label_limits_do_not_use_expensive_cel_loops(self):
+        crd = yaml.safe_load((ROOT / 'charts/ratatoskr/crds/ratatoskr.skaldhall.io_egresspolicies.yaml').read_text())
+        selector = crd['spec']['versions'][0]['schema']['openAPIV3Schema']['properties']['spec']['properties']['rules']['items']['properties']['domains']['items']
+        self.assertEqual(len(selector['x-kubernetes-validations']), 1)
+        self.assertNotIn('split(', selector['x-kubernetes-validations'][0]['rule'])
+        for field in ('matchName', 'matchPattern'):
+            pattern = selector['properties'][field]['pattern']
+            prefix = '*.' if field == 'matchPattern' else ''
+            self.assertIsNotNone(re.fullmatch(pattern, prefix + 'a' * 63 + '.example.com'))
+            self.assertIsNone(re.fullmatch(pattern, prefix + 'a' * 64 + '.example.com'))
+            self.assertIsNone(re.fullmatch(pattern, prefix + 'bad-.example.com'))
+            self.assertIsNone(re.fullmatch(pattern, prefix + 'UPPER.example.com'))
+
     def test_container_source_labels_match_repository(self):
         for name in ('Dockerfile', 'plugins/upstream/openvpn/Dockerfile'):
             self.assertIn('org.opencontainers.image.source="https://github.com/jradikk/ratatoskr"',
