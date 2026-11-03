@@ -69,21 +69,33 @@ type Identity struct {
 	UID       string `json:"uid"`
 	Policy    string `json:"policy,omitempty"`
 }
+
+// DomainBinding records agent-owned DNS-derived destinations by original policy
+// rule index. Include bindings remain protected after TTL expiry; exclude
+// bindings must expire back to the VPN. No domain names or credentials persist.
+type DomainBinding struct {
+	Rule      int        `json:"rule"`
+	Address   netip.Addr `json:"address"`
+	ExpiresAt int64      `json:"expiresAt"`
+	Retained  bool       `json:"retained"`
+}
+
 type ClientConfig struct {
 	PodIP     netip.Addr `json:"podIP"`
 	GatewayID uint32     `json:"gatewayID"`
 	// An invalid/absent Endpoint means no healthy gateway: keep only the
 	// unreachable route rather than allowing a lookup to fall through to main.
-	Endpoint           netip.Addr     `json:"endpoint,omitempty"`
-	AllowCloudMetadata bool           `json:"allowCloudMetadata,omitempty"`
-	Exclusions         []netip.Prefix `json:"exclusions"`
-	MTU                int            `json:"mtu"`
-	Encryption         string         `json:"encryption,omitempty"`
-	GatewayPublicKey   string         `json:"gatewayPublicKey,omitempty"`
-	RegistrationCACert string         `json:"registrationCACert,omitempty"`
-	WireGuardPort      uint16         `json:"wireGuardPort,omitempty"`
-	Identity           Identity       `json:"identity"`
-	Policy             Policy         `json:"policy"`
+	Endpoint           netip.Addr      `json:"endpoint,omitempty"`
+	AllowCloudMetadata bool            `json:"allowCloudMetadata,omitempty"`
+	Exclusions         []netip.Prefix  `json:"exclusions"`
+	MTU                int             `json:"mtu"`
+	Encryption         string          `json:"encryption,omitempty"`
+	GatewayPublicKey   string          `json:"gatewayPublicKey,omitempty"`
+	RegistrationCACert string          `json:"registrationCACert,omitempty"`
+	WireGuardPort      uint16          `json:"wireGuardPort,omitempty"`
+	Identity           Identity        `json:"identity"`
+	Policy             Policy          `json:"policy"`
+	DomainState        []DomainBinding `json:"domainState,omitempty"`
 }
 type GatewayConfig struct {
 	PodIP           netip.Addr   `json:"podIP"`
