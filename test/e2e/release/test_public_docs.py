@@ -61,6 +61,13 @@ class PublicDocumentationTests(unittest.TestCase):
         self.assertEqual((ROOT / 'dashboards/ratatoskr-overview.json').read_bytes(),
                          (ROOT / 'charts/ratatoskr/dashboards/ratatoskr-overview.json').read_bytes())
 
+    def test_chart_metrics_addresses_match_runtime_contract(self):
+        workloads = (ROOT / 'charts/ratatoskr/templates/workloads.yaml').read_text()
+        agent = (ROOT / 'charts/ratatoskr/templates/agent.yaml').read_text()
+        for port, template in ((8080, workloads), (9904, workloads), (9903, agent)):
+            self.assertIn('ternary "0.0.0.0:%s" "0"' % port, template)
+            self.assertNotIn('ternary ":%s"' % port, template)
+
     def test_container_source_labels_match_repository(self):
         for name in ('Dockerfile', 'plugins/upstream/openvpn/Dockerfile'):
             self.assertIn('org.opencontainers.image.source="https://github.com/jradikk/ratatoskr"',

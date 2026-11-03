@@ -74,7 +74,7 @@ def check_agent(docs, socket, datapath, dev=False, health_port=19903, metrics=Tr
     env = {e["name"]: e for e in container["env"]}
     assert {"METRICS_ENABLED", "METRICS_BIND_ADDRESS"} <= set(env)
     assert env["METRICS_ENABLED"]["value"] == str(metrics).lower()
-    assert env["METRICS_BIND_ADDRESS"]["value"] == (":9903" if metrics else "0")
+    assert env["METRICS_BIND_ADDRESS"]["value"] == ("0.0.0.0:9903" if metrics else "0")
     assert env["DATAPATH"]["value"] == datapath
     for name, field in {"NODE_NAME": "spec.nodeName", "POD_NAMESPACE": "metadata.namespace",
                         "POD_NAME": "metadata.name", "POD_UID": "metadata.uid"}.items():
@@ -360,7 +360,7 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
                            ("webhook", webhook)):
         env = {e["name"]: e["value"] for e in pod["containers"][0]["env"] if "value" in e}
         assert env["METRICS_ENABLED"] == str(metrics).lower()
-        assert env["METRICS_BIND_ADDRESS"] == ((":8080" if component == "controller" else ":9904") if metrics else "0")
+        assert env["METRICS_BIND_ADDRESS"] == (("0.0.0.0:8080" if component == "controller" else "0.0.0.0:9904") if metrics else "0")
     assert ctrl_env["GATEWAY_METRICS_ENABLED"]["value"] == str(metrics).lower()
     import json
     assert json.loads(ctrl_env["GATEWAY_METRICS_NAMESPACE_SELECTOR"]["value"]) == {

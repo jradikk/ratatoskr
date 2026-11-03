@@ -50,7 +50,7 @@ spec:
             - name: METRICS_ENABLED
               value: {{ .Values.metrics.enabled | quote }}
             - name: METRICS_BIND_ADDRESS
-              value: {{ ternary ":8080" "0" .Values.metrics.enabled | quote }}
+              value: {{ ternary "0.0.0.0:8080" "0" .Values.metrics.enabled | quote }}
             - name: OPERATOR_NAMESPACE
               value: {{ default .Release.Namespace .Values.operatorNamespace | quote }}
             - name: DRIVER
@@ -211,7 +211,7 @@ spec:
             - name: METRICS_ENABLED
               value: {{ .Values.metrics.enabled | quote }}
             - name: METRICS_BIND_ADDRESS
-              value: {{ ternary ":9904" "0" .Values.metrics.enabled | quote }}
+              value: {{ ternary "0.0.0.0:9904" "0" .Values.metrics.enabled | quote }}
             - name: SERVICE_NAME
               value: ratatoskr-webhook
             - name: NAMESPACE
