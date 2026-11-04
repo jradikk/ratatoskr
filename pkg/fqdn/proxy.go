@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"reflect"
 	"sort"
 	"strconv"
 	"sync"
@@ -211,6 +212,12 @@ func (p *Proxy) Sync(ctx context.Context) error {
 	defer p.mu.Unlock()
 	candidate := clone(p.bindings)
 	p.expire(candidate, p.opts.Clock())
+	// An unchanged cache already reflects a successful backend/persistence commit.
+	// Do not recreate rules or patch annotations every periodic tick. Restored
+	// state still needs its FIRST commit, and exclude expiry/failed attempts retry.
+	if p.applied && reflect.DeepEqual(candidate, p.bindings) {
+		return nil
+	}
 	return p.commit(ctx, candidate)
 }
 func (p *Proxy) Snapshot() Update { p.mu.Lock(); defer p.mu.Unlock(); return p.update(p.bindings) }

@@ -529,3 +529,87 @@ func TestUnmatchedAndAAAATransactionMismatchReject(t *testing.T) {
 		answerCode(t, p, question("unmatched.test.", typ), mdns.RcodeServerFailure)
 	}
 }
+
+func TestSyncUnchangedEmptyIncludeExcludeApplyOnce(t *testing.T) {
+	for _, mode := range []string{"include", "exclude"} {
+		t.Run(mode, func(t *testing.T) {
+			now := time.Unix(1000, 0)
+			calls := 0
+			o := opts(mode, &now, func(context.Context, Update) error { calls++; return nil })
+			p := mustProxy(t, o)
+			for i := 0; i < 5; i++ {
+				if err := p.Sync(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				now = now.Add(time.Second)
+			}
+			if calls != 1 {
+				t.Fatal("unchanged empty state reapplied")
+			}
+		})
+	}
+}
+func TestSyncRestoredStateRequiresOneInitialCommit(t *testing.T) {
+	now := time.Unix(1000, 0)
+	calls := 0
+	o := opts("include", &now, func(context.Context, Update) error { calls++; return nil })
+	o.Restore = []Binding{{Rule: 0, Address: netip.MustParseAddr("203.0.113.8"), ExpiresAt: 1, Retained: true}}
+	p := mustProxy(t, o)
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(p.Snapshot().State) != 1 {
+		t.Fatal("restored include state initial/unchanged commit incorrect")
+	}
+}
+func TestSyncExpiredExcludeAppliesWithdrawalOnce(t *testing.T) {
+	now := time.Unix(1000, 0)
+	calls := 0
+	o := opts("exclude", &now, func(context.Context, Update) error { calls++; return nil })
+	o.Restore = []Binding{{Rule: 0, Address: netip.MustParseAddr("203.0.113.8"), ExpiresAt: 1002, Retained: false}}
+	p := mustProxy(t, o)
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(3 * time.Second)
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(p.Snapshot().State) != 0 {
+		t.Fatal("expiry withdrawal skipped or repeatedly committed")
+	}
+}
+func TestSyncFailedInitialCommitRetriesUnchangedState(t *testing.T) {
+	now := time.Unix(1000, 0)
+	calls := 0
+	o := opts("include", &now, func(context.Context, Update) error {
+		calls++
+		if calls == 1 {
+			return ErrApply
+		}
+		return nil
+	})
+	p := mustProxy(t, o)
+	if err := p.Sync(context.Background()); err == nil {
+		t.Fatal("failed apply not returned")
+	}
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatal("failed unchanged initial commit was not retried")
+	}
+}
