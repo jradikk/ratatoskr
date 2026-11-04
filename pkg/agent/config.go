@@ -26,6 +26,7 @@ const HashAnnotation = Prefix + "agent-hash"
 const BackendAnnotation = Prefix + "agent-backend"
 const ConfigAnnotation = Prefix + "agent-config"
 const ReadyAnnotation = Prefix + "datapath-ready"
+const QuarantineReasonAnnotation = Prefix + "quarantine-reason"
 const Marker = "rtk-ready"
 
 func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies []api.EgressPolicy, operatorNS string) (datapath.ClientConfig, error) {

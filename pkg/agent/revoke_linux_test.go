@@ -84,7 +84,7 @@ func TestRevokeSelectedForgedConfigNeverCallsBackend(t *testing.T) {
 	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client", Namespace: "ns", UID: types.UID("uid"), Annotations: map[string]string{HashAnnotation: "forged", ConfigAnnotation: `{"gatewayID":16777215,"podIP":"10.0.0.4"}`, ReadyAnnotation: "true"}}, Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{PodIP: "10.0.0.4"}}
 	called := false
 	r := &Reconciler{Node: "node", EBPFBackend: func() (datapath.Backend, error) { called = true; return nil, errors.New("backend called") }}
-	if err := r.revokeSelected(context.Background(), p, errors.New("gateway deleted")); err == nil {
+	if err := r.revokeSelected(context.Background(), p, quarantineGatewayRead); err == nil {
 		t.Fatal("unverified sandbox revocation accepted")
 	}
 	if called {

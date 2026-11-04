@@ -406,13 +406,13 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		}
 	}
 	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().redirect(ip) }); err != nil {
-		return r.poisonDomain(rt, target, pod, err)
+		return r.poisonDomainReason(rt, target, pod, quarantineDomainRedirect)
 	}
 	if err = r.patchDomainReady(ctx, pod, cfg, mode); err != nil {
-		return r.poisonDomain(rt, target, pod, err)
+		return r.poisonDomainReason(rt, target, pod, quarantineDomainPersistence)
 	}
 	if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
-		return r.poisonDomain(rt, target, pod, err)
+		return r.poisonDomainReason(rt, target, pod, quarantineDomainRuntime)
 	}
 	go r.syncDomain(ctx, rt) // #nosec G118 -- process-lived worker inherits ctx; bounded fresh contexts are only for fail-closed compensation.
 	return nil
@@ -440,7 +440,7 @@ func (r *Reconciler) applyDomain(ctx context.Context, rt *domainRuntime, u fqdn.
 	defer func() {
 		if err != nil && !rt.retired.Load() {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: rt.name, Namespace: rt.namespace, UID: types.UID(rt.uid)}, Status: corev1.PodStatus{PodIP: rt.podIP.String()}}
-			err = r.poisonDomain(rt, rt.netns, pod, err)
+			err = r.poisonDomainReason(rt, rt.netns, pod, quarantineDomainRouting)
 		}
 	}()
 	if rt.retired.Load() || rt.poisoned {
@@ -539,32 +539,37 @@ func (r *Reconciler) applyDomain(ctx context.Context, rt *domainRuntime, u fqdn.
 	}
 	previous := pod.Annotations[HashAnnotation]
 	if err = r.domainOperations().program(ctx, target, &next, gatewayMTU, previous, false, factory, backendMode(r.Datapath)); err != nil {
-		return r.poisonDomain(rt, target, &pod, err)
+		return r.poisonDomainReason(rt, target, &pod, quarantineDomainRouting)
 	}
 	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().verifyRedirect(rt.resolver) }); err != nil {
-		return r.poisonDomain(rt, target, &pod, err)
+		return r.poisonDomainReason(rt, target, &pod, quarantineDomainRedirect)
 	}
 	if err = r.patchDomainReady(ctx, &pod, next, backendMode(r.Datapath)); err != nil {
-		return r.poisonDomain(rt, target, &pod, err)
+		return r.poisonDomainReason(rt, target, &pod, quarantineDomainPersistence)
 	}
 	if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
-		return r.poisonDomain(rt, target, &pod, err)
+		return r.poisonDomainReason(rt, target, &pod, quarantineDomainRuntime)
 	}
 	return nil
 }
 func (r *Reconciler) poisonDomain(rt *domainRuntime, target *os.File, pod *corev1.Pod, cause error) error {
+	return r.poisonDomainReason(rt, target, pod, reasonForDomainCause(cause))
+}
+
+func (r *Reconciler) poisonDomainReason(rt *domainRuntime, target *os.File, pod *corev1.Pod, reason string) error {
 	rt.poisoned = true
 	rt.retired.Store(true)
 	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	fenceErr := r.domainOperations().quarantine(target, rt.podIP)
 	rt.close()
-	_ = r.setPodPending(cleanup, pod)
 	if fenceErr != nil {
 		return errors.New("DNS compensation quarantine failed; workload unsafe and unavailable")
 	}
-	_ = cause // Never surface upstream/API/private diagnostic strings.
-	return errors.New("DNS update quarantined; recreate workload")
+	if _, err := r.recordQuarantine(cleanup, pod, reason); err != nil {
+		return errors.Join(quarantineError(reason), err)
+	}
+	return quarantineError(reason)
 }
 func (r *Reconciler) syncDomain(ctx context.Context, rt *domainRuntime) {
 	interval := r.domainOperations().interval

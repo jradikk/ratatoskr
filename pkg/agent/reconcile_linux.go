@@ -240,7 +240,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	defer func() {
 		if result != nil {
 			if rt := r.domainRuntime(string(pod.UID)); rt != nil && !rt.retired.Load() {
-				result = r.poisonDomain(rt, rt.netns, pod, result)
+				result = r.poisonDomainReason(rt, rt.netns, pod, quarantineDomainRuntime)
 			}
 		}
 	}()
@@ -253,11 +253,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	}()
 	if err := r.refreshDomainPod(ctx, pod); err != nil {
 		if rt := r.domainRuntime(string(pod.UID)); rt != nil {
-			return r.poisonDomain(rt, rt.netns, pod, err)
+			return r.poisonDomainReason(rt, rt.netns, pod, quarantineGatewayRead)
 		}
-		return err
+		return errors.New("selected domain Pod refresh failed")
 	}
 	if pod.Spec.NodeName != r.Node || pod.Spec.HostNetwork || pod.UID == "" || pod.Status.PodIP == "" {
+		return nil
+	}
+	if pod.Annotations[QuarantineReasonAnnotation] != "" {
+		// A quarantine is persistent, not a transient endpoint closure. Do
+		// not reprogram this Pod after a later API recovery; recreate it.
 		return nil
 	}
 	existing := pod.Annotations[HashAnnotation]
@@ -287,16 +292,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 		}
 	}
 	if selected {
-		revoke := func(cause error) error { return r.revokeSelected(ctx, pod, cause) }
+		revoke := func(reason string) error { return r.revokeSelected(ctx, pod, reason) }
 		var ns corev1.Namespace
 		if err = r.Client.Get(ctx, types.NamespacedName{Name: pod.Namespace}, &ns); err != nil {
-			return revoke(err)
+			return revoke(quarantineNamespaceRead)
 		}
 		name := pod.Labels[GatewayLabel]
 		gwNS := pod.Labels[GatewayNamespace]
 		if a := pod.Annotations[GatewayNamespace]; a != "" {
 			if gwNS != "" && gwNS != a {
-				return revoke(errors.New("conflicting gateway namespace"))
+				return revoke(quarantineAuthorization)
 			}
 			gwNS = a
 		}
@@ -304,19 +309,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 			gwNS = r.OperatorNamespace
 		}
 		if gwNS == "" {
-			return revoke(errors.New("OPERATOR_NAMESPACE required"))
+			return revoke(quarantineAuthorization)
 		}
 		gatewayKey = types.NamespacedName{Namespace: gwNS, Name: name}
 		if err = r.Client.Get(ctx, gatewayKey, &gw); err != nil {
-			return revoke(err)
+			return revoke(quarantineGatewayRead)
 		}
 		var policies api.EgressPolicyList
 		if err = r.Client.List(ctx, &policies, client.InNamespace(pod.Namespace)); err != nil {
-			return revoke(err)
+			return revoke(quarantinePolicyRead)
 		}
 		cfg, err = Config(pod, &ns, &gw, policies.Items, r.OperatorNamespace)
 		if err != nil {
-			return revoke(err)
+			return revoke(quarantineAuthorization)
 		}
 		if rt := r.domainRuntime(string(pod.UID)); rt != nil && rt.poisoned {
 			return errors.New("domain workload quarantined; recreate Pod")
@@ -329,7 +334,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 				}
 			}
 			if domainPolicy == nil {
-				return revoke(errors.New("domain policy requires authenticated agent"))
+				return revoke(quarantineAuthorization)
 			}
 			if rt := r.domainRuntime(string(pod.UID)); rt != nil && !rt.retired.Load() {
 				resolver, e := r.domainResolver(ctx, &gw)
@@ -338,7 +343,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 				}
 			}
 			if err = restoreDomainConfig(pod, &cfg, *domainPolicy, mode); err != nil {
-				return revoke(err)
+				return revoke(quarantineDomainRestore)
 			}
 		}
 	} else {
@@ -496,15 +501,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 				if fenceErr := r.domainOperations().quarantine(target, cfg.PodIP); fenceErr != nil {
 					return errors.New("domain startup quarantine failed")
 				}
-				_ = r.setPodPending(ctx, pod)
+				if _, persistErr := r.recordQuarantine(ctx, pod, quarantineDomainRuntime); persistErr != nil {
+					return errors.Join(quarantineError(quarantineDomainRuntime), persistErr)
+				}
 			}
-			return err
+			return quarantineError(quarantineDomainRuntime)
 		}
 		return nil
 	}
 	if rt := r.domainRuntime(string(pod.UID)); rt != nil {
 		if err = r.domainOperations().enter(target, func() error { return r.domainOperations().removeRedirect(rt.resolver) }); err != nil {
-			return r.poisonDomain(rt, target, pod, err)
+			return r.poisonDomainReason(rt, target, pod, quarantineDomainRedirect)
 		}
 	}
 	r.retireDomain(string(pod.UID))

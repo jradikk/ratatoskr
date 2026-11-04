@@ -528,7 +528,7 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) (response
 			if pod.Labels[GatewayLabel] == "" {
 				return admission.Allowed("not opted in")
 			}
-			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend"} {
+			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", prefix + "quarantine-reason"} {
 				if _, supplied := pod.Annotations[key]; supplied {
 					return denied(fmt.Errorf("agent-owned Pod state may not be supplied on CREATE"))
 				}
@@ -552,7 +552,7 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) (response
 		// Agent state hashes are checksums, not authentication. Only the
 		// authenticated agent ServiceAccount may change its Pod state.
 		if h.driver() == "agent" && old.Labels[GatewayLabel] != "" {
-			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", ReadyAnnotation} {
+			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", prefix + "quarantine-reason", ReadyAnnotation} {
 				if !sameMapEntry(old.Annotations, pod.Annotations, key) &&
 					(h.agentNamespace() == "" || req.UserInfo.Username != "system:serviceaccount:"+h.agentNamespace()+":ratatoskr-agent") {
 					return denied(fmt.Errorf("only the node agent may update agent-owned Pod state"))

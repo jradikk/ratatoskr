@@ -54,27 +54,31 @@ func (r *Reconciler) sandboxForRevocation(ctx context.Context, p *corev1.Pod) (v
 	return verifiedSandbox{target: target, proof: proof, close: closeAll}, nil
 }
 
-// revokeSelected is used for failed namespace/gateway/policy authorization
-// reads. It cannot clean or reconfigure another Pod's namespace. Returning nil
-// after successful quarantine prevents one failed Pod from disabling the node.
-func (r *Reconciler) revokeSelected(ctx context.Context, p *corev1.Pod, cause error) error {
+// revokeSelected fences a verified sandbox after authorization failure and
+// publishes only an agent-authored reason, never the raw API/Secret error.
+func (r *Reconciler) revokeSelected(ctx context.Context, p *corev1.Pod, reason string) error {
+	reason = safeQuarantineReason(reason)
 	if p == nil || p.UID == "" {
-		return cause
+		return quarantineError(reason)
 	}
 	target, err := r.sandboxForRevocation(ctx, p)
 	if err != nil {
-		return errors.Join(cause, err)
+		return errors.Join(quarantineError(reason), errors.New("sandbox verification failed before quarantine"))
 	}
 	defer target.close()
 	ip, err := netip.ParseAddr(p.Status.PodIP)
 	if err != nil {
-		return errors.Join(cause, errors.New("selected PodIP invalid during revocation"))
+		return errors.Join(quarantineError(reason), errors.New("selected PodIP invalid during revocation"))
 	}
 	if err = quarantineUnknownAuthorization(target.target, ip); err != nil {
-		return errors.Join(cause, err)
+		return errors.Join(quarantineError(reason), errors.New("namespace quarantine failed"))
 	}
-	if err = r.setPodPending(ctx, p); err != nil {
-		return errors.Join(cause, err)
+	already, err := r.recordQuarantine(ctx, p, reason)
+	if err != nil {
+		return errors.Join(quarantineError(reason), err)
 	}
-	return nil
+	if already {
+		return nil // First cause is recorded; no repeat log/health storm.
+	}
+	return quarantineError(reason)
 }

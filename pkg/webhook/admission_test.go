@@ -86,7 +86,7 @@ func TestAgentStateRequiresAuthenticatedAgentWriter(t *testing.T) {
 	h.Driver = "agent"
 	p := optedPod()
 	old := mutatedPod(t, h.MutatePod(context.Background(), req(t, "Pod", admissionv1.Create, p, nil)), p)
-	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", ReadyAnnotation} {
+	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", prefix + "quarantine-reason", ReadyAnnotation} {
 		t.Run(key, func(t *testing.T) {
 			changed := old.DeepCopy()
 			changed.Annotations[key] = "forged"
@@ -105,7 +105,7 @@ func TestAgentStateRequiresAuthenticatedAgentWriter(t *testing.T) {
 			}
 		})
 	}
-	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend"} {
+	for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", prefix + "quarantine-reason"} {
 		forged := old.DeepCopy()
 		forged.Annotations[key] = "forged"
 		if h.Validate(context.Background(), req(t, "Pod", admissionv1.Create, forged, nil)).Allowed {
