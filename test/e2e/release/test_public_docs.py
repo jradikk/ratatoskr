@@ -92,6 +92,21 @@ class PublicDocumentationTests(unittest.TestCase):
         self.assertEqual((ROOT / 'dashboards/ratatoskr-overview.json').read_bytes(),
                          (ROOT / 'charts/ratatoskr/dashboards/ratatoskr-overview.json').read_bytes())
 
+    def test_geolocation_dashboard_queries_use_exported_metrics(self):
+        import json
+        dashboard = json.loads((ROOT / 'dashboards/ratatoskr-overview.json').read_text())
+        collector = (ROOT / 'pkg/observability/geolocation.go').read_text()
+        exported = set(re.findall(r'prometheus.NewDesc\("(ratatoskr_gateway_geolocation_[a-z_]+)"', collector))
+        referenced = set()
+        for panel in dashboard['panels']:
+            for target in panel.get('targets', []):
+                referenced.update(re.findall(r'ratatoskr_gateway_geolocation_[a-z_]+', target.get('expr', '')))
+        self.assertTrue(referenced)
+        self.assertFalse(referenced - exported, 'Dashboard references missing geolocation metrics')
+        self.assertNotIn('ratatoskr_gateway_geolocation_sample_ok', referenced)
+        self.assertEqual((ROOT / 'dashboards/ratatoskr-overview.json').read_bytes(),
+                         (ROOT / 'charts/ratatoskr/dashboards/ratatoskr-overview.json').read_bytes())
+
     def test_container_source_labels_match_repository(self):
         for name in ('Dockerfile', 'plugins/upstream/openvpn/Dockerfile'):
             self.assertIn('org.opencontainers.image.source="https://github.com/jradikk/ratatoskr"',

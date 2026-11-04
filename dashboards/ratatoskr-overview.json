@@ -369,7 +369,7 @@
       },
       "targets": [
         {
-          "expr": "ratatoskr_gateway_geolocation_info{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} and on(namespace,gateway,pod,provider) ratatoskr_gateway_geolocation_sample_ok{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} == 1",
+          "expr": "ratatoskr_gateway_geolocation_info{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} and on(namespace,gateway,pod,provider,exit_ip) ratatoskr_gateway_geolocation_lookup_success{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} == 1",
           "format": "table",
           "instant": true,
           "refId": "A"
