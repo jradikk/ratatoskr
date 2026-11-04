@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -465,21 +466,80 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 	return nil
 }
 func (r *Reconciler) patchDomainReady(ctx context.Context, pod *corev1.Pod, cfg datapath.ClientConfig, mode string) error {
-	original := pod.DeepCopy()
-	pod.Annotations = copyAnnotations(pod.Annotations)
+	if pod == nil || pod.UID == "" || pod.Namespace == "" || pod.Name == "" {
+		return errors.New("domain persistence requires exact selected Pod identity")
+	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	pod.Annotations[HashAnnotation] = HashForMode(cfg, mode)
-	pod.Annotations[BackendAnnotation] = mode
-	pod.Annotations[ConfigAnnotation] = string(raw)
-	pod.Annotations[ReadyAnnotation] = "true"
-	if err = r.Client.Patch(ctx, pod, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
-		return err
+	original := pod.DeepCopy()
+	candidate := pod.DeepCopy()
+	for attempt := 0; attempt < 3; attempt++ {
+		// A kubelet/status-only resourceVersion bump is not a loss of domain
+		// authorization. Never patch over a changed selected identity, DNS
+		// resolver, gateway selection or already persisted agent state.
+		if attempt > 0 {
+			candidate = &corev1.Pod{}
+			if err = r.Client.Get(ctx, client.ObjectKeyFromObject(original), candidate); err != nil {
+				return errors.New("domain persistence fresh Pod read failed")
+			}
+			if candidate.UID != original.UID || candidate.Namespace != original.Namespace || candidate.Name != original.Name ||
+				candidate.DeletionTimestamp != nil || candidate.Spec.NodeName != original.Spec.NodeName ||
+				candidate.Spec.ServiceAccountName != original.Spec.ServiceAccountName || candidate.Spec.HostNetwork != original.Spec.HostNetwork ||
+				candidate.Status.PodIP != original.Status.PodIP || candidate.Spec.DNSPolicy != original.Spec.DNSPolicy ||
+				!reflect.DeepEqual(candidate.Spec.DNSConfig, original.Spec.DNSConfig) ||
+				!reflect.DeepEqual(candidate.Labels, original.Labels) ||
+				candidate.Annotations[GatewayNamespace] != original.Annotations[GatewayNamespace] ||
+				candidate.Annotations[Prefix+"client-config"] != original.Annotations[Prefix+"client-config"] ||
+				candidate.Annotations[QuarantineReasonAnnotation] != original.Annotations[QuarantineReasonAnnotation] ||
+				candidate.Annotations[ConfigAnnotation] != original.Annotations[ConfigAnnotation] ||
+				candidate.Annotations[HashAnnotation] != original.Annotations[HashAnnotation] ||
+				candidate.Annotations[BackendAnnotation] != original.Annotations[BackendAnnotation] ||
+				candidate.Annotations[ReadyAnnotation] != original.Annotations[ReadyAnnotation] {
+				return errors.New("domain persistence selected Pod authorization changed")
+			}
+			gatewayNS := candidate.Labels[GatewayNamespace]
+			if gatewayNS == "" {
+				gatewayNS = candidate.Annotations[GatewayNamespace]
+			}
+			if gatewayNS == "" {
+				gatewayNS = r.OperatorNamespace
+			}
+			var gw api.EgressGateway
+			if err = r.Client.Get(ctx, types.NamespacedName{Namespace: gatewayNS, Name: candidate.Labels[GatewayLabel]}, &gw); err != nil ||
+				gw.DeletionTimestamp != nil || gw.Spec.DNS.Mode != "gateway" || gw.Status.GatewayID != cfg.GatewayID {
+				return errors.New("domain persistence gateway authorization changed")
+			}
+			if resolver, resolverErr := r.domainResolver(ctx, &gw); resolverErr != nil ||
+				candidate.Spec.DNSConfig == nil || len(candidate.Spec.DNSConfig.Nameservers) != 1 ||
+				candidate.Spec.DNSConfig.Nameservers[0] != resolver.String() {
+				return errors.New("domain persistence DNS resolver changed")
+			}
+			var pol api.EgressPolicy
+			if err = r.Client.Get(ctx, types.NamespacedName{Namespace: candidate.Namespace, Name: cfg.Identity.Policy}, &pol); err != nil ||
+				string(pol.UID) != cfg.DomainPolicyUID || pol.Generation != cfg.DomainPolicyGeneration {
+				return errors.New("domain persistence policy identity changed")
+			}
+		}
+		before := candidate.DeepCopy()
+		candidate.Annotations = copyAnnotations(candidate.Annotations)
+		candidate.Annotations[HashAnnotation] = HashForMode(cfg, mode)
+		candidate.Annotations[BackendAnnotation] = mode
+		candidate.Annotations[ConfigAnnotation] = string(raw)
+		candidate.Annotations[ReadyAnnotation] = "true"
+		err = r.Client.Patch(ctx, candidate, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+		if err == nil {
+			*pod = *candidate.DeepCopy()
+			return nil
+		}
+		if !apierrors.IsConflict(err) {
+			return err
+		}
 	}
-	return nil
+	return errors.New("domain persistence resourceVersion conflict")
 }
+
 func (r *Reconciler) applyDomain(ctx context.Context, rt *domainRuntime, u fqdn.Update) (err error) {
 	lock := r.domainLock(rt.uid)
 	lock.Lock()
