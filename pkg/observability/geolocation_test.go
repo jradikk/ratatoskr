@@ -2,6 +2,8 @@ package observability
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
@@ -9,9 +11,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/skaldhall/ratatoskr/pkg/geolocation"
-	"net/http"
-	"net/http/httptest"
 )
 
 func TestGeoCollectorCoordinatesDriftFailureAndRevocation(t *testing.T) {

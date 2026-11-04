@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 // Verify real HTTP socket options in a disposable netns without connecting to

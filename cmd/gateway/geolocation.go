@@ -13,10 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	"github.com/skaldhall/ratatoskr/pkg/geolocation"
 	"github.com/skaldhall/ratatoskr/pkg/observability"
-	"golang.org/x/sys/unix"
 )
 
 func geolocationInterval(value string) (time.Duration, error) {
@@ -48,7 +49,13 @@ func geoSocketControl(_, _ string, raw syscall.RawConn) error {
 }
 func newGeolocationClient() (*http.Client, *http.Transport) {
 	resolverDialer := &net.Dialer{Timeout: 4 * time.Second, Control: geoSocketControl}
-	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		// The Pod's ClusterFirst nameserver is not reachable through the VPN.
+		// Use the external resolver, while retaining the upstream bind and mark.
+		address, err := geolocationDNSAddress(os.Getenv("UPSTREAM_DNS_IP"))
+		if err != nil {
+			return nil, err
+		}
 		return resolverDialer.DialContext(ctx, network, address)
 	}}
 	dialer := &net.Dialer{Timeout: 4 * time.Second, Control: geoSocketControl, Resolver: resolver}
@@ -75,4 +82,15 @@ func startGeolocation(ctx context.Context, snapshot geolocation.ExitSnapshot) (*
 	}, interval)
 	go func() { defer transport.CloseIdleConnections(); sampler.Run(ctx) }()
 	return &observability.GeoCollector{Sampler: sampler}, nil
+}
+
+func geolocationDNSAddress(value string) (string, error) {
+	if value == "" {
+		value = "1.1.1.1"
+	}
+	ip, err := netip.ParseAddr(value)
+	if err != nil || !ip.Is4() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return "", errors.New("geolocation requires a VPN-accessible IPv4 DNS resolver")
+	}
+	return net.JoinHostPort(ip.String(), "53"), nil
 }

@@ -52,3 +52,17 @@ func TestGeoSocketControlRejectsMissingUpstream(t *testing.T) {
 		t.Fatalf("missing upstream0 must fail closed, got %v", err)
 	}
 }
+
+func TestGeolocationUsesExternalDNSAddress(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{{"", "1.1.1.1:53"}, {"9.9.9.9", "9.9.9.9:53"}} {
+		got, err := geolocationDNSAddress(tc.input)
+		if err != nil || got != tc.want {
+			t.Fatalf("resolver=%q error=%v", got, err)
+		}
+	}
+	for _, value := range []string{"localhost", "127.0.0.1", "0.0.0.0", "::1", "169.254.1.1"} {
+		if _, err := geolocationDNSAddress(value); err == nil {
+			t.Fatalf("invalid resolver accepted: %q", value)
+		}
+	}
+}
