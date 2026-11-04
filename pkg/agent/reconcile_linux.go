@@ -497,6 +497,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	}
 	if domainPolicy != nil {
 		if err = r.startDomain(ctx, pod, &gw, domainPolicy, cfg, target, sandboxProof, mode); err != nil {
+			var startup *domainStartupError
+			if r.Log != nil && errors.As(err, &startup) {
+				r.Log.Warn("DNS startup blocked; verify gateway resolver, namespace socket permissions and listener conflicts", "stage", startup.stage, "category", startup.category)
+			}
 			if r.domainRuntime(string(pod.UID)) == nil {
 				if fenceErr := r.domainOperations().quarantine(target, cfg.PodIP); fenceErr != nil {
 					return errors.New("domain startup quarantine failed")

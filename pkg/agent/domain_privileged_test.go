@@ -17,6 +17,10 @@ import (
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
+	corev1 "k8s.io/api/core/v1"
+	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/skaldhall/ratatoskr/pkg/datapath/iproute"
 	"github.com/skaldhall/ratatoskr/pkg/fqdn"
 )
@@ -235,6 +239,39 @@ func TestPrivilegedDomainMarkedTargetDNSCapture(t *testing.T) {
 	if applies != 2 {
 		t.Fatal("UDP/TCP queries bypassed application barrier or mark exemption recursed")
 	}
+	for _, srv := range proxyServers {
+		_ = srv.Shutdown()
+	}
+	if err = InNamespace(target, func() error { return iproute.RemoveDNSRedirect(rt.resolver) }); err != nil {
+		t.Fatal(err)
+	}
+	runtimeAgent, p, gw, pol, cfg, _, _, _ := domainFixture(t, "include")
+	var svc corev1.Service
+	if err = runtimeAgent.Client.Get(context.Background(), client.ObjectKey{Namespace: gw.Namespace, Name: gw.Name + "-dns"}, &svc); err != nil {
+		t.Fatal(err)
+	}
+	svc.Spec.ClusterIP = rt.resolver.String()
+	if err = runtimeAgent.Client.Update(context.Background(), &svc); err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.DNSConfig.Nameservers = []string{rt.resolver.String()}
+	p.Status.PodIP = rt.podIP.String()
+	cfg.PodIP = rt.podIP
+	runtimeAgent.domainOps = nil
+	realOps := runtimeAgent.domainOperations()
+	// Startup still runs real target entry, loopback binds, nft install/verify,
+	// optimistic API annotation patch and readiness marker publication. Only CRI
+	// recheck is fake because this fixture owns disposable non-CRI namespaces.
+	realOps.recheck = func(context.Context, cri.RuntimeServiceClient, sandboxProof, *os.File) error { return nil }
+	runtimeAgent.domainOps = &realOps
+	lock := runtimeAgent.domainLock(string(p.UID))
+	lock.Lock()
+	err = runtimeAgent.startDomain(context.Background(), p, gw, pol, cfg, target, sandboxProof{inode: inode, pidfd: -1}, "iproute")
+	lock.Unlock()
+	if err != nil {
+		t.Fatalf("actual-kernel startup failed: %v", err)
+	}
+	runtimeAgent.closeDomains()
 	if err = checkThreadOwn(); err != nil {
 		t.Fatal("caller thread not restored to agent netns")
 	}

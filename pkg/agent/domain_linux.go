@@ -286,18 +286,49 @@ func (r *Reconciler) domainResolver(ctx context.Context, gw *api.EgressGateway) 
 	}
 	return ip, nil
 }
-func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.EgressGateway, pol *api.EgressPolicy, cfg datapath.ClientConfig, target *os.File, proof sandboxProof, mode string) error {
+
+type domainStartupError struct{ stage, category string }
+
+func (e *domainStartupError) Error() string {
+	return "DNS startup blocked: " + e.stage + " (" + e.category + ")"
+}
+func domainStartupFailure(stage string, cause error) error {
+	category := "invalid-or-unavailable"
+	switch {
+	case errors.Is(cause, unix.EADDRINUSE):
+		category = "address-in-use"
+	case errors.Is(cause, unix.EPERM) || errors.Is(cause, unix.EACCES):
+		category = "permission-denied"
+	case errors.Is(cause, unix.EADDRNOTAVAIL) || errors.Is(cause, unix.ENODEV):
+		category = "address-unavailable"
+	case errors.Is(cause, context.DeadlineExceeded):
+		category = "timeout"
+	case errors.Is(cause, context.Canceled):
+		category = "cancelled"
+	}
+	return &domainStartupError{stage: stage, category: category}
+}
+func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.EgressGateway, pol *api.EgressPolicy, cfg datapath.ClientConfig, target *os.File, proof sandboxProof, mode string) (err error) {
+	stage := "policy-identity"
+	defer func() {
+		if err != nil {
+			err = domainStartupFailure(stage, err)
+		}
+	}()
 	if cfg.DomainPolicyUID == "" || cfg.DomainPolicyGeneration <= 0 || gw.UID == "" {
 		return errors.New("domain runtime requires persisted authorization identities")
 	}
+	stage = "resolver-service"
 	ip, err := r.domainResolver(ctx, gw)
 	if err != nil {
 		return err
 	}
 
+	stage = "pod-dns-config"
 	if pod.Spec.DNSPolicy != corev1.DNSNone || pod.Spec.DNSConfig == nil || len(pod.Spec.DNSConfig.Nameservers) != 1 || pod.Spec.DNSConfig.Nameservers[0] != ip.String() {
 		return errors.New("domain workload must use gateway DNS only")
 	}
+	stage = "runtime-identity"
 	uid := string(pod.UID)
 	if old := r.domainRuntime(uid); old != nil && (old.policyUID != string(pol.UID) || old.generation != pol.Generation || old.resolver != ip) {
 		// An old redirect still owns the former gateway DNS Service. Do not
@@ -313,9 +344,11 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 			return r.poisonDomain(old, target, pod, errors.New("domain sandbox or gateway replaced"))
 		}
 		if err = r.domainOperations().enter(target, func() error { return r.domainOperations().verifyRedirect(ip) }); err == nil {
+			stage = "state-persist"
 			if err = r.patchDomainReady(ctx, pod, cfg, mode); err != nil {
 				return r.poisonDomain(old, target, pod, err)
 			}
+			stage = "ready-marker"
 			if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
 				return r.poisonDomain(old, target, pod, err)
 			}
@@ -325,6 +358,7 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 	}
 	r.retireDomain(uid)
 	rt := &domainRuntime{stop: make(chan struct{}), done: make(chan struct{}), uid: uid, namespace: pod.Namespace, name: pod.Name, policyUID: string(pol.UID), generation: pol.Generation, resolver: ip, podIP: cfg.PodIP, gatewayUID: string(gw.UID), gateway: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}}
+	stage = "namespace-duplicate"
 	fd, e := unix.Dup(int(target.Fd()))
 	if e != nil {
 		return e
@@ -334,6 +368,7 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		rt.close()
 		return err
 	}
+	stage = "policy-cache"
 	rules, err := policy.DomainRules(pol.Spec)
 	if err != nil {
 		rt.close()
@@ -349,16 +384,19 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		rt.close()
 		return err
 	}
+	stage = "namespace-recheck"
 	if err = r.domainOperations().recheck(ctx, r.CRI, proof, target); err != nil {
 		rt.close()
 		return err
 	}
 	// Sockets are created on the locked target thread, not inside the app Pod.
 	err = r.domainOperations().enter(target, func() error {
+		stage = "udp-listener"
 		rt.udp, err = r.domainOperations().listenPacket("udp4", "127.0.0.1:1053")
 		if err != nil {
 			return err
 		}
+		stage = "tcp-listener"
 		rt.tcp, err = r.domainOperations().listen("tcp4", "127.0.0.1:1053")
 		return err
 	})
@@ -366,6 +404,7 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		rt.close()
 		return err
 	}
+	stage = "listener-start"
 	r.putDomain(uid, rt)
 	// The server loop is running before redirect; callbacks serialize on the UID
 	// lock and cannot release answers until the initial authoritative patch.
@@ -405,12 +444,15 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 			return r.poisonDomain(rt, target, pod, errors.New("owned DNS listener startup timeout"))
 		}
 	}
+	stage = "dns-redirect"
 	if err = r.domainOperations().enter(target, func() error { return r.domainOperations().redirect(ip) }); err != nil {
 		return r.poisonDomainReason(rt, target, pod, quarantineDomainRedirect)
 	}
+	stage = "state-persist"
 	if err = r.patchDomainReady(ctx, pod, cfg, mode); err != nil {
 		return r.poisonDomainReason(rt, target, pod, quarantineDomainPersistence)
 	}
+	stage = "ready-marker"
 	if err = r.domainOperations().enter(target, r.domainOperations().marker); err != nil {
 		return r.poisonDomainReason(rt, target, pod, quarantineDomainRuntime)
 	}

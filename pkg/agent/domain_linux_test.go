@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -396,4 +397,34 @@ func TestDomainConcurrentApplyAndQueuedReconcileNoLockInversion(t *testing.T) {
 		t.Fatal("callback/reconciliation lock inversion")
 	}
 	r.closeDomains()
+}
+
+func TestDomainStartupFixedCategoriesSuppressPrivateCauses(t *testing.T) {
+	for _, tc := range []struct {
+		cause    error
+		category string
+	}{{unix.EADDRINUSE, "address-in-use"}, {unix.EPERM, "permission-denied"}, {unix.EADDRNOTAVAIL, "address-unavailable"}, {errors.New("synthetic-private-value"), "invalid-or-unavailable"}} {
+		err := domainStartupFailure("udp-listener", tc.cause)
+		var typed *domainStartupError
+		if !errors.As(err, &typed) || typed.category != tc.category || strings.Contains(err.Error(), "synthetic-private-value") {
+			t.Fatal("unsafe or incorrect fixed diagnostic category")
+		}
+	}
+}
+func TestDomainStartupActualDefaultedDNSPodAndTypedBindError(t *testing.T) {
+	r, p, gw, pol, cfg, f, proof, _ := domainFixture(t, "include")
+	p.Spec.DNSConfig.Searches = []string{"apps.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	ndots := "5"
+	p.Spec.DNSConfig.Options = []corev1.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}
+	r.domainOps.listenPacket = func(string, string) (net.PacketConn, error) {
+		return nil, &net.OpError{Op: "listen", Net: "udp", Err: unix.EADDRINUSE}
+	}
+	lock := r.domainLock(string(p.UID))
+	lock.Lock()
+	err := r.startDomain(context.Background(), p, gw, pol, cfg, f, proof, "iproute")
+	lock.Unlock()
+	var startup *domainStartupError
+	if !errors.As(err, &startup) || startup.stage != "udp-listener" || startup.category != "address-in-use" {
+		t.Fatalf("unexpected typed startup diagnostic: %v", err)
+	}
 }
