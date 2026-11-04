@@ -58,12 +58,12 @@ const (
 
 type Options struct {
 	OperatorNamespace, GatewayImage, OpenVPNImage, ImagePullPolicy, Driver, Datapath, ClusterDomain, ServiceCIDRs, PodCIDRs, ExtraCIDRs, GatewayUpstreamDNSIP, GatewayUpstreamProbeURL string
-	GatewayMetricsEnabled, GatewayMetricsNamespaceSelector, GatewayMetricsPodSelector, ClusterDNSIP                                                                                    string
+	GatewayMetricsEnabled, GatewayMetricsNamespaceSelector, GatewayMetricsPodSelector, GatewayGeolocationEnabled, GatewayGeolocationInterval, ClusterDNSIP                             string
 }
 
 func OptionsFromEnv() Options {
 	return Options{
-		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"), GatewayMetricsEnabled: os.Getenv("GATEWAY_METRICS_ENABLED"), GatewayMetricsNamespaceSelector: os.Getenv("GATEWAY_METRICS_NAMESPACE_SELECTOR"), GatewayMetricsPodSelector: os.Getenv("GATEWAY_METRICS_POD_SELECTOR"), ClusterDNSIP: os.Getenv("CLUSTER_DNS_IP"),
+		OperatorNamespace: os.Getenv("OPERATOR_NAMESPACE"), GatewayImage: os.Getenv("GATEWAY_IMAGE"), OpenVPNImage: os.Getenv("OPENVPN_IMAGE"), ImagePullPolicy: os.Getenv("IMAGE_PULL_POLICY"), Driver: os.Getenv("DRIVER"), Datapath: os.Getenv("DATAPATH"), ClusterDomain: os.Getenv("CLUSTER_DOMAIN"), ServiceCIDRs: os.Getenv("SERVICE_CIDRS"), PodCIDRs: os.Getenv("POD_CIDRS"), ExtraCIDRs: os.Getenv("EXTRA_CIDRS"), GatewayUpstreamDNSIP: os.Getenv("GATEWAY_UPSTREAM_DNS_IP"), GatewayUpstreamProbeURL: os.Getenv("GATEWAY_UPSTREAM_PROBE_URL"), GatewayMetricsEnabled: os.Getenv("GATEWAY_METRICS_ENABLED"), GatewayMetricsNamespaceSelector: os.Getenv("GATEWAY_METRICS_NAMESPACE_SELECTOR"), GatewayMetricsPodSelector: os.Getenv("GATEWAY_METRICS_POD_SELECTOR"), GatewayGeolocationEnabled: os.Getenv("GATEWAY_GEOLOCATION_ENABLED"), GatewayGeolocationInterval: os.Getenv("GATEWAY_GEOLOCATION_INTERVAL"), ClusterDNSIP: os.Getenv("CLUSTER_DNS_IP"),
 	}
 }
 

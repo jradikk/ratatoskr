@@ -81,6 +81,10 @@ spec:
               value: {{ .Values.image.pullPolicy | quote }}
             - name: GATEWAY_METRICS_ENABLED
               value: {{ .Values.metrics.enabled | quote }}
+            - name: GATEWAY_GEOLOCATION_ENABLED
+              value: {{ and .Values.metrics.enabled .Values.metrics.geolocation.enabled | quote }}
+            - name: GATEWAY_GEOLOCATION_INTERVAL
+              value: {{ .Values.metrics.geolocation.interval | quote }}
             - name: GATEWAY_METRICS_NAMESPACE_SELECTOR
               value: {{ toJson .Values.metrics.ingress.namespaceSelector | quote }}
             - name: GATEWAY_METRICS_POD_SELECTOR

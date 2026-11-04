@@ -73,6 +73,85 @@ func TestGatewayProfileRenderedIsolationAndLegacy(t *testing.T) {
 		t.Fatal("legacy gateway changed")
 	}
 }
+func TestGatewayGeolocationConfigForProfilesAndLegacy(t *testing.T) {
+	for _, profiles := range []bool{false, true} {
+		t.Run(map[bool]string{true: "profiles", false: "legacy"}[profiles], func(t *testing.T) {
+			r, gw := fixture(t)
+			if profiles {
+				r, gw = gatewayWithProfiles(t)
+			}
+			r.Options.GatewayMetricsEnabled = "true"
+			r.Options.GatewayMetricsNamespaceSelector = `{}`
+			r.Options.GatewayMetricsPodSelector = `{}`
+			check := func(wantEnabled, wantInterval string, wantCount int) {
+				t.Helper()
+				objects, err := r.render(gw, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				count := 0
+				for _, obj := range objects {
+					dep, ok := obj.(*appsv1.Deployment)
+					if !ok {
+						continue
+					}
+					count++
+					env := map[string]string{}
+					for _, entry := range dep.Spec.Template.Spec.Containers[0].Env {
+						env[entry.Name] = entry.Value
+					}
+					if env["GEOLOCATION_ENABLED"] != wantEnabled || env["GEOLOCATION_INTERVAL"] != wantInterval {
+						t.Fatalf("%s geolocation env: %#v", dep.Name, env)
+					}
+					for _, entry := range dep.Spec.Template.Spec.Containers[1].Env {
+						if strings.HasPrefix(entry.Name, "GEOLOCATION_") {
+							t.Fatal("geolocation options exposed to upstream OpenVPN container")
+						}
+					}
+				}
+				if count != wantCount {
+					t.Fatalf("got %d gateway Deployments, want %d", count, wantCount)
+				}
+			}
+			count := 1
+			if profiles {
+				count = 2
+			}
+			check("true", "1m", count)
+			r.Options.GatewayGeolocationEnabled = "false"
+			r.Options.GatewayGeolocationInterval = "3m"
+			check("false", "3m", count)
+			r.Options.GatewayGeolocationEnabled = "true"
+			check("true", "3m", count)
+			r.Options.GatewayMetricsEnabled = "false"
+			check("false", "3m", count) // no metrics means no external vendor requests
+			r.Options.GatewayMetricsEnabled = "true"
+			for _, bad := range []string{"FALSE", "yes", "0", " true "} {
+				r.Options.GatewayGeolocationEnabled = bad
+				if _, err := r.render(gw, nil); err == nil {
+					t.Fatalf("invalid enabled value %q accepted", bad)
+				}
+			}
+			r.Options.GatewayGeolocationEnabled = "true"
+			for _, bad := range []string{"garbage", "0", "30s", "25h", "-1m"} {
+				r.Options.GatewayGeolocationInterval = bad
+				if _, err := r.render(gw, nil); err == nil {
+					t.Fatalf("invalid interval %q accepted", bad)
+				}
+			}
+		})
+	}
+}
+
+func TestOptionsFromEnvGeolocation(t *testing.T) {
+	t.Setenv("GATEWAY_GEOLOCATION_ENABLED", "false")
+	t.Setenv("GATEWAY_GEOLOCATION_INTERVAL", "3m")
+	options := OptionsFromEnv()
+	if options.GatewayGeolocationEnabled != "false" || options.GatewayGeolocationInterval != "3m" {
+		t.Fatalf("geolocation environment not propagated: %+v", options)
+	}
+}
+
 func TestGatewayProfileNamesRejectAmbiguity(t *testing.T) {
 	r, gw := gatewayWithProfiles(t)
 	_ = r

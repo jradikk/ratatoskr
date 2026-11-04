@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"time"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
@@ -63,6 +64,31 @@ func (r *GatewayReconciler) gatewayMetricsIngress() (*networkingv1.NetworkPolicy
 	return &networkingv1.NetworkPolicyPeer{NamespaceSelector: ns, PodSelector: pod}, true, nil
 }
 
+// gatewayGeolocationConfig validates operator-supplied settings even when
+// metrics are disabled. With no metrics endpoint there is nothing to publish,
+// so never start external geolocation requests in that mode.
+func (r *GatewayReconciler) gatewayGeolocationConfig(metricsEnabled bool) (string, string, error) {
+	enabled := r.Options.GatewayGeolocationEnabled
+	if enabled == "" {
+		enabled = "true"
+	}
+	if enabled != "true" && enabled != "false" {
+		return "", "", fmt.Errorf("GATEWAY_GEOLOCATION_ENABLED must be true or false")
+	}
+	interval := r.Options.GatewayGeolocationInterval
+	if interval == "" {
+		interval = "1m"
+	}
+	parsed, err := time.ParseDuration(interval)
+	if err != nil || parsed < time.Minute || parsed > 24*time.Hour {
+		return "", "", fmt.Errorf("GATEWAY_GEOLOCATION_INTERVAL must be between 1m and 24h")
+	}
+	if !metricsEnabled {
+		enabled = "false"
+	}
+	return enabled, interval, nil
+}
+
 func ptrInt32(value int32) *int32                     { return &value }
 func ptrPort(value int32) *intstr.IntOrString         { v := intstr.FromInt32(value); return &v }
 func protocol(value corev1.Protocol) *corev1.Protocol { return &value }
@@ -112,6 +138,10 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		return nil, err
 	}
 	metricsPeer, metricsEnabled, err := r.gatewayMetricsIngress()
+	if err != nil {
+		return nil, err
+	}
+	geolocationEnabled, geolocationInterval, err := r.gatewayGeolocationConfig(metricsEnabled)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +209,7 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 			{Name: "run", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 			{Name: "dev-net", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		}, Containers: []corev1.Container{
-			{Name: "gateway", Image: r.Options.GatewayImage, ImagePullPolicy: pull, Command: []string{"/ratatoskr", "-config", "/config/gateway.json"}, Env: []corev1.EnvVar{{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}}, {Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}}, {Name: "DATAPATH", Value: backendMode}}, Ports: []corev1.ContainerPort{{Name: "geneve", ContainerPort: datapath.GenevePort, Protocol: corev1.ProtocolUDP}, {Name: "health", ContainerPort: 9900}}, VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config", ReadOnly: true}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, Privileged: &gatewayPrivileged}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(9900)}}, PeriodSeconds: 5}},
+			{Name: "gateway", Image: r.Options.GatewayImage, ImagePullPolicy: pull, Command: []string{"/ratatoskr", "-config", "/config/gateway.json"}, Env: []corev1.EnvVar{{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}}, {Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}}, {Name: "DATAPATH", Value: backendMode}, {Name: "GEOLOCATION_ENABLED", Value: geolocationEnabled}, {Name: "GEOLOCATION_INTERVAL", Value: geolocationInterval}}, Ports: []corev1.ContainerPort{{Name: "geneve", ContainerPort: datapath.GenevePort, Protocol: corev1.ProtocolUDP}, {Name: "health", ContainerPort: 9900}}, VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config", ReadOnly: true}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, Privileged: &gatewayPrivileged}, ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(9900)}}, PeriodSeconds: 5}},
 			{Name: "upstream", Image: r.Options.OpenVPNImage, ImagePullPolicy: pull, VolumeMounts: []corev1.VolumeMount{{Name: "upstream", MountPath: "/etc/ratatoskr/upstream", ReadOnly: true}, {Name: "run", MountPath: "/run/ratatoskr"}, {Name: "dev-net", MountPath: "/dev/net"}}, SecurityContext: &corev1.SecurityContext{RunAsUser: &root, AllowPrivilegeEscalation: &priv, Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN", "MKNOD"}, Drop: []corev1.Capability{"ALL"}}}},
 		}}
 	if metricsEnabled {
