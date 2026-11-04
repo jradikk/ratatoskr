@@ -5,6 +5,7 @@ package dns
 import (
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
+	"github.com/skaldhall/ratatoskr/pkg/fqdn"
 )
 
 // One disposable pair of netns and a veth: no host addresses/routes, DNS,
@@ -135,6 +137,7 @@ func TestPrivilegedExternalDNSSocketOnlyUpstream(t *testing.T) {
 		clusterCalls.Add(1)
 		m := new(mdns.Msg)
 		m.SetReply(req)
+		m.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: req.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 30}, A: net.IPv4(10, 42, 1, 9)}}
 		_ = w.WriteMsg(m)
 	})
 	cServers := []*mdns.Server{{PacketConn: clusterUDP, Net: "udp", Handler: cluster}, {Listener: clusterTCP, Net: "tcp", Handler: cluster}}
@@ -178,8 +181,13 @@ func TestPrivilegedExternalDNSSocketOnlyUpstream(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := mdns.HandlerFunc(func(w mdns.ResponseWriter, req *mdns.Msg) {
 		upstreamCalls.Add(1)
+		host, _, _ := net.SplitHostPort(w.RemoteAddr().String())
+		if host != "198.19.0.1" {
+			t.Error("upstream DNS source escaped upstream0")
+		}
 		m := new(mdns.Msg)
 		m.SetReply(req)
+		m.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: req.Question[0].Name, Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 30}, A: net.IPv4(203, 0, 113, 8)}}
 		_ = w.WriteMsg(m)
 	})
 	servers := []*mdns.Server{{PacketConn: upstreamUDP, Net: "udp", Handler: upstream}, {Listener: upstreamTCP, Net: "tcp", Handler: upstream}}
@@ -215,6 +223,125 @@ func TestPrivilegedExternalDNSSocketOnlyUpstream(t *testing.T) {
 	if clusterCalls.Load() != 2 || upstreamCalls.Load() != 2 {
 		t.Fatalf("DNS queries crossed resolver boundary: cluster=%d upstream=%d", clusterCalls.Load(), upstreamCalls.Load())
 	}
+	forwarder, e := New(Options{ClusterDNS: netip.MustParseAddr("127.0.0.1"), UpstreamDNS: netip.MustParseAddr("198.19.0.2"), ClusterCIDRs: []netip.Prefix{netip.MustParsePrefix("10.42.0.0/16")}, ExternalReady: func() bool { return true }})
+	if e != nil {
+		t.Fatal(e)
+	}
+	forwarder.exchange = func(ctx context.Context, req *mdns.Msg, addr string, upstream bool, protocol string) (*mdns.Msg, error) {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		original, e := netns.Get()
+		if e != nil {
+			return nil, e
+		}
+		defer original.Close()
+		if e = netns.Set(gwNS); e != nil {
+			return nil, e
+		}
+		defer func() {
+			if restore := netns.Set(original); restore != nil {
+				panic(restore)
+			}
+		}()
+		return exchange(ctx, req, addr, upstream, protocol)
+	}
+	gatewayUDP, e := net.ListenPacket("udp4", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	gatewayTCP, e := net.Listen("tcp4", gatewayUDP.LocalAddr().String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	gatewayServers := []*mdns.Server{{PacketConn: gatewayUDP, Net: "udp", Handler: forwarder}, {Listener: gatewayTCP, Net: "tcp", Handler: forwarder}}
+	for _, srv := range gatewayServers {
+		started := make(chan struct{})
+		srv.NotifyStartedFunc = func() { close(started) }
+		go func(s *mdns.Server) { _ = s.ActivateAndServe() }(srv)
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("gateway proxy startup timeout")
+		}
+	}
+	defer func() {
+		for _, srv := range gatewayServers {
+			_ = srv.Shutdown()
+		}
+	}()
+	applies := &atomic.Int32{}
+	// Agent is the disposable process's original namespace; gateway/external
+	// sockets stay in their isolated namespaces. Only the forwarding resolver
+	// exchange enters gateway netns to create gateway's marked/bound socket.
+	// Main test thread in gw netns must dial loopback front created here. Server
+	// goroutines stay in process original namespace, requiring resolver sockets
+	// injection to selected gateway FD without ordinary/unbound upstream fallback.
+	proxyExchange := func(ctx context.Context, req *mdns.Msg, addr, protocol string) (*mdns.Msg, error) {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		origin, e := netns.Get()
+		if e != nil {
+			return nil, e
+		}
+		defer origin.Close()
+		if e = netns.Set(gwNS); e != nil {
+			return nil, e
+		}
+		defer func() {
+			if e := netns.Set(origin); e != nil {
+				panic(e)
+			}
+		}()
+		return exchange(ctx, req, addr, false, protocol)
+	}
+	// Gateway service is loopback in gw namespace; a forwarding socket must be
+	// created there. Listener chain still exercises all DNS wire decoding.
+	chain, e := fqdn.New(fqdn.Options{Mode: "include", Rules: []fqdn.Rule{{Domains: []string{"ipinfo.io"}}}, Resolver: gatewayUDP.LocalAddr().String(), Apply: func(context.Context, fqdn.Update) error { applies.Add(1); return nil }, Exchange: proxyExchange})
+	if e != nil {
+		t.Fatal(e)
+	}
+	agentUDP, e := net.ListenPacket("udp4", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	agentTCP, e := net.Listen("tcp4", agentUDP.LocalAddr().String())
+	if e != nil {
+		t.Fatal(e)
+	}
+	agentServers := []*mdns.Server{{PacketConn: agentUDP, Net: "udp", Handler: chain}, {Listener: agentTCP, Net: "tcp", Handler: chain}}
+	for _, srv := range agentServers {
+		started := make(chan struct{})
+		srv.NotifyStartedFunc = func() { close(started) }
+		go func(s *mdns.Server) { _ = s.ActivateAndServe() }(srv)
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("agent proxy startup timeout")
+		}
+	}
+	defer func() {
+		for _, srv := range agentServers {
+			_ = srv.Shutdown()
+		}
+	}()
+
+	for _, protocol := range []string{"udp", "tcp"} {
+		for _, name := range []string{"ipinfo.io.", "archive.ubuntu.com.", "kubernetes.default.svc.cluster.local."} {
+			req := new(mdns.Msg).SetQuestion(name, mdns.TypeA)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			reply, _, e := (&mdns.Client{Net: protocol, Timeout: 3 * time.Second}).ExchangeContext(ctx, req, agentUDP.LocalAddr().String())
+			cancel()
+			if e != nil || reply.Rcode != mdns.RcodeSuccess || len(reply.Answer) != 1 {
+				t.Fatalf("full controlled DNS chain %s %s: %v", protocol, name, e)
+			}
+		}
+	}
+	if applies.Load() != 2 {
+		t.Fatal("matched query barrier missing or unmatched names mutated domain policy")
+	}
+	if upstreamCalls.Load() != 6 || clusterCalls.Load() != 4 {
+		t.Fatal("full-chain external/cluster resolver split incorrect")
+	}
 	// Remove only the synthetic upstream link: external DNS must not fall back
 	// to the foreign eth0 route, while cluster names still resolve over lo.
 	if err = gw.LinkDel(up); err != nil {
@@ -238,7 +365,7 @@ func TestPrivilegedExternalDNSSocketOnlyUpstream(t *testing.T) {
 			t.Fatalf("cluster %s DNS failed after upstream loss: %v", protocol, e)
 		}
 	}
-	if clusterCalls.Load() != 4 || upstreamCalls.Load() != 2 {
+	if clusterCalls.Load() != 6 || upstreamCalls.Load() != 6 {
 		t.Fatalf("upstream failure leaked DNS to cluster: cluster=%d upstream=%d", clusterCalls.Load(), upstreamCalls.Load())
 	}
 }
