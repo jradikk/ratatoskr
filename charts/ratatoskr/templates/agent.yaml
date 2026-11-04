@@ -23,6 +23,10 @@ rules:
   - apiGroups: [""]
     resources: [namespaces]
     verbs: [get]
+  # Read the owner-verified gateway DNS Service before DNS interception.
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get]
   # Dynamic gateway namespaces prevent a static resourceNames restriction.
   # The agent accepts only the owner-bound gateway config; no Secret access.
   - apiGroups: [""]

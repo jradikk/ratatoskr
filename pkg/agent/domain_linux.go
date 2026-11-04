@@ -19,6 +19,7 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	cri "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -295,6 +296,10 @@ func (e *domainStartupError) Error() string {
 func domainStartupFailure(stage string, cause error) error {
 	category := "invalid-or-unavailable"
 	switch {
+	case apierrors.IsForbidden(cause) || apierrors.IsUnauthorized(cause):
+		category = "permission-denied"
+	case apierrors.IsNotFound(cause):
+		category = "service-not-found"
 	case errors.Is(cause, unix.EADDRINUSE):
 		category = "address-in-use"
 	case errors.Is(cause, unix.EPERM) || errors.Is(cause, unix.EACCES):
