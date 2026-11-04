@@ -155,6 +155,35 @@ func TestUnhealthyGatewayWithoutMeasuredMTUUsesOnlyClosedFallback(t *testing.T) 
 	}
 }
 
+func TestStaleGatewayGenerationClosesAuthorizedClientWithoutQuarantine(t *testing.T) {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "client", Namespace: "ns", UID: types.UID("workload-uid"), Labels: map[string]string{GatewayLabel: "g"}}, Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{PodIP: "10.1.0.2"}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns", Labels: map[string]string{"team": "approved"}}}
+	gw := &api.EgressGateway{ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "operator", Generation: 2}, Spec: api.EgressGatewaySpec{AllowedNamespaces: api.AllowedNamespacesSpec{NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"team": "approved"}}}}, Status: api.EgressGatewayStatus{ObservedGeneration: 1, GatewayID: 10, MTU: api.GatewayMTUStatus{EffectiveMTU: 0}, Endpoints: []api.GatewayEndpoint{{PodIP: "10.2.0.3", UpstreamHealthy: true}}}}
+	stale, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || stale.Endpoint.IsValid() || stale.GatewayID != 10 || stale.MTU != 576 {
+		t.Fatalf("stale status did not yield closed-only config: %+v %v", stale, err)
+	}
+	if err := stale.Validate(); err != nil {
+		t.Fatalf("closed config invalid: %v", err)
+	}
+	gw.Status.ObservedGeneration = gw.Generation
+	gw.Status.MTU.EffectiveMTU = 1400
+	healthy, err := Config(p, ns, gw, nil, "operator")
+	if err != nil || !healthy.Endpoint.IsValid() || healthy.Endpoint.String() != "10.2.0.3" || Hash(healthy) == Hash(stale) {
+		t.Fatalf("current gateway did not restore selected endpoint: %+v %v", healthy, err)
+	}
+	gw.Status.ObservedGeneration = 1
+	ns.Labels["team"] = "revoked"
+	if _, err := Config(p, ns, gw, nil, "operator"); err == nil || !strings.Contains(err.Error(), "namespace not authorized") {
+		t.Fatal("stale status bypassed genuine namespace authorization loss")
+	}
+	ns.Labels["team"] = "approved"
+	gw.Status.GatewayID = 0
+	if _, err := Config(p, ns, gw, nil, "operator"); err == nil || !strings.Contains(err.Error(), "gateway ID unavailable") {
+		t.Fatal("unknown GatewayID guessed from Pod metadata")
+	}
+}
+
 func TestClientMTUBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name, encryption   string

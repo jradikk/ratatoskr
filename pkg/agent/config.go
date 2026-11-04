@@ -53,9 +53,15 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 	if err != nil || !selector.Matches(labels.Set(ns.Labels)) {
 		return c, errors.New("namespace not authorized")
 	}
-	if gw.Status.ObservedGeneration != gw.Generation || gw.Status.GatewayID == 0 || gw.Spec.FailMode != "" && gw.Spec.FailMode != "closed" {
-		return c, errors.New("gateway status stale or unsupported")
+	if gw.Spec.FailMode != "" && gw.Spec.FailMode != "closed" {
+		return c, errors.New("gateway failMode unsupported")
 	}
+	if gw.Status.GatewayID == 0 {
+		// No authenticated routing table is available. Never guess one from a
+		// Pod annotation; the caller must retain the authorization quarantine.
+		return c, errors.New("gateway ID unavailable")
+	}
+	staleStatus := gw.Status.ObservedGeneration != gw.Generation
 	ip, err := netip.ParseAddr(p.Status.PodIP)
 	if err != nil || !ip.Is4() || ip.IsUnspecified() {
 		return c, errors.New("pod IPv4 unavailable")
@@ -102,6 +108,22 @@ func Config(p *corev1.Pod, ns *corev1.Namespace, gw *api.EgressGateway, policies
 			c.DomainPolicyGeneration = pol.Generation
 		}
 		c.Identity.Policy = pol.Name
+	}
+	if staleStatus {
+		// Namespace selection and matching policy have been authenticated,
+		// but the controller has not observed this Gateway generation. An
+		// endpoint/config/exclusions from its old status must never be usable.
+		// A nonzero controller-owned GatewayID still identifies the existing
+		// managed routing table: close it instead of permanently quarantining
+		// DNS/API access. A later current status can reprogram the same Pod.
+		c.Endpoint = netip.Addr{}
+		c.GatewayPublicKey = ""
+		c.RegistrationCACert = ""
+		c.WireGuardPort = 0
+		if c.MTU == 0 {
+			c.MTU = 576
+		}
+		return c, c.Validate()
 	}
 	// Only controller-reported healthy PodIP endpoints participate. Never use a
 	// Service ClusterIP or accept a malformed healthy status as a bypass.
