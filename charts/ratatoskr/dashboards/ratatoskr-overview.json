@@ -276,8 +276,8 @@
       "id": 13,
       "options": {
         "basemap": {
-          "name": "Basemap",
-          "type": "default"
+          "name": "OpenStreetMap",
+          "type": "osm-standard"
         },
         "controls": {
           "mouseWheelZoom": true,

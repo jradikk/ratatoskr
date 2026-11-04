@@ -65,3 +65,14 @@ city, provider); they must not contain client Pod IPs, VPN credentials, tokens
 or profile payloads. Limit dashboard/Prometheus access according to local
 privacy policy. Provider quota and commercial terms should be reviewed before
 large deployments; these are third-party services outside Ratatoskr control.
+
+## Key-free basemap
+
+The dashboard explicitly uses Grafana's built-in OpenStreetMap basemap
+(`osm-standard`), not its configurable default or CARTO. No tile API key is
+required. Keep the map's OpenStreetMap attribution visible. The viewer's browser
+needs access to the public tile service; ordinary interactive use is subject to
+OpenStreetMap's tile usage policy and best-effort availability. For restricted
+networks or large deployments, configure an appropriate self-hosted tile source
+in Grafana instead. Re-import the dashboard or update its ConfigMap to apply the
+basemap change to an existing Grafana installation.

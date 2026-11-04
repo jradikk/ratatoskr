@@ -81,6 +81,17 @@ class PublicDocumentationTests(unittest.TestCase):
             self.assertIsNone(re.fullmatch(pattern, prefix + 'bad-.example.com'))
             self.assertIsNone(re.fullmatch(pattern, prefix + 'UPPER.example.com'))
 
+    def test_geolocation_map_uses_key_free_explicit_basemap(self):
+        import json
+        dashboard = json.loads((ROOT / 'dashboards/ratatoskr-overview.json').read_text())
+        maps = [panel for panel in dashboard['panels'] if panel.get('type') == 'geomap']
+        self.assertTrue(maps)
+        for panel in maps:
+            self.assertEqual(panel['options']['basemap']['type'], 'osm-standard')
+            self.assertNotIn('apikey', json.dumps(panel['options']['basemap']).lower())
+        self.assertEqual((ROOT / 'dashboards/ratatoskr-overview.json').read_bytes(),
+                         (ROOT / 'charts/ratatoskr/dashboards/ratatoskr-overview.json').read_bytes())
+
     def test_container_source_labels_match_repository(self):
         for name in ('Dockerfile', 'plugins/upstream/openvpn/Dockerfile'):
             self.assertIn('org.opencontainers.image.source="https://github.com/jradikk/ratatoskr"',
