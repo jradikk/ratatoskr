@@ -59,6 +59,11 @@ networkPolicy:
 # metrics ports; set selectors below to restrict collectors where needed.
 metrics:
   enabled: true
+  geolocation:
+    # Look up exit IP metadata via eligible token-free providers over upstream0.
+    # Disable to avoid third-party requests; requires metrics.enabled=true.
+    enabled: true
+    interval: 1m
   # {} + {} allows all sources. Restrict either selector independently:
   # namespace only permits all Pods in selected namespaces; pod only permits
   # matching Pods across all namespaces. Both configured match jointly.

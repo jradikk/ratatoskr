@@ -260,6 +260,154 @@
       ],
       "title": "Agent programming p95 (seconds)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Table-format instant latitude/longitude series are inner-joined by composite namespace/gateway/pod/provider/exit_ip; pins represent provider estimates only. Requires lookup_success=1 and last success <=300s. Check transformed table columns and provider terms in your Grafana version before treating pins as validated.",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 13,
+      "options": {
+        "basemap": {
+          "name": "Basemap",
+          "type": "default"
+        },
+        "controls": {
+          "mouseWheelZoom": true,
+          "showZoom": true
+        },
+        "layers": [
+          {
+            "config": {
+              "style": {
+                "color": {
+                  "fixed": "#5794F2"
+                },
+                "size": {
+                  "fixed": 9
+                }
+              }
+            },
+            "location": {
+              "latitude": "latitude",
+              "longitude": "longitude",
+              "mode": "coords"
+            },
+            "name": "Provider estimates",
+            "tooltip": true,
+            "type": "markers"
+          }
+        ],
+        "view": {
+          "id": "coords",
+          "lat": 20,
+          "lon": 0,
+          "zoom": 2
+        }
+      },
+      "targets": [
+        {
+          "expr": "label_join((ratatoskr_gateway_geolocation_latitude_degrees{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} and on(namespace,gateway,pod,provider,exit_ip) ratatoskr_gateway_geolocation_lookup_success{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} == 1 and on(namespace,gateway,pod,provider,exit_ip) (time() - ratatoskr_gateway_geolocation_last_success_timestamp_seconds{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}) <= 300), \"geo_point\", \"/\", \"namespace\", \"gateway\", \"pod\", \"provider\", \"exit_ip\")",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "label_join((ratatoskr_gateway_geolocation_longitude_degrees{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} and on(namespace,gateway,pod,provider,exit_ip) ratatoskr_gateway_geolocation_lookup_success{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} == 1 and on(namespace,gateway,pod,provider,exit_ip) (time() - ratatoskr_gateway_geolocation_last_success_timestamp_seconds{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}) <= 300), \"geo_point\", \"/\", \"namespace\", \"gateway\", \"pod\", \"provider\", \"exit_ip\")",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Exit geolocation (provider estimates)",
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "geo_point",
+            "mode": "inner"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "geo_point": true
+            },
+            "renameByName": {
+              "Value #A": "latitude",
+              "Value #B": "longitude"
+            }
+          }
+        }
+      ],
+      "type": "geomap"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Compare reported country/city per provider and a shared exit_ip; absent samples mean unknown. Country/city are bounded provider output, not identity proof.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 14,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_geolocation_info{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} and on(namespace,gateway,pod,provider) ratatoskr_gateway_geolocation_sample_ok{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"} == 1",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Provider agreement and current exit identity",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Pairwise provider distance is not proof of GPS truth; absent pair may mean one or both providers failed.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "id": 15,
+      "targets": [
+        {
+          "expr": "ratatoskr_gateway_geolocation_distance_meters{namespace=~\"$namespace\",gateway=~\"$gateway\",pod=~\"$pod\"}",
+          "legendFormat": "{{provider_a}} \u2194 {{provider_b}} ({{exit_ip}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider location disagreement (meters)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

@@ -158,6 +158,14 @@ does not weaken or override those gateway policies. CNIs must enforce the
 standard networking.k8s.io/v1 NetworkPolicy API for ingress restrictions to
 have effect.
 
+**Exit geolocation:** `metrics.geolocation.enabled=true` (default) asks
+eligible token-free providers for the upstream exit IP on a bounded
+`metrics.geolocation.interval` (default `1m`). This creates **outbound**
+third-party lookups through the VPN; set it to false if your provider terms or
+privacy policy prohibit them. Setting `metrics.enabled=false` also disables
+geolocation. See [geolocation](../../docs/geolocation.md) for provider
+agreement, map interpretation, freshness, and privacy.
+
 ## Upgrade and validate
 
 Chart CRDs in `crds/` install on first install but **Helm does not upgrade or

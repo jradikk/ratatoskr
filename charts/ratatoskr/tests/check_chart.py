@@ -363,6 +363,8 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         assert env["METRICS_ENABLED"] == str(metrics).lower()
         assert env["METRICS_BIND_ADDRESS"] == (("0.0.0.0:8080" if component == "controller" else "0.0.0.0:9904") if metrics else "0")
     assert ctrl_env["GATEWAY_METRICS_ENABLED"]["value"] == str(metrics).lower()
+    assert ctrl_env["GATEWAY_GEOLOCATION_ENABLED"]["value"] == str(metrics).lower()
+    assert ctrl_env["GATEWAY_GEOLOCATION_INTERVAL"]["value"] == "1m"
     import json
     assert json.loads(ctrl_env["GATEWAY_METRICS_NAMESPACE_SELECTOR"]["value"]) == {}
     assert json.loads(ctrl_env["GATEWAY_METRICS_POD_SELECTOR"]["value"]) == {}
@@ -444,6 +446,14 @@ if __name__ == "__main__":
     check(render("--set", "driver=init"), "init")
     check(render("--set", "datapath=ebpf"), "agent", "ebpf")
     check(render("--set", "driver=init", "--set", "datapath=ebpf"), "init", "ebpf")
+    geo_disabled = render("--set", "metrics.geolocation.enabled=false")
+    geo_env = {e["name"]: e["value"] for e in geo_disabled["Deployment", "ratatoskr-controller"]
+               ["spec"]["template"]["spec"]["containers"][0]["env"] if "value" in e}
+    assert geo_env["GATEWAY_GEOLOCATION_ENABLED"] == "false"
+    geo_interval = render("--set", "metrics.geolocation.interval=2m")
+    geo_env = {e["name"]: e["value"] for e in geo_interval["Deployment", "ratatoskr-controller"]
+               ["spec"]["template"]["spec"]["containers"][0]["env"] if "value" in e}
+    assert geo_env["GATEWAY_GEOLOCATION_INTERVAL"] == "2m"
     check(render("--set", "agent.healthPort=18091"), "agent", health_port=18091)
     check(render("--set", "networkPolicy.enabled=false"), "agent", network_policy=False)
     check(render("--set", "driver=init", "--set", "networkPolicy.enabled=false"),
@@ -478,6 +488,9 @@ if __name__ == "__main__":
              "--set", "metrics." + name + ".enabled=true", succeeds=False)
     helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
          "--set", "metrics.ingress.namespaceSelector=null", succeeds=False)
+    for interval in ("0m", "bad", "59", "30sec"):
+        helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
+             "--set", "metrics.geolocation.interval=" + interval, succeeds=False)
     check(render("--api-versions", "monitoring.coreos.com/v1/ServiceMonitor",
                  "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
                  "--set", "metrics.serviceMonitor.enabled=true",
@@ -509,11 +522,20 @@ if __name__ == "__main__":
     assert hashlib.sha256((CHART / "dashboards/ratatoskr-overview.json").read_bytes()).digest() == \
            hashlib.sha256((ROOT / "dashboards/ratatoskr-overview.json").read_bytes()).digest()
     assert dashboard_json["schemaVersion"] >= 39
+    geo = next(p for p in dashboard_json["panels"] if p["type"] == "geomap")
+    assert geo["options"]["layers"][0]["location"]["mode"] == "coords"
+    assert [target["format"] for target in geo["targets"]] == ["table", "table"]
+    assert geo["targets"][0]["instant"] is True and geo["targets"][1]["instant"] is True
+    assert "ratatoskr_gateway_geolocation_latitude_degrees" in geo["targets"][0]["expr"]
+    assert "ratatoskr_gateway_geolocation_longitude_degrees" in geo["targets"][1]["expr"]
+    assert all("lookup_success" in target["expr"] and "last_success_timestamp_seconds" in target["expr"] for target in geo["targets"])
+    assert geo["transformations"][0] == {"id": "joinByField", "options": {"byField": "geo_point", "mode": "inner"}}
+    assert all('"geo_point"' in target["expr"] and '"exit_ip"' in target["expr"] for target in geo["targets"])
     assert dashboard_json["templating"]["list"][0]["type"] == "datasource"
     assert {v["name"] for v in dashboard_json["templating"]["list"]} == \
            {"datasource", "namespace", "gateway", "pod"}
     assert all(p["datasource"]["uid"] == "${datasource}" for p in dashboard_json["panels"])
-    assert all(p["targets"][0]["expr"].startswith(("ratatoskr_", "sum", "histogram_quantile"))
+    assert all(p["targets"][0]["expr"].startswith(("ratatoskr_", "sum", "histogram_quantile", "label_join"))
                for p in dashboard_json["panels"])
     private_probe = render("--set", "dns.upstreamProbeURL=http://198.19.0.1:8080/exit")
     probe_env = {e["name"]: e["value"] for e in private_probe["Deployment", "ratatoskr-controller"]
