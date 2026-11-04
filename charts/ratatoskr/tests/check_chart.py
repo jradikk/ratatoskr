@@ -483,9 +483,13 @@ if __name__ == "__main__":
                  "--api-versions", "monitoring.coreos.com/v1/PodMonitor",
                  "--set", "metrics.serviceMonitor.enabled=false",
                  "--set", "metrics.podMonitor.enabled=false"), "agent")
-    for name in ("serviceMonitor", "podMonitor"):
-        helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
-             "--set", "metrics." + name + ".enabled=true", succeeds=False)
+    check(render("--set", "metrics.serviceMonitor.enabled=true"),
+          "agent", service_monitor=True)
+    check(render("--set", "metrics.podMonitor.enabled=true"),
+          "agent", pod_monitor=True)
+    check(render("--set", "metrics.serviceMonitor.enabled=true",
+                 "--set", "metrics.podMonitor.enabled=true"),
+          "agent", service_monitor=True, pod_monitor=True)
     helm("template", "ratatoskr", str(CHART), "--namespace", NAMESPACE,
          "--set", "metrics.ingress.namespaceSelector=null", succeeds=False)
     for interval in ("0m", "bad", "59", "30sec"):

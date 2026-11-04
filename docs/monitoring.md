@@ -150,8 +150,7 @@ by default, selecting only Ratatoskr gateway labels. Missing CRDs skip automatic
 monitors without blocking installation. Install Prometheus Operator first, then
 upgrade Ratatoskr to create them.
 
-Advanced settings can force either monitor on (`enabled: true`, which errors if
-its CRD is missing) or off (`enabled: false`). The default is `enabled: auto`.
+Advanced settings can force either monitor on (`enabled: true`, which renders even without local API discovery) or off (`enabled: false`). The default is `enabled: auto`.
 Monitor labels and any custom namespace selector must agree with your Prometheus
 installation's discovery settings. The chart cannot override an existing
 Prometheus instance's restrictive ServiceMonitor/PodMonitor selectors.

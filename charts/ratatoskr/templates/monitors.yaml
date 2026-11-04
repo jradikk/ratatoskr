@@ -3,9 +3,6 @@
 {{- $serviceSetting := toString .Values.metrics.serviceMonitor.enabled -}}
 {{- $podSetting := toString .Values.metrics.podMonitor.enabled -}}
 {{- if and .Values.metrics.enabled (or (eq $serviceSetting "true") (and (eq $serviceSetting "auto") $serviceAvailable)) }}
-{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
-{{- fail "metrics.serviceMonitor.enabled requires monitoring.coreos.com/v1 ServiceMonitor CRD; install Prometheus Operator or disable this monitor" }}
-{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -42,9 +39,6 @@ spec:
           targetLabel: pod
 {{- end }}
 {{- if and .Values.metrics.enabled (or (eq $podSetting "true") (and (eq $podSetting "auto") $podAvailable)) }}
-{{- if not (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PodMonitor") }}
-{{- fail "metrics.podMonitor.enabled requires monitoring.coreos.com/v1 PodMonitor CRD; install Prometheus Operator or disable this monitor" }}
-{{- end }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
