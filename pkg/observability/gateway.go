@@ -14,13 +14,15 @@ import (
 // process/runtime and per-client/peer labels are omitted. Link metrics use only
 // fixed device-role labels; they are current resettable kernel samples, not
 // per-client counters or a claim about healthy WireGuard peers.
-func GatewayHandler(snapshot func() (ready bool, effectiveMTU int), programming *GatewayProgramming, traffic *GatewayLinkTraffic, connections ...*GatewayConnections) http.Handler {
+func GatewayHandler(snapshot func() (ready bool, effectiveMTU int), programming *GatewayProgramming, traffic *GatewayLinkTraffic, connections ...prometheus.Collector) http.Handler {
 	registry := prometheus.NewRegistry()
 	registerGatewayMetrics(registry, snapshot)
 	programming.register(registry)
 	registry.MustRegister(traffic)
-	if len(connections) != 0 && connections[0] != nil {
-		registry.MustRegister(connections[0])
+	for _, collector := range connections {
+		if collector != nil {
+			registry.MustRegister(collector)
+		}
 	}
 	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
 }

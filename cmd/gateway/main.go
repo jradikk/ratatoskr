@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
 
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
@@ -348,9 +349,24 @@ func run(ctx context.Context, configPath string) error {
 		}
 		return observability.KernelConnectionScope(applied.Clients)
 	}, observability.KernelConntrackFlows)
-	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic, connections)
+	geoCollector, err := startGeolocation(ctx, func() (netip.Addr, bool) {
+		published := current.Load().(state)
+		if !published.ready || published.appliedClientConfigHash == "" {
+			return netip.Addr{}, false
+		}
+		ip, err := netip.ParseAddr(published.exitIP)
+		return ip, err == nil && ip.Is4() && !ip.IsUnspecified()
+	})
+	if err != nil {
+		return err
+	}
+	collectors := []prometheus.Collector{connections}
+	if geoCollector != nil {
+		collectors = append(collectors, geoCollector)
+	}
+	metricsHandler := observability.GatewayHandler(gatewaySnapshot, programming, traffic, collectors...)
 	if cfg.Encryption == "wireguard" {
-		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice, connections)
+		metricsHandler = observability.WireGuardHandler(gatewaySnapshot, programming, traffic, observability.NewGatewayPlaintextGuard(observability.KernelPlaintextGuard), datapath.WireGuardDevice, wireguard.KernelDevice, collectors...)
 	}
 	serverErrors := make(chan error, 2)
 	metricsEnabled, err := observability.MetricsEnabled(os.Getenv("METRICS_ENABLED"))
