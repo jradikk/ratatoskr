@@ -120,3 +120,11 @@ checks. Cover stale Pod/sandbox identities, changed own anchors, revoked
 selection, invalid gateway acknowledgments, backend failures and marker
 withdrawal. Never use a user's runtime socket, profile, token or private key as
 a fixture. Unit tests do not establish runtime/seccomp compatibility.
+
+## Agent readiness versus workload readiness
+
+The agent remains ready when individual workloads cannot be programmed; each
+workload retains its own pending/error state and fail-closed networking. Agent
+readiness fails for node-wide prerequisites such as its own identity/namespace,
+API Pod listing, or unavailable Pod/Gateway/Policy watches. A failed workload does
+not remove a functioning node agent from its metrics Service endpoints.

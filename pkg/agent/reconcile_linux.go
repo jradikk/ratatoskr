@@ -563,7 +563,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		}
 		syncErr := r.Sync(ctx)
 		if r.Ready != nil {
-			r.Ready.Store(syncErr == nil && err == nil)
+			r.Ready.Store(agentReadyAfterSync(syncErr, err))
 		}
 		if syncErr != nil {
 			r.Log.Error("node reconciliation failed", "error", syncErr)
@@ -574,14 +574,23 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			case <-ticker.C:
 			case _, ok := <-pods.ResultChan():
 				if !ok {
+					if r.Ready != nil {
+						r.Ready.Store(false)
+					}
 					r.Log.Warn("pod watch closed; reconnecting")
 				}
 			case _, ok := <-policies.ResultChan():
 				if !ok {
+					if r.Ready != nil {
+						r.Ready.Store(false)
+					}
 					r.Log.Warn("policy watch closed; reconnecting")
 				}
 			case _, ok := <-gateways.ResultChan():
 				if !ok {
+					if r.Ready != nil {
+						r.Ready.Store(false)
+					}
 					r.Log.Warn("gateway watch closed; reconnecting")
 				}
 			}
@@ -606,6 +615,28 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// Workload failures describe isolated Pod setup failures, not loss of the
+// agent's ability to watch, inspect, and reconcile workloads on this node.
+type workloadReconciliationFailures struct{ count int }
+
+func (e *workloadReconciliationFailures) Error() string {
+	return fmt.Sprintf("%d pod reconciliations failed", e.count)
+}
+
+func agentReadyAfterSync(syncErr, watchErr error) bool {
+	if watchErr != nil {
+		return false
+	}
+	if syncErr == nil {
+		return true
+	}
+	// Only Sync's top-level aggregate is workload-only. Wrappers can represent
+	// infrastructure failures and must not be classified as healthy.
+	_, workloadOnly := syncErr.(*workloadReconciliationFailures) //nolint:errorlint // Intentionally reject wrapped or joined errors.
+	return workloadOnly
+}
+
 func (r *Reconciler) Sync(ctx context.Context) error {
 	if err := r.VerifyOwnPod(ctx); err != nil {
 		return fmt.Errorf("recheck own agent Pod before sync: %w", err)
@@ -629,7 +660,7 @@ func (r *Reconciler) Sync(ctx context.Context) error {
 		}
 	}
 	if count != 0 {
-		return fmt.Errorf("%d pod reconciliations failed", count)
+		return &workloadReconciliationFailures{count: count}
 	}
 	return nil
 }
