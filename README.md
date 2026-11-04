@@ -22,6 +22,20 @@ fallback for traffic selected for the gateway.**
 - **Application-friendly defaults:** the node agent handles network programming;
   application containers do not need network-administration capabilities.
 
+### Opt in with a Pod annotation
+
+For an application whose chart exposes Pod-template annotations but not labels,
+set `ratatoskr.skaldhall.io/gateway: <gateway-name>` under the **Pod template's
+annotations** (for example `spec.template.metadata.annotations` on a Deployment).
+On Pod CREATE, admission copies that value to the same Pod label, which the
+controller and network policy use; it leaves the annotation intact. Do not
+confuse a Deployment's own metadata with its Pod-template metadata. A gateway
+label remains supported; if both are present, their values must match. Changing
+or removing either representation on a live selected Pod is denied; update the
+Pod template and recreate/roll the Pods instead. Admission must be installed on
+Kubernetes **1.29 or newer** to select annotation-only Pods. This does not
+change an existing Deployment selector or bypass gateway namespace authorization.
+
 ## How it works
 
 ```mermaid

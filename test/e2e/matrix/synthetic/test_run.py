@@ -59,8 +59,9 @@ class FakeAPI:
                  ("egressgateways.ratatoskr.skaldhall.io", "/validate-v1alpha1"),
                  ("egresspolicies.ratatoskr.skaldhall.io", "/validate-v1alpha1")]
         hooks = [{"name": name, "failurePolicy": "Fail", "sideEffects": "None",
-                  "objectSelector": {"matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway",
-                                                            "operator": "Exists"}]} if name.startswith("pods.") else None,
+                  "matchConditions": [{"name": "gateway-opt-in", "expression":
+                      run.webhook_match.CREATE if path == "/mutate-v1alpha1-pod" else run.webhook_match.UPDATE}]
+                      if name.startswith("pods.") else None,
                   "rules": [{"resources": [name.split(".")[0]],
                              "operations": ["CREATE"] if path == "/mutate-v1alpha1-pod" else ["CREATE", "UPDATE"]}],
                   "clientConfig": {"caBundle": "public", "service": {"namespace": "operator", "path": path}}}

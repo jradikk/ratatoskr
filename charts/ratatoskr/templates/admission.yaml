@@ -12,10 +12,11 @@ webhooks:
     failurePolicy: Fail
     reinvocationPolicy: Never
     matchPolicy: Equivalent
-    objectSelector:
-      matchExpressions:
-        - key: ratatoskr.skaldhall.io/gateway
-          operator: Exists
+    matchConditions:
+      - name: gateway-opt-in
+        expression: >-
+          (has(object.metadata.labels) && 'ratatoskr.skaldhall.io/gateway' in object.metadata.labels) ||
+          (has(object.metadata.annotations) && 'ratatoskr.skaldhall.io/gateway' in object.metadata.annotations)
     clientConfig:
       service:
         name: ratatoskr-webhook
@@ -42,10 +43,13 @@ webhooks:
     timeoutSeconds: 10
     failurePolicy: Fail
     matchPolicy: Equivalent
-    objectSelector:
-      matchExpressions:
-        - key: ratatoskr.skaldhall.io/gateway
-          operator: Exists
+    matchConditions:
+      - name: gateway-opt-in
+        expression: >-
+          (has(object.metadata.labels) && 'ratatoskr.skaldhall.io/gateway' in object.metadata.labels) ||
+          (has(object.metadata.annotations) && 'ratatoskr.skaldhall.io/gateway' in object.metadata.annotations) ||
+          (request.operation == 'UPDATE' && oldObject != null && has(oldObject.metadata.labels) && 'ratatoskr.skaldhall.io/gateway' in oldObject.metadata.labels) ||
+          (request.operation == 'UPDATE' && oldObject != null && has(oldObject.metadata.annotations) && 'ratatoskr.skaldhall.io/gateway' in oldObject.metadata.annotations)
     clientConfig:
       service:
         name: ratatoskr-webhook

@@ -9,6 +9,14 @@ import subprocess
 import time
 import uuid
 
+try:
+    from . import webhook_match
+except ImportError:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("synthetic_webhook_match", Path(__file__).with_name("webhook_match.py"))
+    webhook_match = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(webhook_match)
+
 PREFIX = "ratatoskr.skaldhall.io/"
 CHECKS = ("api-release-preflight", "api-crd-server-dry-run", "api-authorized-mutation-validation",
           "api-unauthorized-denial", "api-security-fields", "api-ebpf-wireguard-rejection", "api-cleanup")
@@ -259,8 +267,8 @@ def release_preflight(api, expected_ids):
             raise Blocked("Webhook rules do not cover required API operations.")
         if hook.get("clientConfig", {}).get("service", {}).get("path") == "/mutate-v1alpha1-pod" and any(set(rule.get("operations", [])) != {"CREATE"} for rule in hook.get("rules", [])):
             raise Blocked("Pod mutation must remain CREATE-only for independent UPDATE validation evidence.")
-        if target == "pods" and hook.get("objectSelector") != {"matchExpressions": [{"key": PREFIX + "gateway", "operator": "Exists"}]}:
-            raise Blocked("Pod webhook selector differs from expected opt-in contract.")
+        if target == "pods" and not webhook_match.matches(hook, validate=required_operations != {"CREATE"}):
+            raise Blocked("Pod webhook match conditions differ from expected opt-in contract.")
     namespace = mutation["webhooks"][0]["clientConfig"]["service"]["namespace"]
     modes = []
     for component in ("controller", "webhook"):

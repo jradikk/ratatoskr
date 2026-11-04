@@ -282,9 +282,21 @@ def check(docs, driver, datapath="iproute", socket="/run/containerd/containerd.s
         assert hook["clientConfig"]["service"]["port"] == 443
         assert "caBundle" not in hook["clientConfig"]
     for hook in (mutating[0], validating[0]):
-        assert hook["objectSelector"]["matchExpressions"] == [{
-            "key": "ratatoskr.skaldhall.io/gateway", "operator": "Exists"
-        }]
+        assert "objectSelector" not in hook
+        conditions = hook["matchConditions"]
+        assert len(conditions) == 1 and conditions[0]["name"] == "gateway-opt-in"
+        expression = conditions[0]["expression"]
+        assert ("'ratatoskr.skaldhall.io/gateway' in object.metadata.labels" in expression and
+                "'ratatoskr.skaldhall.io/gateway' in object.metadata.annotations" in expression and
+                "has(object.metadata.labels)" in expression and
+                "has(object.metadata.annotations)" in expression)
+        if hook is validating[0]:
+            assert ("request.operation == 'UPDATE'" in expression and
+                    "oldObject != null" in expression and
+                    "'ratatoskr.skaldhall.io/gateway' in oldObject.metadata.labels" in expression and
+                    "'ratatoskr.skaldhall.io/gateway' in oldObject.metadata.annotations" in expression)
+        else:
+            assert "oldObject" not in expression
         assert hook["rules"][0]["resources"] == ["pods"]
         assert hook["rules"][0]["apiGroups"] == [""]
     assert mutating[0]["rules"][0]["operations"] == ["CREATE"]

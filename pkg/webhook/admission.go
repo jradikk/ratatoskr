@@ -123,6 +123,24 @@ func (h *Handler) auditAdmission(ctx context.Context, req admission.Request, sta
 		"allowed", response.Allowed, "category", admissionCategory(response))
 }
 
+// gatewaySelection makes annotation opt-in visible to the existing label-based
+// controller/network-policy datapath. Only CREATE mutation may add the label;
+// conflicting representations and malformed names always fail closed.
+func gatewaySelection(pod *corev1.Pod) (string, error) {
+	label, annotation := pod.Labels[GatewayLabel], pod.Annotations[GatewayLabel]
+	if label != "" && annotation != "" && label != annotation {
+		return "", fmt.Errorf("gateway label and annotation conflict")
+	}
+	value := label
+	if value == "" {
+		value = annotation
+	}
+	if value != "" && !validSecretName(value) {
+		return "", fmt.Errorf("gateway selection name is invalid")
+	}
+	return value, nil
+}
+
 func (h *Handler) MutatePod(ctx context.Context, req admission.Request) (response admission.Response) {
 	defer func() { h.auditAdmission(ctx, req, "mutate", response) }()
 	if req.Operation != admissionv1.Create {
@@ -132,10 +150,17 @@ func (h *Handler) MutatePod(ctx context.Context, req admission.Request) (respons
 	if err := json.Unmarshal(req.Object.Raw, &pod); err != nil {
 		return denied(err)
 	}
-	name := pod.Labels[GatewayLabel]
+	name, err := gatewaySelection(&pod)
+	if err != nil {
+		return denied(err)
+	}
 	if name == "" {
 		return admission.Allowed("not opted in")
 	}
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[GatewayLabel] = name
 	if err := h.validateModes(); err != nil {
 		return denied(err)
 	}
@@ -525,8 +550,15 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) (response
 			return denied(err)
 		}
 		if req.Operation == admissionv1.Create {
-			if pod.Labels[GatewayLabel] == "" {
+			selected, err := gatewaySelection(&pod)
+			if err != nil {
+				return denied(err)
+			}
+			if selected == "" {
 				return admission.Allowed("not opted in")
+			}
+			if pod.Labels[GatewayLabel] != selected {
+				return denied(fmt.Errorf("gateway annotation requires mutated gateway label on CREATE"))
 			}
 			for _, key := range []string{prefix + "agent-config", prefix + "agent-hash", prefix + "agent-backend", prefix + "quarantine-reason"} {
 				if _, supplied := pod.Annotations[key]; supplied {
@@ -545,6 +577,7 @@ func (h *Handler) Validate(ctx context.Context, req admission.Request) (response
 		// Mutation only runs on CREATE. Changing gateway selection on any UPDATE,
 		// including Pending pods, could start a workload without the injected init.
 		if !sameMapEntry(old.Labels, pod.Labels, GatewayLabel) ||
+			!sameMapEntry(old.Annotations, pod.Annotations, GatewayLabel) ||
 			!sameMapEntry(old.Labels, pod.Labels, GatewayNamespace) ||
 			!sameMapEntry(old.Annotations, pod.Annotations, GatewayNamespace) {
 			return denied(fmt.Errorf("pod gateway opt-in and gateway namespace are immutable; change the Deployment template and recreate the pod"))

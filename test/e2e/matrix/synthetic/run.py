@@ -13,9 +13,15 @@ import sys
 import time
 try:
     from . import node_images, environment as synthetic_environment
+    from .. import webhook_match
 except ImportError:
     import node_images
     import environment as synthetic_environment
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("synthetic_webhook_match", Path(__file__).resolve().parents[1] / "webhook_match.py")
+    webhook_match = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(webhook_match)
 
 CONTEXT = synthetic_environment.FLANNEL.context
 PROBE = "http://10.88.0.1:8080/exit"
@@ -168,9 +174,8 @@ def preflight(api, ids, *, environment=synthetic_environment.FLANNEL):
         if not any(target in rule.get("resources", []) and operations <= set(rule.get("operations", []))
                    for rule in hook.get("rules", [])):
             raise Blocked("Webhook rule does not cover required operations.")
-        if target == "pods" and hook.get("objectSelector") != {
-                "matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway", "operator": "Exists"}]}:
-            raise Blocked("Pod webhook selector differs from opt-in contract.")
+        if target == "pods" and not webhook_match.matches(hook, validate=path != "/mutate-v1alpha1-pod"):
+            raise Blocked("Pod webhook match conditions differ from opt-in contract.")
         if path == "/mutate-v1alpha1-pod" and any(set(rule.get("operations", [])) != {"CREATE"}
                                                     for rule in hook.get("rules", [])):
             raise Blocked("Pod mutation must be CREATE-only.")
@@ -258,8 +263,7 @@ def preflight_basics(api, *, environment=synthetic_environment.FLANNEL):
         ops = {"CREATE"} if path == "/mutate-v1alpha1-pod" else {"CREATE", "UPDATE"}
         if (not any(target in rule.get("resources", []) and ops <= set(rule.get("operations", []))
                     for rule in hook.get("rules", [])) or
-                target == "pods" and hook.get("objectSelector") != {
-                    "matchExpressions": [{"key": "ratatoskr.skaldhall.io/gateway", "operator": "Exists"}]}):
+                target == "pods" and not webhook_match.matches(hook, validate=path != "/mutate-v1alpha1-pod")):
             raise Blocked("Init release webhook admission rules mismatch.")
     namespace = mutation["webhooks"][0]["clientConfig"]["service"]["namespace"]
     if not namespace or any(h["clientConfig"]["service"].get("namespace") != namespace for h in hooks):
