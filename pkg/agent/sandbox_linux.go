@@ -101,7 +101,7 @@ func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, n
 	if err != nil {
 		return nil, proof, err
 	}
-	fd, err := unix.PidfdOpen(pid, 0)
+	fd, err := retryInterrupted(func() (int, error) { return unix.PidfdOpen(pid, 0) })
 	if err != nil {
 		return nil, proof, fmt.Errorf("pin sandbox PID: %w", err)
 	}
@@ -136,7 +136,7 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	fd, err := unix.PidfdOpen(pid, 0)
+	fd, err := retryInterrupted(func() (int, error) { return unix.PidfdOpen(pid, 0) })
 	if err != nil {
 		return nil, fmt.Errorf("pin sandbox PID: %w", err)
 	}
@@ -157,7 +157,7 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 
 func checkPIDCgroup(fd, pid int, uid string) error {
 	if err := checkPIDAlive(fd); err != nil {
-		return fmt.Errorf("sandbox PID exited: %w", err)
+		return fmt.Errorf("verify sandbox PID liveness: %w", err)
 	}
 	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
 	if err != nil {
@@ -232,11 +232,18 @@ func recheckSandbox(ctx context.Context, service cri.RuntimeServiceClient, p san
 // whose namespace might remain pinned elsewhere. PID reuse cannot replace the
 // process represented by this fd.
 func checkPIDAlive(pidfd int) error {
+	return checkPIDAliveWithPoll(pidfd, unix.Poll)
+}
+
+func checkPIDAliveWithPoll(pidfd int, poll func([]unix.PollFd, int) (int, error)) error {
 	if pidfd < 0 || pidfd > math.MaxInt32 {
 		return errors.New("invalid pidfd")
 	}
 	fds := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
-	n, err := unix.Poll(fds, 0)
+	n, err := retryInterrupted(func() (int, error) {
+		fds[0].Revents = 0
+		return poll(fds, 0)
+	})
 	if err != nil {
 		return err
 	}
@@ -259,7 +266,7 @@ func validateNetworkNamespaceFD(f *os.File) error {
 	if fs.Type != int64(unix.NSFS_MAGIC) {
 		return errors.New("CRI path does not name an nsfs namespace")
 	}
-	nstype, err := unix.IoctlRetInt(int(f.Fd()), unix.NS_GET_NSTYPE)
+	nstype, err := retryInterrupted(func() (int, error) { return unix.IoctlRetInt(int(f.Fd()), unix.NS_GET_NSTYPE) })
 	if err != nil {
 		return fmt.Errorf("query CRI namespace type: %w", err)
 	}
@@ -278,12 +285,16 @@ func openContainedNetns(path string) (*os.File, error) {
 	if rel == "" || strings.Contains(rel, "/") || rel == "." || rel == ".." {
 		return nil, errors.New("netns path is not a direct child")
 	}
-	root, err := unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	root, err := retryInterrupted(func() (int, error) {
+		return unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	})
 	if err != nil {
 		return nil, err
 	}
 	defer unix.Close(root)
-	fd, err := unix.Openat2(root, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	fd, err := retryInterrupted(func() (int, error) {
+		return unix.Openat2(root, rel, &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC, Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open contained CRI network namespace: %w", err)
 	}
