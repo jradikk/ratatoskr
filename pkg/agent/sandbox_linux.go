@@ -111,20 +111,20 @@ func Sandbox(ctx context.Context, service cri.RuntimeServiceClient, namespace, n
 		return nil, sandboxProof{pidfd: -1}, err
 	}
 	if err = checkPIDCgroup(fd, pid, uid); err != nil {
-		return fail(err)
+		return fail(fmt.Errorf("verify sandbox PID cgroup and liveness: %w", err))
 	}
 	f, err := openContainedNetns(path)
 	if err != nil {
 		return fail(fmt.Errorf("open verified sandbox netns: %w", err))
 	}
-	if err = unix.Fstat(int(f.Fd()), &proof.inode); err != nil {
+	if err = statPinnedNamespace(int(f.Fd()), &proof.inode); err != nil {
 		f.Close()
-		return fail(err)
+		return fail(fmt.Errorf("stat pinned CRI namespace FD: %w", err))
 	}
 	proof.id, proof.namespace, proof.name, proof.uid, proof.podIP, proof.pid, proof.path = item.GetId(), namespace, name, uid, podIP, pid, path
 	if err = recheckSandbox(ctx, service, proof, f); err != nil {
 		f.Close()
-		return fail(err)
+		return fail(fmt.Errorf("recheck pinned CRI sandbox proof: %w", err))
 	}
 	return f, proof, nil
 }
@@ -157,7 +157,7 @@ func openSandboxNetns(info map[string]string, uid string) (*os.File, error) {
 
 func checkPIDCgroup(fd, pid int, uid string) error {
 	if err := checkPIDAlive(fd); err != nil {
-		return fmt.Errorf("verify sandbox PID liveness: %w", err)
+		return fmt.Errorf("poll sandbox PID liveness: %w", err)
 	}
 	cgroup, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
 	if err != nil {
@@ -166,21 +166,41 @@ func checkPIDCgroup(fd, pid int, uid string) error {
 	if !strings.Contains(string(cgroup), uid) && !strings.Contains(string(cgroup), strings.ReplaceAll(uid, "-", "_")) {
 		return errors.New("sandbox PID cgroup does not match Pod UID")
 	}
-	return checkPIDAlive(fd)
+	if err := checkPIDAlive(fd); err != nil {
+		return fmt.Errorf("poll sandbox PID liveness after cgroup read: %w", err)
+	}
+	return nil
 }
+
+// statPinnedNamespace reinitializes the result on every attempt; a failed
+// fstat must never be compared against a previous successful inode.
+func statPinnedNamespace(fd int, out *unix.Stat_t) error {
+	return statPinnedNamespaceWith(fd, out, unix.Fstat)
+}
+func statPinnedNamespaceWith(fd int, out *unix.Stat_t, stat func(int, *unix.Stat_t) error) error {
+	return retryInterruptedErr(func() error {
+		*out = unix.Stat_t{}
+		return stat(fd, out)
+	})
+}
+
 func recheckSandbox(ctx context.Context, service cri.RuntimeServiceClient, p sandboxProof, f *os.File) error {
+	return recheckSandboxWithStat(ctx, service, p, f, unix.Fstat)
+}
+
+func recheckSandboxWithStat(ctx context.Context, service cri.RuntimeServiceClient, p sandboxProof, f *os.File, stat func(int, *unix.Stat_t) error) error {
 	if f == nil || p.id == "" || p.uid == "" || p.pid <= 1 || p.path == "" || p.pidfd < 0 {
 		return errors.New("incomplete pinned CRI sandbox proof")
 	}
 	var current unix.Stat_t
-	if err := unix.Fstat(int(f.Fd()), &current); err != nil {
-		return err
+	if err := statPinnedNamespaceWith(int(f.Fd()), &current, stat); err != nil {
+		return fmt.Errorf("stat pinned CRI namespace FD: %w", err)
 	}
 	if !sameNetns(current, p.inode) {
 		return errors.New("pinned CRI namespace FD changed")
 	}
 	if err := checkPIDCgroup(p.pidfd, p.pid, p.uid); err != nil {
-		return err
+		return fmt.Errorf("recheck sandbox PID cgroup and liveness: %w", err)
 	}
 	resp, err := service.PodSandboxStatus(ctx, &cri.PodSandboxStatusRequest{PodSandboxId: p.id, Verbose: true})
 	if err != nil {
@@ -215,17 +235,20 @@ func recheckSandbox(ctx context.Context, service cri.RuntimeServiceClient, p san
 	}
 	fresh, err := openContainedNetns(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("reopen confined CRI network namespace: %w", err)
 	}
 	defer fresh.Close()
 	var observed unix.Stat_t
-	if err = unix.Fstat(int(fresh.Fd()), &observed); err != nil {
-		return err
+	if err = statPinnedNamespaceWith(int(fresh.Fd()), &observed, stat); err != nil {
+		return fmt.Errorf("stat reopened CRI namespace FD: %w", err)
 	}
 	if !sameNetns(observed, p.inode) {
 		return errors.New("rechecked CRI netns path no longer matches pinned FD")
 	}
-	return checkPIDCgroup(p.pidfd, p.pid, p.uid)
+	if err := checkPIDCgroup(p.pidfd, p.pid, p.uid); err != nil {
+		return fmt.Errorf("final sandbox PID cgroup and liveness recheck: %w", err)
+	}
+	return nil
 }
 
 // Polling a pidfd distinguishes a live sandbox process from a dead process
@@ -260,7 +283,10 @@ func validateNetworkNamespaceFD(f *os.File) error {
 		return errors.New("network namespace FD unavailable")
 	}
 	var fs unix.Statfs_t
-	if err := unix.Fstatfs(int(f.Fd()), &fs); err != nil {
+	if err := retryInterruptedErr(func() error {
+		fs = unix.Statfs_t{}
+		return unix.Fstatfs(int(f.Fd()), &fs)
+	}); err != nil {
 		return fmt.Errorf("stat CRI namespace filesystem: %w", err)
 	}
 	if fs.Type != int64(unix.NSFS_MAGIC) {
@@ -289,7 +315,7 @@ func openContainedNetns(path string) (*os.File, error) {
 		return unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open CRI namespace directory: %w", err)
 	}
 	defer unix.Close(root)
 	fd, err := retryInterrupted(func() (int, error) {
@@ -305,7 +331,7 @@ func openContainedNetns(path string) (*os.File, error) {
 	}
 	if err := rejectOwn(f); err != nil {
 		f.Close()
-		return nil, err
+		return nil, fmt.Errorf("verify CRI namespace is not the agent namespace: %w", err)
 	}
 	return f, nil
 }
@@ -335,10 +361,47 @@ func rejectOwn(f *os.File) error {
 		return err
 	}
 	var target unix.Stat_t
-	if err := unix.Fstat(int(f.Fd()), &target); err != nil {
-		return err
+	if err := statPinnedNamespace(int(f.Fd()), &target); err != nil {
+		return fmt.Errorf("stat CRI namespace FD before own-namespace rejection: %w", err)
 	}
 	return rejectForbiddenNetns(target, own)
+}
+
+// switchThreadNamespace cannot assume that EINTR implies setns did not take
+// effect. Inspect the locked thread after each interruption; retry only when
+// it is still in the source namespace, and never execute caller code from an
+// unexpected namespace. An exhausted restoration error is fatal to the caller.
+func switchThreadNamespace(source, destination unix.Stat_t, fd int) error {
+	return switchThreadNamespaceWith(source, destination, fd, unix.Setns, func() (unix.Stat_t, error) {
+		var current unix.Stat_t
+		err := retryInterruptedErr(func() error {
+			current = unix.Stat_t{}
+			return unix.Stat("/proc/thread-self/ns/net", &current)
+		})
+		return current, err
+	})
+}
+func switchThreadNamespaceWith(source, destination unix.Stat_t, fd int, setns func(int, int) error, current func() (unix.Stat_t, error)) error {
+	for attempt := 0; attempt < 16; attempt++ {
+		err := setns(fd, unix.CLONE_NEWNET)
+		if err != nil && !errors.Is(err, unix.EINTR) {
+			return err
+		}
+		observed, statErr := current()
+		if statErr != nil {
+			return fmt.Errorf("verify namespace after setns: %w", statErr)
+		}
+		if sameNetns(observed, destination) {
+			return nil
+		}
+		if !sameNetns(observed, source) {
+			return errors.New("thread left verified namespace during setns")
+		}
+		if err == nil {
+			return errors.New("setns returned success without namespace transition")
+		}
+	}
+	return unix.EINTR
 }
 
 // InNamespace pins the calling thread throughout backend creation and execution.
@@ -359,11 +422,25 @@ func InNamespace(target *os.File, fn func() error) (err error) {
 	if e = rejectOwn(target); e != nil {
 		return e
 	}
-	if e = unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); e != nil {
+	own, e := ownStat()
+	if e != nil {
 		return e
 	}
+	var destination unix.Stat_t
+	if e = statPinnedNamespace(int(target.Fd()), &destination); e != nil {
+		return fmt.Errorf("stat target namespace before setns: %w", e)
+	}
+	if e = switchThreadNamespace(own, destination, int(target.Fd())); e != nil {
+		// Even a failed setns cannot be assumed to have left the thread in the
+		// source namespace. Never return this OS thread to the Go scheduler if
+		// a transition occurred but restoration cannot be established.
+		if ownErr := checkThreadOwn(); ownErr != nil {
+			panic(errors.Join(e, fmt.Errorf("failed entry left agent namespace: %w", ownErr)))
+		}
+		return fmt.Errorf("enter verified workload namespace: %w", e)
+	}
 	defer func() {
-		if restore := unix.Setns(int(original.Fd()), unix.CLONE_NEWNET); restore != nil {
+		if restore := switchThreadNamespace(destination, own, int(original.Fd())); restore != nil {
 			panic(errors.Join(err, fmt.Errorf("restore agent namespace: %w", restore)))
 		}
 		if e := checkThreadOwn(); e != nil {

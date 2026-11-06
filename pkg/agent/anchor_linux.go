@@ -104,8 +104,8 @@ func validateOwnAnchor(fd *os.File) (*ownNamespaceAnchor, error) {
 		return nil, fmt.Errorf("verify own namespace: %w", err)
 	}
 	anchor := &ownNamespaceAnchor{fd: fd}
-	if err := unix.Fstat(int(fd.Fd()), &anchor.stat); err != nil {
-		return nil, err
+	if err := statPinnedNamespace(int(fd.Fd()), &anchor.stat); err != nil {
+		return nil, fmt.Errorf("stat own namespace anchor: %w", err)
 	}
 	if anchor.stat.Ino == 0 {
 		return nil, errors.New("invalid agent network namespace")
@@ -119,8 +119,8 @@ func ownStat() (unix.Stat_t, error) {
 		return unix.Stat_t{}, errors.New("verified agent network namespace bootstrap required")
 	}
 	var own unix.Stat_t
-	if err := unix.Fstat(int(a.fd.Fd()), &own); err != nil {
-		return own, err
+	if err := statPinnedNamespace(int(a.fd.Fd()), &own); err != nil {
+		return own, fmt.Errorf("stat pinned own namespace anchor: %w", err)
 	}
 	if !sameNetns(own, a.stat) {
 		return own, errors.New("verified agent network namespace anchor changed")
@@ -134,8 +134,11 @@ func checkThreadOwn() error {
 		return err
 	}
 	var current unix.Stat_t
-	if err := unix.Stat("/proc/thread-self/ns/net", &current); err != nil {
-		return err
+	if err := retryInterruptedErr(func() error {
+		current = unix.Stat_t{}
+		return unix.Stat("/proc/thread-self/ns/net", &current)
+	}); err != nil {
+		return fmt.Errorf("stat agent thread network namespace: %w", err)
 	}
 	if !sameNetns(current, own) {
 		return errors.New("agent thread not in verified own network namespace")

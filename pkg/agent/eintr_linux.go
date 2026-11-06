@@ -19,3 +19,10 @@ func retryInterrupted(operation func() (int, error)) (int, error) {
 	}
 	return -1, unix.EINTR
 }
+
+// retryInterruptedErr is only for operations whose EINTR outcome can be
+// retried without an ambiguous side effect (e.g. stat on an already-pinned FD).
+func retryInterruptedErr(operation func() error) error {
+	_, err := retryInterrupted(func() (int, error) { return 0, operation() })
+	return err
+}

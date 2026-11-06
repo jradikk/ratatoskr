@@ -346,7 +346,7 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 	}
 	if old := r.domainRuntime(uid); old != nil && !old.retired.Load() {
 		var inode unix.Stat_t
-		if err = unix.Fstat(int(target.Fd()), &inode); err != nil || !sameNetns(inode, old.inode) || old.gatewayUID != string(gw.UID) {
+		if err = statPinnedNamespace(int(target.Fd()), &inode); err != nil || !sameNetns(inode, old.inode) || old.gatewayUID != string(gw.UID) {
 			return r.poisonDomain(old, target, pod, errors.New("domain sandbox or gateway replaced"))
 		}
 		if err = r.domainOperations().enter(target, func() error { return r.domainOperations().verifyRedirect(ip) }); err == nil {
@@ -370,7 +370,7 @@ func (r *Reconciler) startDomain(ctx context.Context, pod *corev1.Pod, gw *api.E
 		return e
 	}
 	rt.netns = os.NewFile(uintptr(fd), "selected-dns-netns")
-	if err = unix.Fstat(fd, &rt.inode); err != nil {
+	if err = statPinnedNamespace(fd, &rt.inode); err != nil {
 		rt.close()
 		return err
 	}
