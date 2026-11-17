@@ -129,8 +129,9 @@ func (s *gatewayConfigSource) Snapshot() (datapath.GatewayConfig, string, error)
 	return s.config, s.hash, s.err
 }
 
-// One bounded GET+WATCH cycle; watch expiration/EOF is a full invalidation
-// before resync rather than a stale applied-hash acknowledgment.
+// One bounded GET+WATCH cycle. Graceful server watch expiry/EOF is ordinary
+// renewal: retain the last verified config only until the next bounded GET
+// confirms it. Explicit watch errors and deleted objects revoke immediately.
 func (s *gatewayConfigSource) watchOnce(ctx context.Context) error {
 	// During resync, GET and watch creation do not grant a stale acknowledgment.
 	requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -145,19 +146,23 @@ func (s *gatewayConfigSource) watchOnce(ctx context.Context) error {
 		return err
 	}
 	defer watcher.Stop()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	s.accept(cm)
 	if _, _, err := s.Snapshot(); err != nil {
 		return err
 	}
-	// Server-enforced watch timeouts close the result stream; the runner first
-	// revokes its hash, then performs a fresh GET/watch before trusting bytes.
+	// Server-enforced watch timeouts close the result stream. An ordinary EOF
+	// retains its last verified hash only until immediate bounded GET/watch
+	// renewal; a failed renewal revokes before another gateway refresh.
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return errors.New("gateway config watch closed")
+				return nil // normal server watch timeout; resync immediately
 			}
 			if event.Type == watch.Error {
 				return errors.New("gateway config watch error")
@@ -182,17 +187,23 @@ func (s *gatewayConfigSource) watchOnce(ctx context.Context) error {
 }
 func (s *gatewayConfigSource) run(ctx context.Context) {
 	for ctx.Err() == nil {
-		if err := s.watchOnce(ctx); err != nil && ctx.Err() == nil {
-			s.invalidate(errors.New("gateway config watch requires resync"))
+		if err := s.watchOnce(ctx); err == nil {
+			// A clean EOF is routine Kubernetes watch renewal. A fresh GET and
+			// watch start immediately, without withdrawing identical applied data.
+			continue
+		} else if ctx.Err() == nil {
+			s.invalidate(errors.New("gateway config watch unavailable"))
 		}
 		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			s.invalidate(errors.New("gateway config source stopped"))
 			return
 		case <-timer.C:
 		}
 	}
+	s.invalidate(errors.New("gateway config source stopped"))
 }
 
 func sourceWake(source *gatewayConfigSource) <-chan struct{} {

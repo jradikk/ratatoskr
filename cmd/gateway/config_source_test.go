@@ -176,3 +176,102 @@ func TestGatewayAPIConfigEventRefreshWithoutProbeTicker(t *testing.T) {
 		t.Fatal("watch cancellation blocked")
 	}
 }
+
+// Normal server watch expiry must NOT revoke an unchanged applied hash every
+// TimeoutSeconds=30. Resync GET/watch is immediate; failure instead revokes it.
+func TestGatewayAPIConfigNormalWatchRenewalKeepsAckUntilBoundedGET(t *testing.T) {
+	reader := &cmReader{cm: configCM(configA, "10"), stream: watch.NewFake()}
+	source := testAPISource(reader)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { source.run(ctx); close(done) }()
+	select {
+	case <-source.notify:
+	case <-time.After(time.Second):
+		t.Fatal("initial watch not ready")
+	}
+	_, hash, err := source.Snapshot()
+	if err != nil || hash != configHash(configA) {
+		t.Fatalf("initial hash=%s err=%v", hash, err)
+	}
+	reader.mu.Lock()
+	stream := reader.stream
+	reader.stream = watch.NewFake()
+	reader.mu.Unlock()
+	stream.Stop() // Kubernetes server's ordinary timeout/EOF
+	deadline := time.Now().Add(time.Second)
+	for {
+		reader.mu.Lock()
+		count := reader.watchCount
+		reader.mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("normal watch not immediately renewed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, hash, err = source.Snapshot()
+	if err != nil || hash != configHash(configA) {
+		t.Fatalf("watch renewal withdrew stable ack hash=%s err=%v", hash, err)
+	}
+	select {
+	case <-source.notify:
+		t.Fatal("normal renewal falsely signaled config invalidation")
+	default:
+	}
+	reader.mu.Lock()
+	next := reader.stream
+	reader.mu.Unlock()
+	next.Stop()
+	reader.mu.Lock()
+	reader.getErr = errors.New("GET forbidden")
+	reader.mu.Unlock()
+	select {
+	case <-source.notify:
+	case <-time.After(time.Second):
+		t.Fatal("failed renewal GET did not revoke ack")
+	}
+	_, hash, err = source.Snapshot()
+	if err == nil || hash != "" {
+		t.Fatalf("GET failure kept stale ack hash=%q err=%v", hash, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watch runner did not stop")
+	}
+}
+
+func TestGatewayAPIConfigExplicitWatchErrorRevokesImmediately(t *testing.T) {
+	reader := &cmReader{cm: configCM(configA, "10"), stream: watch.NewFake()}
+	source := testAPISource(reader)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { source.run(ctx); close(done) }()
+	select {
+	case <-source.notify:
+	case <-time.After(time.Second):
+		t.Fatal("initial watch not ready")
+	}
+	reader.stream.Error(&metav1.Status{Reason: metav1.StatusReasonForbidden})
+	select {
+	case <-source.notify:
+	case <-time.After(time.Second):
+		t.Fatal("watch error retained ack")
+	}
+	_, hash, err := source.Snapshot()
+	if err == nil || hash != "" {
+		t.Fatalf("watch error retained stale hash %s err=%v", hash, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watch runner did not stop")
+	}
+}
