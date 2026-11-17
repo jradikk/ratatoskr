@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+
+	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 const gatewayOwnerUID = "a76addbc-e3ad-4d04-a61b-c13d9876c2ab"
@@ -167,7 +168,10 @@ func TestGatewayAPIConfigEventRefreshWithoutProbeTicker(t *testing.T) {
 	}
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("watch cancellation blocked")
 	}

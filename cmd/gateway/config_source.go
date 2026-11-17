@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
-	"github.com/skaldhall/ratatoskr/pkg/datapath"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -17,6 +15,9 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
+	"github.com/skaldhall/ratatoskr/pkg/datapath"
 )
 
 // gatewayConfigSource owns a single name-scoped API watch and zero trusted
