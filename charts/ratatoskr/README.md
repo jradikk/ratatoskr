@@ -24,17 +24,17 @@ install a published version:
 
 ```sh
 helm upgrade --install ratatoskr oci://ghcr.io/jradikk/charts/ratatoskr \
-  --version 0.1.0 --values ratatoskr-values.yaml \
+  --version 0.4.2 --values ratatoskr-values.yaml \
   --namespace ratatoskr-system --create-namespace --wait --timeout 5m
 ```
 
-The [project quickstart](../../README.md#install-with-helm) walks through the
+The [project quickstart](../../README.md#getting-started) walks through the
 values file, VPN Secret, gateway, namespace authorization, and workload setup.
 For an offline/mirrored chart, substitute its archive or local chart directory
 for the OCI reference. Use a version available in the registry.
 
 The default image registry is `ghcr.io/jradikk`; the default tag is the chart
-`appVersion` (`0.1.0`). Use `image.registry`, `image.tag` and
+`appVersion`, which the release workflow sets to the released version. Use `image.registry`, `image.tag` and
 `image.pullPolicy` if your verified images are mirrored or locally imported.
 `operatorNamespace`, if set, must equal the Helm release namespace. Once ready,
 create an EgressGateway and label eligible workload Pods

@@ -11,9 +11,9 @@ Each profile needs its own provider-approved OpenVPN credentials/configuration.
 Create the Secrets in the same namespace as the gateway:
 
 ```sh
-kubectl create secret generic berlin-vpn-a -n ratatoskr \
+kubectl create secret generic berlin-vpn-a -n ratatoskr-system \
   --from-file=client.ovpn=/private/berlin-a.ovpn
-kubectl create secret generic berlin-vpn-b -n ratatoskr \
+kubectl create secret generic berlin-vpn-b -n ratatoskr-system \
   --from-file=client.ovpn=/private/berlin-b.ovpn
 ```
 
@@ -28,7 +28,7 @@ apiVersion: ratatoskr.skaldhall.io/v1alpha1
 kind: EgressGateway
 metadata:
   name: berlin
-  namespace: ratatoskr
+  namespace: ratatoskr-system
 spec:
   replicas: 1
   upstream:
@@ -57,7 +57,7 @@ The legacy single-Secret form remains available and uses `replicas` as before.
 
 Label the application namespace with `ratatoskr-access=berlin`, and its Pod
 template with `ratatoskr.skaldhall.io/gateway: berlin`. If the operator is installed
-elsewhere, also set `ratatoskr.skaldhall.io/gateway-namespace: ratatoskr` on the
+elsewhere, also set `ratatoskr.skaldhall.io/gateway-namespace: <operator-namespace>` on the
 application Pod template. Namespace authorization still applies to the pool.
 
 ## Balancing and updates
@@ -78,8 +78,8 @@ application Pod template. Namespace authorization still applies to the pool.
 Inspect the pool with:
 
 ```sh
-kubectl get deployments,pods -n ratatoskr
-kubectl describe egressgateway berlin -n ratatoskr
+kubectl get deployments,pods -n ratatoskr-system
+kubectl describe egressgateway berlin -n ratatoskr-system
 ```
 
 The [Grafana dashboard](monitoring.md) distinguishes gateway Pods and profile

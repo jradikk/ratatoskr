@@ -30,7 +30,7 @@ metadata:
 spec:
   gatewayRef:
     name: berlin
-    namespace: ratatoskr
+    namespace: ratatoskr-system
   workloadSelector:
     matchLabels:
       app: my-app
