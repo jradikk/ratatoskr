@@ -111,7 +111,7 @@ func TestGatewayDNSRenderer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objects) != 5 {
+	if len(objects) != 8 {
 		t.Fatalf("expected dedicated DNS Service: %d objects", len(objects))
 	}
 	svc := objects[3].(*corev1.Service)

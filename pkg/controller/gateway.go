@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -559,7 +560,24 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		return r.block(ctx, &gw, "RenderFailed", err)
 	}
+	// Credentials must exist before a new Gateway Deployment starts; keep
+	// render ordering stable for consumers while applying non-Deployments first.
 	for _, obj := range resources {
+		if _, deployment := obj.(*appsv1.Deployment); deployment {
+			continue
+		}
+		if err := r.apply(ctx, &gw, obj); err != nil {
+			var applyErr *applyFailure
+			if errors.As(err, &applyErr) && applyErr.transient {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return r.block(ctx, &gw, "ApplyFailed", err)
+		}
+	}
+	for _, obj := range resources {
+		if _, deployment := obj.(*appsv1.Deployment); !deployment {
+			continue
+		}
 		if err := r.apply(ctx, &gw, obj); err != nil {
 			var applyErr *applyFailure
 			if errors.As(err, &applyErr) && applyErr.transient {
@@ -904,6 +922,12 @@ func applyResource(obj client.Object) string {
 	switch obj.(type) {
 	case *corev1.ConfigMap:
 		return "ConfigMap"
+	case *corev1.ServiceAccount:
+		return "ServiceAccount"
+	case *rbacv1.Role:
+		return "Role"
+	case *rbacv1.RoleBinding:
+		return "RoleBinding"
 	case *corev1.Service:
 		return "Service"
 	case *networkingv1.NetworkPolicy:
@@ -941,7 +965,7 @@ func applyAdvice(cause error) (category, message string) {
 		return "Unknown", "Gateway resource application blocked; check controller access and API availability."
 	}
 	kind := issue.resource
-	if kind != "ConfigMap" && kind != "Service" && kind != "NetworkPolicy" && kind != "Deployment" {
+	if kind != "ConfigMap" && kind != "Service" && kind != "NetworkPolicy" && kind != "Deployment" && kind != "ServiceAccount" && kind != "Role" && kind != "RoleBinding" {
 		kind = "resource"
 	}
 	switch issue.category {
@@ -1057,6 +1081,27 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *api.EgressGateway, ob
 		return &applyFailure{resource: applyResource(obj), category: "OwnershipConflict"}
 	}
 	switch desired := obj.(type) {
+	case *corev1.ServiceAccount:
+		old := existing.(*corev1.ServiceAccount)
+		if reflect.DeepEqual(old.AutomountServiceAccountToken, desired.AutomountServiceAccountToken) {
+			return nil
+		}
+		old.AutomountServiceAccountToken = desired.AutomountServiceAccountToken
+	case *rbacv1.Role:
+		old := existing.(*rbacv1.Role)
+		if reflect.DeepEqual(old.Rules, desired.Rules) {
+			return nil
+		}
+		old.Rules = desired.Rules
+	case *rbacv1.RoleBinding:
+		old := existing.(*rbacv1.RoleBinding)
+		if !reflect.DeepEqual(old.RoleRef, desired.RoleRef) {
+			return &applyFailure{resource: "RoleBinding", category: "Invalid"} // immutable roleRef
+		}
+		if reflect.DeepEqual(old.Subjects, desired.Subjects) {
+			return nil
+		}
+		old.Subjects = desired.Subjects
 	case *corev1.ConfigMap:
 		old := existing.(*corev1.ConfigMap)
 		if reflect.DeepEqual(old.Data, desired.Data) {
@@ -1105,7 +1150,7 @@ func (r *GatewayReconciler) mapAll(ctx context.Context, _ client.Object) []recon
 
 // Secret reads are uncached GETs; do not watch/list Secrets.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).For(&api.EgressGateway{}).Owns(&appsv1.Deployment{}).Owns(&corev1.ConfigMap{}).Owns(&corev1.Service{}).Owns(&networkingv1.NetworkPolicy{}).Owns(&corev1.Pod{}).
+	return ctrl.NewControllerManagedBy(mgr).For(&api.EgressGateway{}).Owns(&appsv1.Deployment{}).Owns(&corev1.ConfigMap{}).Owns(&corev1.Service{}).Owns(&corev1.ServiceAccount{}).Owns(&rbacv1.Role{}).Owns(&rbacv1.RoleBinding{}).Owns(&networkingv1.NetworkPolicy{}).Owns(&corev1.Pod{}).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapAll), builder.WithPredicates(predicate.Funcs{CreateFunc: func(event.CreateEvent) bool { return true }, DeleteFunc: func(event.DeleteEvent) bool { return true }, UpdateFunc: func(e event.UpdateEvent) bool {
 			return !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) || !reflect.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) || !reflect.DeepEqual(e.ObjectOld.(*corev1.Pod).Status, e.ObjectNew.(*corev1.Pod).Status)
 		}})).

@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,7 +33,7 @@ import (
 func fixture(t *testing.T) (*GatewayReconciler, *api.EgressGateway) {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme, discoveryv1.AddToScheme, networkingv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{api.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme, rbacv1.AddToScheme, discoveryv1.AddToScheme, networkingv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
@@ -88,8 +89,8 @@ func TestRenderSecurityAndPodIPContract(t *testing.T) {
 		t.Fatalf("invalid gateway config: %+v", cfg)
 	}
 	service := objs[1].(*corev1.Service)
-	if len(objs) != 4 {
-		t.Fatalf("expected ingress policy: %d objects", len(objs))
+	if len(objs) != 7 {
+		t.Fatalf("expected ingress policy and scoped gateway API credentials: %d objects", len(objs))
 	}
 	if len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Protocol != corev1.ProtocolUDP || service.Spec.Ports[0].Port != 6081 {
 		t.Fatalf("incorrect discovery Service: %+v", service.Spec)

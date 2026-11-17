@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -69,7 +71,7 @@ func TestGatewayProfileRenderedIsolationAndLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(legacy) != 4 || legacy[2].(*appsv1.Deployment).Name != gw.Name {
+	if len(legacy) != 7 || legacy[2].(*appsv1.Deployment).Name != gw.Name {
 		t.Fatal("legacy gateway changed")
 	}
 }
@@ -149,6 +151,89 @@ func TestOptionsFromEnvGeolocation(t *testing.T) {
 	options := OptionsFromEnv()
 	if options.GatewayGeolocationEnabled != "false" || options.GatewayGeolocationInterval != "3m" {
 		t.Fatalf("geolocation environment not propagated: %+v", options)
+	}
+}
+
+func TestGatewayConfigScopedIdentityNameBounds(t *testing.T) {
+	r, gw := fixture(t)
+	gw.Name = strings.Repeat("a", 57) // generated -config would exceed DNS label length
+	if _, err := r.render(gw, nil); err == nil {
+		t.Fatal("Gateway too long for scoped API identity accepted")
+	}
+}
+
+func TestGatewayConfigAPIIdentityAndScopedRBAC(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		profiles   bool
+	}{{"legacy-plain", "none", false}, {"profile-plain", "none", true}, {"legacy-wireguard", "wireguard", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, gw := fixture(t)
+			if tc.profiles {
+				r, gw = gatewayWithProfiles(t)
+			}
+			gw.Spec.Encryption = tc.mode
+			objects, err := r.render(gw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saName := gw.Name + "-config"
+			if tc.mode == "wireguard" {
+				saName = "ratatoskr-gateway"
+			}
+			deployments, accounts, roles, bindings := 0, 0, 0, 0
+			for _, obj := range objects {
+				switch v := obj.(type) {
+				case *appsv1.Deployment:
+					deployments++
+					pod := v.Spec.Template.Spec
+					if pod.ServiceAccountName != saName || pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+						t.Fatal("gateway used unexpected API identity or enabled default token mount")
+					}
+					if len(pod.Volumes) != 5 || pod.Volumes[4].Projected == nil {
+						t.Fatal("dedicated gateway API trust/token projection missing")
+					}
+					gateway, upstream := pod.Containers[0], pod.Containers[1]
+					vars := map[string]string{}
+					for _, entry := range gateway.Env {
+						vars[entry.Name] = entry.Value
+					}
+					if vars["GATEWAY_CONFIG_NAME"] != gw.Name || vars["GATEWAY_CONFIG_NAMESPACE"] != gw.Namespace || vars["GATEWAY_UID"] != string(gw.UID) || vars["GATEWAY_NAME"] != gw.Name {
+						t.Fatalf("untrusted API config identity: %+v", vars)
+					}
+					for _, mount := range upstream.VolumeMounts {
+						if mount.Name == "gateway-api" || mount.Name == "config" {
+							t.Fatal("upstream container received gateway API token/config")
+						}
+					}
+				case *corev1.ServiceAccount:
+					accounts++
+					if v.Name != saName || !metav1.IsControlledBy(v, gw) || v.AutomountServiceAccountToken == nil || *v.AutomountServiceAccountToken {
+						t.Fatal("unexpected plaintext Gateway ServiceAccount")
+					}
+				case *rbacv1.Role:
+					roles++
+					if v.Name != gw.Name+"-config" || !metav1.IsControlledBy(v, gw) || len(v.Rules) != 1 || len(v.Rules[0].Resources) != 1 || v.Rules[0].Resources[0] != "configmaps" || len(v.Rules[0].ResourceNames) != 1 || v.Rules[0].ResourceNames[0] != gw.Name || !reflect.DeepEqual(v.Rules[0].Verbs, []string{"get", "list", "watch"}) {
+						t.Fatal("Gateway role permits more than exact non-secret ConfigMap reads")
+					}
+				case *rbacv1.RoleBinding:
+					bindings++
+					if v.Name != gw.Name+"-config" || !metav1.IsControlledBy(v, gw) || len(v.Subjects) != 1 || v.Subjects[0].Name != saName || v.Subjects[0].Namespace != gw.Namespace || v.RoleRef.Kind != "Role" || v.RoleRef.Name != gw.Name+"-config" {
+						t.Fatal("Gateway RoleBinding subjects incorrect")
+					}
+				}
+			}
+			wantAccounts, wantDeployments := 1, 1
+			if tc.mode == "wireguard" {
+				wantAccounts = 0 // existing fixed chart account retains WG grants
+			}
+			if tc.profiles {
+				wantDeployments = 2
+			}
+			if deployments != wantDeployments || accounts != wantAccounts || roles != 1 || bindings != 1 {
+				t.Fatalf("deployments=%d accounts=%d roles=%d bindings=%d", deployments, accounts, roles, bindings)
+			}
+		})
 	}
 }
 

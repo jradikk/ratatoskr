@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -137,6 +138,9 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	if _, err := gatewayProfileNames(gw); err != nil {
 		return nil, err
 	}
+	if len(gw.Name)+len("-config") > 63 {
+		return nil, fmt.Errorf("gateway name too long for scoped API identity")
+	}
 	metricsPeer, metricsEnabled, err := r.gatewayMetricsIngress()
 	if err != nil {
 		return nil, err
@@ -224,13 +228,21 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 	// The upstream plugin retains its own default probe unless the operator
 	// explicitly selects a private endpoint (never configurable by a workload).
 	pod.Containers[1].Args = probeArgs
+	// API config source is scoped to one owner-controlled ConfigMap. Only the
+	// gateway container receives the projected token, never the upstream sidecar.
+	pod.ServiceAccountName = gw.Name + "-config"
+	pod.Volumes = append(pod.Volumes, gatewayAPIVolume())
+	gateway := &pod.Containers[0]
+	gateway.VolumeMounts = append(gateway.VolumeMounts, corev1.VolumeMount{Name: "gateway-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true})
+	gateway.Env = append(gateway.Env,
+		corev1.EnvVar{Name: "GATEWAY_CONFIG_NAME", Value: gw.Name},
+		corev1.EnvVar{Name: "GATEWAY_CONFIG_NAMESPACE", Value: gw.Namespace},
+		corev1.EnvVar{Name: "GATEWAY_UID", Value: string(gw.UID)},
+		corev1.EnvVar{Name: "GATEWAY_NAME", Value: gw.Name},
+	)
 	if mode == "wireguard" {
 		pod.ServiceAccountName = "ratatoskr-gateway"
-		pod.Volumes = append(pod.Volumes, gatewayAPIVolume())
-		gateway := &pod.Containers[0]
-		gateway.VolumeMounts = append(gateway.VolumeMounts, corev1.VolumeMount{Name: "gateway-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true})
 		gateway.Env = append(gateway.Env,
-			corev1.EnvVar{Name: "GATEWAY_NAME", Value: gw.Name},
 			corev1.EnvVar{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 			corev1.EnvVar{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 		)
@@ -302,6 +314,13 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		pod.Containers[0].Ports = append(pod.Containers[0].Ports, corev1.ContainerPort{Name: "dns-udp", ContainerPort: 1053, Protocol: corev1.ProtocolUDP}, corev1.ContainerPort{Name: "dns-tcp", ContainerPort: 1053, Protocol: corev1.ProtocolTCP})
 	}
 	objects := []client.Object{cm, svc}
+	// A namespaced Role limits gateway API reads to exactly the ConfigMap it
+	// owns. List/watch require metadata.name field selectors (resourceNames RBAC).
+	// WireGuard's fixed SA receives the union of its namespace's non-secret
+	// Gateway configs; plaintext has a per-Gateway SA with no other privileges.
+	configRoleName := gw.Name + "-config"
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: configRoleName, Namespace: gw.Namespace, OwnerReferences: owner}, Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{gw.Name}, Verbs: []string{"get", "list", "watch"}}}}
+	binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: configRoleName, Namespace: gw.Namespace, OwnerReferences: owner}, RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: configRoleName}, Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: pod.ServiceAccountName, Namespace: gw.Namespace}}}
 	if len(gw.Spec.Upstream.Profiles) == 0 {
 		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gw.Name, Namespace: gw.Namespace, Labels: selector, OwnerReferences: owner}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}, Selector: &metav1.LabelSelector{MatchLabels: selector}, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: selector}, Spec: pod}}}
 		objects = append(objects, dep)
@@ -355,5 +374,11 @@ func (r *GatewayReconciler) render(gw *api.EgressGateway, ips []netip.Addr, clus
 		dns := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gw.Name + "-dns", Namespace: gw.Namespace, OwnerReferences: owner}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, PublishNotReadyAddresses: true, Selector: selector, Ports: []corev1.ServicePort{{Name: "dns-udp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolUDP}, {Name: "dns-tcp", Port: 53, TargetPort: intstr.FromInt32(1053), Protocol: corev1.ProtocolTCP}}}}
 		objects = append(objects, dns)
 	}
+	// Preserve existing indexed Deployment/Service ordering for render callers.
+	// Reconcile applies these credentials before Deployments regardless of order.
+	if mode != "wireguard" {
+		objects = append(objects, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: configRoleName, Namespace: gw.Namespace, OwnerReferences: owner}, AutomountServiceAccountToken: &priv})
+	}
+	objects = append(objects, role, binding)
 	return append(objects, np), nil
 }

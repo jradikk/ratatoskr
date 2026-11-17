@@ -12,13 +12,19 @@ assembling permissions from this package alone.
   including Pods waiting for their datapath init barrier. An absent namespace
   selector authorizes no workloads.
 - Render an owned Deployment, discovery Service, `gateway.json` ConfigMap and
-  ingress NetworkPolicy. The selected client list is non-secret, but it is an
-  authorization input and must remain controller-owned.
+  ingress NetworkPolicy, plus a namespaced exact-ConfigMap read Role/RoleBinding.
+  Plaintext Gateways get an otherwise unprivileged per-Gateway ServiceAccount;
+  WireGuard keeps the chart's existing fixed ServiceAccount (which can read the
+  union of non-secret Gateway ConfigMaps bound to it in that namespace). Only
+  the gateway container receives a projected API token, never the upstream.
+  The selected client list is non-secret, but it is an authorization input and
+  must remain controller-owned.
 - Discover Pod/Service exclusion CIDRs and cluster DNS; publish measured MTUs,
   gateway endpoint identities and readiness conditions.
 - Read gateway port 9900 `/info` and attest its applied-config hash against the
   exact expected ConfigMap bytes and current gateway Pod UID. A ConfigMap API
-  write is not proof that its projection has been applied in the gateway netns.
+  write is not proof that its API-reader update has been applied in the gateway
+  netns; the controller still requires the gateway process's acknowledgment.
 - Reconcile init-driver completion and applied-client acknowledgments. In agent
   mode the node agent owns workload datapath readiness instead.
 

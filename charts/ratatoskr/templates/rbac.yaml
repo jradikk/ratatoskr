@@ -23,6 +23,15 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Each Gateway owns a plaintext ServiceAccount and an exact-ConfigMap Role
+  # and RoleBinding; WireGuard keeps its fixed account with these same
+  # non-secret namespaced ConfigMap read grants. No Secret grants are added.
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, watch, create, update, patch]
   # Verify Pod -> ReplicaSet -> controlled Deployment before trusting a
   # public registration CA/WireGuard key from the Pod's annotations.
   - apiGroups: [apps]

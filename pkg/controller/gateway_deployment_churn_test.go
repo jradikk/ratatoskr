@@ -80,7 +80,8 @@ func TestDefaultedOwnedGatewayDeploymentDoesNotUpdateOrRecreate(t *testing.T) {
 	*live.Spec.Template.Spec.TerminationGracePeriodSeconds = 30
 	live.Spec.Template.Spec.EnableServiceLinks = new(bool)
 	*live.Spec.Template.Spec.EnableServiceLinks = true
-	live.Spec.Template.Spec.ServiceAccountName = "default"
+	// The API-backed config source now requires a dedicated Gateway identity.
+	// Kubernetes does not default an explicitly selected ServiceAccount.
 	for i := range live.Spec.Template.Spec.Containers {
 		c := &live.Spec.Template.Spec.Containers[i]
 		c.TerminationMessagePath = "/dev/termination-log"
