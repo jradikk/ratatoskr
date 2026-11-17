@@ -475,6 +475,9 @@ func run(ctx context.Context, configPath string) error {
 	defer tick.Stop()
 	reconciler := &gatewayReconciler{current: &current, podUID: podUID, cfg: cfg, apply: applyGateway}
 	defer reconciler.invalidate()
+	var loggedHash string
+	var loggedReady bool
+	logger.Info("gateway starting; waiting for validated config and upstream")
 	for {
 		err := reconciler.refresh(ctx,
 			readConfig,
@@ -482,6 +485,11 @@ func run(ctx context.Context, configPath string) error {
 			func(encryption string) (state, error) { return probe(client, encryption) })
 		if err != nil {
 			logger.Error("gateway refresh failed", "error", err)
+		}
+		published := current.Load().(state)
+		if published.appliedClientConfigHash != loggedHash || published.ready != loggedReady {
+			logger.Info("gateway configuration progress", "applied", published.appliedClientConfigHash != "", "ready", published.ready)
+			loggedHash, loggedReady = published.appliedClientConfigHash, published.ready
 		}
 		select {
 		case <-ctx.Done():

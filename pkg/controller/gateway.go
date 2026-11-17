@@ -775,7 +775,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	interval, waiting := gatewayAckRetry(ips, gw.Status.Endpoints, expectedAppliedHash)
 	if waiting > 0 {
-		log.FromContext(ctx).V(1).Info("gateway waiting for applied client config", "gateway", gw.Namespace+"/"+gw.Name, "pendingGatewayPods", waiting, "selectedClients", len(ips), "retryAfter", interval.String())
+		log.FromContext(ctx).Info("gateway waiting for applied client config", "gateway", gw.Namespace+"/"+gw.Name, "pendingGatewayPods", waiting, "selectedClients", len(ips), "retryAfter", interval.String())
 	}
 	return ctrl.Result{RequeueAfter: interval}, nil
 }
