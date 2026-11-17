@@ -203,6 +203,66 @@ type Reconciler struct {
 	domains     map[string]*domainRuntime
 	domainLocks map[string]*sync.Mutex
 	domainOps   *domainOperations
+	// Startup progress is per selected Pod UID, bounded to one log per second.
+	// The short resync is enabled only while selected Pods are still pending.
+	startupMu      sync.Mutex
+	startup        map[string]startupProgress
+	pendingStartup atomic.Bool
+}
+
+type startupProgress struct {
+	stage         string
+	started, last time.Time
+}
+
+func (r *Reconciler) startupStage(pod *corev1.Pod, stage string) {
+	if r == nil || pod == nil || pod.UID == "" {
+		return
+	}
+	switch stage {
+	case "waiting-sandbox", "waiting-gateway", "waiting-config-ack", "programming", "ready", "failed":
+	default:
+		return // never print a dynamic API/CRI/DNS error or private config
+	}
+	now := time.Now()
+	uid := string(pod.UID)
+	r.startupMu.Lock()
+	if r.startup == nil {
+		r.startup = make(map[string]startupProgress)
+	}
+	progress, exists := r.startup[uid]
+	if !exists && (stage == "ready" || stage == "failed") {
+		r.startupMu.Unlock()
+		return
+	}
+	if !exists {
+		progress.started = now
+	}
+	changed := !exists || progress.stage != stage
+	if !changed && now.Sub(progress.last) < time.Second {
+		r.startupMu.Unlock()
+		return
+	}
+	progress.stage, progress.last = stage, now
+	if stage == "ready" || stage == "failed" {
+		delete(r.startup, uid)
+	} else {
+		r.startup[uid] = progress
+	}
+	r.startupMu.Unlock()
+	if r.Log != nil {
+		r.Log.Info("selected workload startup", "stage", stage, "podUID", uid,
+			"elapsedMs", now.Sub(progress.started).Milliseconds())
+	}
+}
+
+func (r *Reconciler) clearStartup(uid string) {
+	if uid == "" {
+		return
+	}
+	r.startupMu.Lock()
+	delete(r.startup, uid)
+	r.startupMu.Unlock()
 }
 
 // observeProgram wraps only a completed namespace datapath/marker operation;
@@ -222,6 +282,8 @@ func (r *Reconciler) pendingGateway(ctx context.Context, pod *corev1.Pod, target
 	if err := recheckSandbox(ctx, r.CRI, proof, target); err != nil {
 		return fmt.Errorf("recheck sandbox before gateway ack withdrawal: %w", err)
 	}
+	r.pendingStartup.Store(true)
+	r.startupStage(pod, "waiting-gateway")
 	if err := r.observeProgram(observability.AgentClosed, func() error {
 		return ProgramClosed(ctx, target, cfg, factory)
 	}); err != nil {
@@ -257,10 +319,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 		}
 		return errors.New("selected domain Pod refresh failed")
 	}
-	if pod.Spec.NodeName != r.Node || pod.Spec.HostNetwork || pod.UID == "" || pod.Status.PodIP == "" {
+	if pod.Spec.NodeName != r.Node || pod.Spec.HostNetwork || pod.UID == "" {
+		return nil
+	}
+	if pod.Status.PodIP == "" {
+		if pod.Labels[GatewayLabel] != "" && pod.DeletionTimestamp == nil {
+			r.pendingStartup.Store(true)
+			r.startupStage(pod, "waiting-sandbox")
+		}
 		return nil
 	}
 	if pod.Annotations[QuarantineReasonAnnotation] != "" {
+		r.startupStage(pod, "failed")
 		// A quarantine is persistent, not a transient endpoint closure. Do
 		// not reprogram this Pod after a later API recovery; recreate it.
 		return nil
@@ -269,6 +339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	selected := pod.Labels[GatewayLabel] != "" && pod.DeletionTimestamp == nil
 	if !selected && existing == "" {
 		r.retireDomain(string(pod.UID))
+		r.clearStartup(string(pod.UID))
 		return nil
 	}
 	mode := backendMode(r.Datapath)
@@ -390,10 +461,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	if !removing {
 		if !cfg.Endpoint.IsValid() {
 			r.retireDomain(string(pod.UID))
+			r.startupStage(pod, "waiting-gateway")
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
 			r.retireDomain(string(pod.UID))
+			r.startupStage(pod, "waiting-config-ack")
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
 	}
@@ -462,8 +535,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	if !removing {
 		if acknowledged, _ := r.verifyFreshAck(ctx, gatewayKey, &gw, cfg); !acknowledged {
 			r.retireDomain(string(pod.UID))
+			r.startupStage(pod, "waiting-config-ack")
 			return r.pendingGateway(ctx, pod, target, sandboxProof, cfg, factory)
 		}
+	}
+	if !removing {
+		r.startupStage(pod, "programming")
 	}
 	operation := observability.AgentUsable
 	if removing {
@@ -501,6 +578,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 			if r.Log != nil && errors.As(err, &startup) {
 				r.Log.Warn("DNS startup blocked; verify gateway resolver, namespace socket permissions and listener conflicts", "stage", startup.stage, "category", startup.category)
 			}
+			r.startupStage(pod, "failed")
 			if r.domainRuntime(string(pod.UID)) == nil {
 				if fenceErr := r.domainOperations().quarantine(target, cfg.PodIP); fenceErr != nil {
 					return errors.New("domain startup quarantine failed")
@@ -521,6 +599,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	r.retireDomain(string(pod.UID))
 	hash := HashForMode(cfg, mode)
 	if existing == hash && pod.Annotations[ReadyAnnotation] == "true" {
+		r.startupStage(pod, "ready")
 		return nil
 	}
 	original := pod.DeepCopy()
@@ -530,7 +609,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, pod *corev1.Pod) (result err
 	raw, _ := json.Marshal(cfg)
 	pod.Annotations[ConfigAnnotation] = string(raw)
 	pod.Annotations[ReadyAnnotation] = "true"
-	return r.Client.Patch(ctx, pod, client.MergeFrom(original))
+	if err := r.Client.Patch(ctx, pod, client.MergeFrom(original)); err != nil {
+		r.startupStage(pod, "failed")
+		return err
+	}
+	r.startupStage(pod, "ready")
+	return nil
 }
 func copyAnnotations(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in)+2)
@@ -549,11 +633,18 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	// Only a selected unresolved Pod enables this short fallback; API watches
+	// continue to wake reconciliation immediately when available.
+	pendingTicker := time.NewTicker(500 * time.Millisecond)
+	defer pendingTicker.Stop()
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
 		watchCtx, cancel := context.WithCancel(ctx)
+		// Kept explicit even if a pending tick skips directly to the next
+		// iteration; never leave prior watch context live across retries.
+		_ = cancel // explicitly cancelled after each select, including pending ticks.
 		pods, err := r.WatchClient.Watch(watchCtx, &corev1.PodList{}, client.MatchingFields{"spec.nodeName": r.Node})
 		var gateways, policies watch.Interface
 		if err == nil {
@@ -565,6 +656,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		if err != nil {
 			r.Log.Error("node API watch unavailable; retrying", "error", err)
 		}
+		r.pendingStartup.Store(false)
 		syncErr := r.Sync(ctx)
 		if r.Ready != nil {
 			r.Ready.Store(agentReadyAfterSync(syncErr, err))
@@ -576,6 +668,10 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 			case <-ticker.C:
+			case <-pendingTicker.C:
+				if !r.pendingStartup.Load() {
+					continue
+				}
 			case _, ok := <-pods.ResultChan():
 				if !ok {
 					if r.Ready != nil {
