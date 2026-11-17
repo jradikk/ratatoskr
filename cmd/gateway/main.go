@@ -248,6 +248,17 @@ func readGatewayConfigSnapshot(configPath string) (datapath.GatewayConfig, strin
 	if len(raw) > 1<<20 {
 		return cfg, "", errors.New("gateway config exceeds 1 MiB")
 	}
+	return decodeGatewayConfigSnapshot(raw, os.Getenv("POD_IP"))
+
+}
+
+// decodeGatewayConfigSnapshot hashes exactly the validated input bytes. Both
+// projected files and direct API ConfigMap data use this same acknowledgment.
+func decodeGatewayConfigSnapshot(raw []byte, podIP string) (datapath.GatewayConfig, string, error) {
+	var cfg datapath.GatewayConfig
+	if len(raw) > 1<<20 {
+		return cfg, "", errors.New("gateway config exceeds 1 MiB")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
@@ -258,10 +269,11 @@ func readGatewayConfigSnapshot(configPath string) (datapath.GatewayConfig, strin
 		return cfg, "", errors.New("multiple gateway config documents are forbidden")
 	}
 	if !cfg.PodIP.IsValid() {
-		cfg.PodIP, err = netip.ParseAddr(os.Getenv("POD_IP"))
+		ip, err := netip.ParseAddr(podIP)
 		if err != nil {
 			return cfg, "", errors.New("podIP config or POD_IP environment is required")
 		}
+		cfg.PodIP = ip
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, "", err
@@ -295,10 +307,32 @@ func run(ctx context.Context, configPath string) error {
 	if err := platform.CheckKernel(); err != nil {
 		return err
 	}
-	if configPath == "" {
-		return errors.New("-config is required")
+	source, err := configSourceFromEnv(ctx)
+	if err != nil {
+		return err
 	}
-	cfg, err := readGatewayConfig(configPath)
+	if configPath == "" && source == nil {
+		return errors.New("-config is required without gateway API config identity")
+	}
+	readConfig := func() (datapath.GatewayConfig, string, error) {
+		if source != nil {
+			return source.Snapshot()
+		}
+		return readGatewayConfigSnapshot(configPath)
+	}
+	cfg, _, err := readConfig()
+	if source != nil && err != nil {
+		// Startup source failure is not permission to use a stale projection.
+		// Retry bounded GET/watch while there is no known valid client set.
+		for err != nil && ctx.Err() == nil {
+			select {
+			case <-source.notify:
+			case <-time.After(250 * time.Millisecond):
+			case <-ctx.Done():
+			}
+			cfg, _, err = readConfig()
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -343,7 +377,7 @@ func run(ctx context.Context, configPath string) error {
 		if !published.ready || published.appliedClientConfigHash == "" {
 			return nil, nil, errors.New("gateway client scope not ready")
 		}
-		applied, hash, err := readGatewayConfigSnapshot(configPath)
+		applied, hash, err := readConfig()
 		if err != nil || hash != published.appliedClientConfigHash || current.Load().(state) != published {
 			return nil, nil, errors.New("gateway client scope does not match applied config")
 		}
@@ -443,7 +477,7 @@ func run(ctx context.Context, configPath string) error {
 	defer reconciler.invalidate()
 	for {
 		err := reconciler.refresh(ctx,
-			func() (datapath.GatewayConfig, string, error) { return readGatewayConfigSnapshot(configPath) },
+			readConfig,
 			clampGatewayMTU,
 			func(encryption string) (state, error) { return probe(client, encryption) })
 		if err != nil {
@@ -457,6 +491,7 @@ func run(ctx context.Context, configPath string) error {
 			_ = reconciler.failClosed(context.Background(), false)
 			return fmt.Errorf("gateway service failed: %w", err)
 		case <-tick.C:
+		case <-sourceWake(source):
 		}
 	}
 
