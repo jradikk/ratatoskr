@@ -7,11 +7,9 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -73,6 +71,7 @@ type GatewayReconciler struct {
 	APIReader  client.Reader
 	Recorder   events.EventRecorder
 	Options    Options
+	healthLogs gatewayHealthLogState
 	HTTPClient *http.Client
 	// ReadResolver is injectable for deterministic cluster-DNS discovery tests;
 	// production reads the controller Pod's kubelet-provided resolv.conf.
@@ -653,6 +652,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		ep := api.GatewayEndpoint{PodName: p.Name, PodIP: p.Status.PodIP, PodUID: string(p.UID)}
 		if podReady(p) {
 			info, e := r.info(ctx, p.Status.PodIP)
+			r.reportGatewayProbe(ctx, p.Name, string(p.UID), e)
 			if e == nil && info.Ready && net.ParseIP(info.ExitIP) != nil && (info.PodUID == "" || info.PodUID == string(p.UID)) {
 				publicIdentityReady := true
 				if gw.Spec.Encryption == "wireguard" {
@@ -876,10 +876,7 @@ func (r *GatewayReconciler) info(ctx context.Context, ip string) (gatewayInfo, e
 	if err != nil || !addr.Is4() {
 		return info, fmt.Errorf("invalid gateway PodIP")
 	}
-	c := r.HTTPClient
-	if c == nil {
-		c = &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	}
+	c := r.gatewayHTTPClient()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(ip, "9900")+"/info", nil)
 	if err != nil {
 		return info, err
@@ -888,12 +885,7 @@ func (r *GatewayReconciler) info(ctx context.Context, ip string) (gatewayInfo, e
 	if err != nil {
 		return info, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return info, fmt.Errorf("gateway info unhealthy")
-	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&info)
-	return info, err
+	return info, decodeGatewayInfo(resp, &info)
 }
 
 // applyFailure retains the internal API error for classification while every
