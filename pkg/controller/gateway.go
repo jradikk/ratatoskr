@@ -484,6 +484,27 @@ func expectedGatewayConfigHash(objects []client.Object, gw *api.EgressGateway) (
 	return "", fmt.Errorf("owner-controlled rendered gateway ConfigMap unavailable")
 }
 
+// gatewayAckRetry only accelerates the short window where selected clients
+// have a healthy, owner-attested gateway whose latest config is not yet
+// acknowledged. Unhealthy upstreams and idle gateways keep the normal poll;
+// neither a missing Pod nor an untrusted /info response proves application.
+func gatewayAckRetry(selected []netip.Addr, endpoints []api.GatewayEndpoint, expectedHash string) (time.Duration, int) {
+	const regular = 10 * time.Second
+	if len(selected) == 0 || expectedHash == "" {
+		return regular, 0
+	}
+	waiting := 0
+	for _, endpoint := range endpoints {
+		if endpoint.UpstreamHealthy && endpoint.AppliedClientConfigHash != expectedHash {
+			waiting++
+		}
+	}
+	if waiting > 0 {
+		return 500 * time.Millisecond, waiting
+	}
+	return regular, 0
+}
+
 // validGatewayAck never trusts a stale /info response from an old Pod at a
 // reused PodIP. An ack is published only for the current managed Pod UID and
 // the exact desired ConfigMap bytes; upstream health is evaluated separately.
@@ -752,7 +773,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		}
 	}
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	interval, waiting := gatewayAckRetry(ips, gw.Status.Endpoints, expectedAppliedHash)
+	if waiting > 0 {
+		log.FromContext(ctx).V(1).Info("gateway waiting for applied client config", "gateway", gw.Namespace+"/"+gw.Name, "pendingGatewayPods", waiting, "selectedClients", len(ips), "retryAfter", interval.String())
+	}
+	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
 // removeOwnedGatewayMetrics retires only the exact Gateway-controlled metrics

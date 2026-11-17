@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	api "github.com/skaldhall/ratatoskr/api/v1alpha1"
 	"github.com/skaldhall/ratatoskr/pkg/datapath"
@@ -470,10 +471,14 @@ func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
 	})}
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}}
-	fetch := func() api.GatewayEndpoint {
+	fetch := func(wantRetry time.Duration) api.GatewayEndpoint {
 		t.Helper()
-		if _, err := r.Reconcile(ctx, request); err != nil {
+		requeue, err := r.Reconcile(ctx, request)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if requeue.RequeueAfter != wantRetry {
+			t.Fatalf("requeue interval=%v, want %v", requeue.RequeueAfter, wantRetry)
 		}
 		var result api.EgressGateway
 		if err := r.Get(ctx, request.NamespacedName, &result); err != nil {
@@ -484,7 +489,7 @@ func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
 		}
 		return result.Status.Endpoints[0]
 	}
-	ep := fetch()
+	ep := fetch(10 * time.Second) // no selected clients despite healthy upstream
 	if ep.PodUID != string(pod.UID) || ep.AppliedClientConfigHash != "" {
 		t.Fatalf("ready upstream with no ack not represented independently: %+v", ep)
 	}
@@ -495,20 +500,104 @@ func TestGatewayAckDoesNotChangeUpstreamHealthDecision(t *testing.T) {
 	sum := sha256.Sum256([]byte(cm.Data["gateway.json"]))
 	want := hex.EncodeToString(sum[:])
 	current.AppliedClientConfigHash = want
-	ep = fetch()
+	ep = fetch(10 * time.Second)
 	if ep.AppliedClientConfigHash != want {
 		t.Fatalf("current applied hash not acknowledged: %+v", ep)
 	}
 	current.AppliedClientConfigHash = strings.Repeat("b", 64)
-	ep = fetch()
+	ep = fetch(10 * time.Second)
 	if ep.AppliedClientConfigHash != "" {
 		t.Fatal("stale hash persisted")
 	}
 	current.AppliedClientConfigHash = want
 	current.PodUID = "old-pod"
-	ep = fetch()
+	ep = fetch(10 * time.Second)
 	if ep.AppliedClientConfigHash != "" || ep.UpstreamHealthy {
 		t.Fatalf("old Pod identity was trusted: %+v", ep)
+	}
+}
+
+func TestGatewaySelectedWorkloadAcceleratesHealthyPendingAcknowledgment(t *testing.T) {
+	r, gw := fixture(t)
+	r.Options.Driver = "agent"
+	gw.Spec.AllowedNamespaces.NamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"team": "red"}}
+	ctx := context.Background()
+	if err := r.Update(ctx, gw); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(gw), gw); err != nil {
+		t.Fatal(err)
+	}
+	gw.Status.GatewayID = 42
+	if err := r.Status().Update(ctx, gw); err != nil {
+		t.Fatal(err)
+	}
+	selected := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "selected", Namespace: "apps", UID: "selected-uid", Labels: map[string]string{GatewayLabel: gw.Name}}, Status: corev1.PodStatus{PodIP: "10.3.2.4"}}
+	if err := r.Create(ctx, selected); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(ctx, selected); err != nil {
+		t.Fatal(err)
+	}
+	createOwnedReplicaSet(t, r, gw)
+	gatewayPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-1", Namespace: gw.Namespace, UID: "gateway-pod-uid", Labels: map[string]string{ownerUIDLabel: string(gw.UID), IdentityLabel: gw.Name}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "edge-rs", UID: "rs-uid"}}, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}}, Status: corev1.PodStatus{PodIP: "10.42.0.5", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+	if err := r.Create(ctx, gatewayPod); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Status().Update(ctx, gatewayPod); err != nil {
+		t.Fatal(err)
+	}
+	observation := gatewayInfo{ExitIP: "198.51.100.9", Ready: true, PodMTU: 1500, GeneveMTU: 1450, UpstreamMTU: 1400, EffectiveMTU: 1400, MSS: 1360, PodUID: string(gatewayPod.UID)}
+	r.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		data, _ := json.Marshal(observation)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(data)), Header: http.Header{}}, nil
+	})}
+	if ips, err := r.selected(ctx, gw); err != nil || len(ips) != 1 {
+		t.Fatalf("fixture selected Pod not found: %v %v", ips, err)
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}}
+	result, err := r.Reconcile(ctx, req)
+	if err != nil || result.RequeueAfter != 500*time.Millisecond {
+		t.Fatalf("healthy selected Pod without applied ack requeue=%v err=%v", result.RequeueAfter, err)
+	}
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}, &cm); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(cm.Data["gateway.json"]))
+	observation.AppliedClientConfigHash = hex.EncodeToString(sum[:])
+	result, err = r.Reconcile(ctx, req)
+	if err != nil || result.RequeueAfter != 10*time.Second {
+		t.Fatalf("latest applied ack did not restore normal requeue=%v err=%v", result.RequeueAfter, err)
+	}
+}
+
+func TestGatewayAckRetryOnlyForSelectedClientsWithHealthyStaleAck(t *testing.T) {
+	current := strings.Repeat("a", 64)
+	stale := strings.Repeat("b", 64)
+	clientIP := netip.MustParseAddr("10.3.2.4")
+	for _, tc := range []struct {
+		name      string
+		selected  []netip.Addr
+		endpoints []api.GatewayEndpoint
+		expected  string
+		want      time.Duration
+		count     int
+	}{
+		{"healthy waiting", []netip.Addr{clientIP}, []api.GatewayEndpoint{{UpstreamHealthy: true}}, current, 500 * time.Millisecond, 1},
+		{"healthy stale", []netip.Addr{clientIP}, []api.GatewayEndpoint{{UpstreamHealthy: true, AppliedClientConfigHash: stale}, {UpstreamHealthy: true, AppliedClientConfigHash: current}}, current, 500 * time.Millisecond, 1},
+		{"healthy latest", []netip.Addr{clientIP}, []api.GatewayEndpoint{{UpstreamHealthy: true, AppliedClientConfigHash: current}}, current, 10 * time.Second, 0},
+		{"no selected clients", nil, []api.GatewayEndpoint{{UpstreamHealthy: true}}, current, 10 * time.Second, 0},
+		{"all upstreams down", []netip.Addr{clientIP}, []api.GatewayEndpoint{{AppliedClientConfigHash: stale}, {}}, current, 10 * time.Second, 0},
+		{"no endpoints yet", []netip.Addr{clientIP}, nil, current, 10 * time.Second, 0},
+		{"missing expected hash", []netip.Addr{clientIP}, []api.GatewayEndpoint{{UpstreamHealthy: true}}, "", 10 * time.Second, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, count := gatewayAckRetry(tc.selected, tc.endpoints, tc.expected)
+			if got != tc.want || count != tc.count {
+				t.Fatalf("retry=%v pending=%d; want retry=%v pending=%d", got, count, tc.want, tc.count)
+			}
+		})
 	}
 }
 
